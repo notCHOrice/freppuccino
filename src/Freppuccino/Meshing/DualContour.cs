@@ -13,9 +13,13 @@ namespace Freppuccino.Meshing;
 /// Dual Contouring, Schaefer et al. 2007), which keeps the mesh manifold where plain Dual Contouring
 /// pinches sheets together.
 ///
+/// Fold-overs: letting a vertex leave its cell keeps creases sharp but can fold a triangle over its
+/// neighbour, which shows up as a self-intersection. Quads are split along the diagonal that does not
+/// fold, and merges whose vertex still ends up in a folded triangle are undone.
+///
 /// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed
-/// and seams where primitives intersect are only as good as the resolution; triangles can
-/// self-intersect near sharp features.
+/// and seams where primitives meet nearly tangent are only as good as the resolution. Self-intersection
+/// is not ruled out, only what the fold test catches.
 ///
 /// Tunnel faces: when both cells sharing a four-crossing face route all four crossings through one
 /// sheet, the surface passes through that face as two strips joining the same two cell vertices, so
@@ -233,6 +237,14 @@ public static class DualContour
         var octree = new Octree(g, index, vertices, quadrics, tris, sources);
         octree.Build(simplify * h);
         octree.Contour();
+        // A merged cell's one vertex can fold the triangles that join it to finer neighbours along a
+        // crease. Undo those merges and contour again; a few rounds settle it.
+        for (int round = 0; round < 8 && simplify > 0 && octree.UnmergeFolded() > 0; round++)
+        {
+            tris.Clear();
+            sources.Clear();
+            octree.Contour();
+        }
         RepairTunnels(g, vertices, tris, sources);
 
         // Merging leaves the vertices of merged cells unused.
@@ -400,6 +412,26 @@ public static class DualContour
             return loops;
         }
 
+        /// Undoes every merge whose vertex is part of a folded triangle (normal against the field's
+        /// gradient). Returns how many merges were undone; the caller contours again.
+        public int UnmergeFolded()
+        {
+            var owner = new Dictionary<int, long>();
+            foreach (var (key, vertex) in merged) owner[vertex] = key;
+            var undo = new HashSet<long>();
+            for (int t = 0; t < tris.Count; t += 3)
+            {
+                int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+                bool ma = owner.ContainsKey(a), mb = owner.ContainsKey(b), mc = owner.ContainsKey(c);
+                if (!(ma || mb || mc) || Facing(a, b, c) >= 0) continue;
+                if (ma) undo.Add(owner[a]);
+                if (mb) undo.Add(owner[b]);
+                if (mc) undo.Add(owner[c]);
+            }
+            foreach (long key in undo) merged.Remove(key);
+            return undo.Count;
+        }
+
         public void Contour() => CellProc(new Node(levels, 0, 0, 0));
 
         // Axis d = 0, 1, 2; the other two in cyclic order, so that d = p × q.
@@ -481,6 +513,19 @@ public static class DualContour
             }
         }
 
+        /// Cosine between a triangle's normal and the field's gradient at its centroid; 1 for a
+        /// degenerate triangle, which cannot fold.
+        double Facing(int a, int b, int c)
+        {
+            V3 pa = vertices[a], pb = vertices[b], pc = vertices[c];
+            var n = V3.Cross(pb - pa, pc - pa);
+            double area = n.Length;
+            if (area < 1e-12 * g.H * g.H) return 1;
+            var grad = g.Field.Gradient((pa + pb + pc) * (1.0 / 3), 1e-5 * g.H);
+            double len = grad.Length;
+            return len > 0 ? V3.Dot(n, grad) / (area * len) : 1;
+        }
+
         // Which of a finest cell's 12 edges is the shared one, per quadrant around an edge along d.
         static readonly int[][] EdgeInQuadrant = [[3, 2, 0, 1], [7, 5, 4, 6], [11, 10, 8, 9]];
 
@@ -546,6 +591,11 @@ public static class DualContour
             // the quad becomes a triangle edge rather than being cut across.
             int a = poly[0], b = poly[1], c = poly[2], e = poly[3];
             double ac = Math.Abs(g.Field.Value((vertices[a] + vertices[c]) * 0.5)), be = Math.Abs(g.Field.Value((vertices[b] + vertices[e]) * 0.5));
+            // But never pick a split that folds a triangle over (its normal against the field's gradient)
+            // when the other split does not.
+            double viaAc = Math.Min(Facing(a, b, c), Facing(a, c, e)), viaBe = Math.Min(Facing(a, b, e), Facing(b, c, e));
+            if (viaAc < 0 && viaBe > viaAc + 0.2) ac = double.MaxValue;
+            else if (viaBe < 0 && viaAc > viaBe + 0.2) be = double.MaxValue;
             if (ac <= be) { tris.Add(a); tris.Add(b); tris.Add(c); tris.Add(a); tris.Add(c); tris.Add(e); }
             else { tris.Add(a); tris.Add(b); tris.Add(e); tris.Add(b); tris.Add(c); tris.Add(e); }
             sources.Add(source);

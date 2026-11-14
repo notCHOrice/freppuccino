@@ -205,8 +205,54 @@ public sealed class FrepField
     public (V3 Min, V3 Max) Bounds()
     {
         Seal();
+        // The level each primitive and node is asked for. Nodes are in creation order, operands first,
+        // so one pass from the last node down reaches every operand after all of its users. A node used
+        // at several levels takes the largest, which only widens the result, and each is visited once
+        // however much of the graph is shared.
+        double none = double.NegativeInfinity;
+        var primLevel = new double[prims.Count];
+        var nodeLevel = new double[nodes.Count];
+        Array.Fill(primLevel, none);
+        Array.Fill(nodeLevel, none);
+        void Ask(FieldRef r, double t)
+        {
+            var level = r.IsNode ? nodeLevel : primLevel;
+            level[r.Index] = Math.Max(level[r.Index], t);
+        }
+        foreach (var r in roots) Ask(r, 0);
+        for (int i = nodes.Count - 1; i >= 0; i--)
+        {
+            double t = nodeLevel[i];
+            if (t == none) continue;
+            var n = nodes[i];
+            if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
+            double d = n.Op == FieldOp.Union && n.Operands.Length > 1 ? Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25) : 0;
+            foreach (var o in n.Operands) Ask(o, t + d);
+        }
+
+        var nodeBox = new (V3 Min, V3 Max)[nodes.Count];
+        (V3 Min, V3 Max) Box(FieldRef r) => r.IsNode ? nodeBox[r.Index] : PrimBounds(prims[r.Index], primLevel[r.Index]);
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            nodeBox[i] = Empty;
+            if (nodeLevel[i] == none) continue;
+            var n = nodes[i];
+            var box = Box(n.Operands[0]);
+            if (n.Op == FieldOp.Union)
+                for (int o = 1; o < n.Operands.Length; o++) box = Join(box, Box(n.Operands[o]));
+            else if (n.Op == FieldOp.Intersect)
+                for (int o = 1; o < n.Operands.Length; o++)
+                {
+                    var other = Box(n.Operands[o]);
+                    box = (
+                        new V3(Math.Max(box.Min.X, other.Min.X), Math.Max(box.Min.Y, other.Min.Y), Math.Max(box.Min.Z, other.Min.Z)),
+                        new V3(Math.Min(box.Max.X, other.Max.X), Math.Min(box.Max.Y, other.Max.Y), Math.Min(box.Max.Z, other.Max.Z)));
+                }
+            nodeBox[i] = IsEmpty(box) ? Empty : box;
+        }
+
         var all = Empty;
-        foreach (var r in roots) all = Join(all, Sublevel(r, 0));
+        foreach (var r in roots) all = Join(all, Box(r));
         return all;
     }
 
@@ -219,30 +265,6 @@ public sealed class FrepField
     static (V3 Min, V3 Max) Join((V3 Min, V3 Max) a, (V3 Min, V3 Max) b) => (
         new V3(Math.Min(a.Min.X, b.Min.X), Math.Min(a.Min.Y, b.Min.Y), Math.Min(a.Min.Z, b.Min.Z)),
         new V3(Math.Max(a.Max.X, b.Max.X), Math.Max(a.Max.Y, b.Max.Y), Math.Max(a.Max.Z, b.Max.Z)));
-
-    /// Bounds of {field of <paramref name="r"/> <= <paramref name="t"/>}, t >= 0.
-    (V3 Min, V3 Max) Sublevel(FieldRef r, double t)
-    {
-        if (!r.IsNode) return PrimBounds(prims[r.Index], t);
-        var n = nodes[r.Index];
-        if (n.Op == FieldOp.Difference) return Sublevel(n.Operands[0], t);
-        if (n.Op == FieldOp.Union)
-        {
-            double d = n.Operands.Length < 2 ? 0 : Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25);
-            var box = Empty;
-            foreach (var o in n.Operands) box = Join(box, Sublevel(o, t + d));
-            return box;
-        }
-        var overlap = Sublevel(n.Operands[0], t);
-        for (int o = 1; o < n.Operands.Length; o++)
-        {
-            var other = Sublevel(n.Operands[o], t);
-            overlap = (
-                new V3(Math.Max(overlap.Min.X, other.Min.X), Math.Max(overlap.Min.Y, other.Min.Y), Math.Max(overlap.Min.Z, other.Min.Z)),
-                new V3(Math.Min(overlap.Max.X, other.Max.X), Math.Min(overlap.Max.Y, other.Max.Y), Math.Min(overlap.Max.Z, other.Max.Z)));
-        }
-        return IsEmpty(overlap) ? Empty : overlap;
-    }
 
     /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
     static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
