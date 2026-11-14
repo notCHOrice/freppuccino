@@ -2,6 +2,7 @@ using System.Text;
 using Freppuccino.Csg;
 using Freppuccino.Scene;
 using Rhino.Display;
+using Rhino.Geometry;
 
 namespace Freppuccino.Shaders;
 
@@ -13,8 +14,8 @@ namespace Freppuccino.Shaders;
 /// union skips them, intersect becomes empty, difference with missing base becomes empty.
 public static class FrepShaderGen
 {
-    /// Uniform header = 6 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
-    const int HeaderRows = 6;
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
+    const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
@@ -22,6 +23,10 @@ public static class FrepShaderGen
     static int KRows(int nodes) => (nodes + 3) / 4;
     /// Rows left for prims once every node's k has a slot.
     public static int PrimRowBudget(int nodes) => MaxDataRows - KRows(nodes);
+
+    /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
+    /// A uniform, so changing it never recompiles.
+    public const double SilhouetteInsetPx = 1.0;
 
     static readonly Dictionary<string, ShaderSource> cache = [];
 
@@ -38,7 +43,7 @@ public static class FrepShaderGen
             SdKind.Cylinder => $"sdCappedCylinder({q}, {o}.w, {x}.w)",
             SdKind.Cone => $"sdCappedCone({q}, {o}.w, {x}.w, {y}.w)",
             SdKind.Ellipsoid => $"sdEllipsoid({q}, vec3({o}.w, {x}.w, {y}.w))",
-            SdKind.Pyramid => $"sdPyramid({q}, {o}.w, {x}.w)",
+            SdKind.Pyramid => $"sdPyramidScaled({q}, {o}.w, {x}.w)",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
     }
@@ -137,7 +142,8 @@ public static class FrepShaderGen
             vec4 camY;       // xyz unit up
             vec4 camZ;       // xyz unit view direction; w = near
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
-            vec4 params;     // x unused, y = eps per unit t, z = eps const, w = far
+            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
+            vec4 bound;      // xyz center, w radius: sphere enclosing every prim (+ smooth-union growth); w <= 0 = empty
             // prims, then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
@@ -189,18 +195,36 @@ public static class FrepShaderGen
             float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
             return s * sqrt(min(dot2(ca), dot2(cb)));
         }
-        // Not IQ's sdEllipsoid / sdPyramid: those jump in value (at the ellipsoid's centre, across the
-        // pyramid's base), which breaks smooth CSG and meshing. These have the exact surface and change by
-        // at most 1 per unit distance. Keep in sync with Meshing/FrepField.cs.
+        // Not IQ's sdEllipsoid: its value at the centre depends on the direction of approach, which breaks
+        // smooth CSG and meshing. This has the exact surface and changes by at most 1 per unit distance,
+        // but it underestimates distance. Keep in sync with Meshing/FrepField.cs.
         float sdEllipsoid(vec3 p, vec3 r) // unit sphere scaled by r, times the smallest semi-axis
         {
             return (length(p / r) - 1.0) * min(r.x, min(r.y, r.z));
         }
-        float sdPyramid(vec3 p, float h, float s) // base side s centered at the origin, apex at (0, h, 0)
+        // Unit square base centered at the origin, apex at (0, h, 0).
+        // IQ's version measures distance to the four slanted faces only; the base enters just through the sign.
+        // Below the base that overestimates (the ray steps through the floor and stops inside), and just above it
+        // the interior distance ignores the floor (normals there point at the side faces). Both patched at the end.
+        float sdPyramid(vec3 p, float h)
         {
-            float b = 0.5 * s; // max over the five face planes
-            return max((h * max(abs(p.x), abs(p.z)) + b * (p.y - h)) / length(vec2(h, b)), -p.y);
+            float m2 = h * h + 0.25;
+            p.xz = abs(p.xz);
+            p.xz = (p.z > p.x) ? p.zx : p.xz;
+            p.xz -= 0.5;
+            vec3 q = vec3(p.z, h * p.y - 0.5 * p.x, h * p.x + 0.5 * p.y);
+            float s = max(-q.x, 0.0);
+            float t = clamp((q.y - 0.5 * p.z) / (m2 + 0.25), 0.0, 1.0);
+            float a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
+            float b = m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) + (q.y - m2 * t) * (q.y - m2 * t);
+            float d2 = min(q.y, -q.x * m2 - q.y * 0.5) > 0.0 ? 0.0 : min(a, b);
+            float d = sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            // Below the base every point of the solid sits above the base square, so the base is nearest (exact).
+            // p.xz here is already abs()'d and shifted by -0.5, so max(p.xz, 0) is the overhang past the square.
+            if (p.y < 0.0) return length(vec3(max(p.x, 0.0), p.y, max(p.z, 0.0)));
+            return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
+        float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
         float map(vec3 p)
         {
         {{map}}    return d;
@@ -212,27 +236,37 @@ public static class FrepShaderGen
             vec2 f = vNdc * 0.5 + 0.5;
             vec2 xy = mix(u.frustum.xz, u.frustum.yw, f);
             bool persp = u.camPos.w > 0.5;
-            float near = u.camZ.w, far = u.params.w;
-            vec3 ro, rd; float t, tMax;
+            float near = u.camZ.w;
+            vec3 ro, rd;
             if (persp)
             {
                 ro = u.camPos.xyz;
                 rd = normalize(u.camX.xyz * xy.x + u.camY.xyz * xy.y + u.camZ.xyz * near);
-                float c = dot(rd, u.camZ.xyz); // depth per unit t
-                t = near / c; tMax = far / c;
             }
             else
             {
                 ro = u.camPos.xyz + u.camX.xyz * xy.x + u.camY.xyz * xy.y;
                 rd = u.camZ.xyz;
-                t = near; tMax = far;
             }
+            // March only through the scene's bounding sphere, not Rhino's near/far: Rhino moves its clip planes
+            // around while zooming, and starting a ray past the front of a surface lands inside the SDF (instant
+            // hit, interior-gradient normals, i.e. the shape looks sliced).
+            vec3 oc = ro - u.bound.xyz;
+            float bb = dot(oc, rd);
+            vec3 perp = oc - bb * rd; // closest approach; avoids |oc|^2 - r^2 cancellation when zoomed far out
+            float disc = u.bound.w * u.bound.w - dot(perp, perp);
+            if (u.bound.w <= 0.0 || disc < 0.0) discard;
+            float h = sqrt(disc);
+            float t = -bb - h, tMax = -bb + h;
+            if (persp) t = max(t, 0.0); // nothing behind the eye
+            if (tMax < t) discard;
             float eps = 0.0;
             bool hit = false;
             for (int i = 0; i < 256; i++)
             {
-                eps = u.params.z + u.params.y * t;
-                float d = map(ro + rd * t);
+                eps = u.params.z + u.params.y * t; // half-pixel footprint at t
+                // Shrink the surface by params.x pixels so Rhino's wires stay visible around the shading.
+                float d = map(ro + rd * t) + u.params.x * 2.0 * eps;
                 if (d < eps) { hit = true; break; }
                 t += d;
                 if (t > tMax) break;
@@ -259,7 +293,9 @@ public static class FrepShaderGen
             .Vec4(vp.CameraY.X, vp.CameraY.Y, vp.CameraY.Z)
             .Vec4(dir.X, dir.Y, dir.Z, near)
             .Vec4(l, r, b, t)
-            .Vec4(0, persp ? slope / near : 0, persp ? 0 : slope, far);
+            .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
+        var (center, radius) = Bound(scene);
+        u.Vec4(center.X, center.Y, center.Z, radius);
         // Same order as Compile(): prim rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
@@ -272,6 +308,55 @@ public static class FrepShaderGen
         for (int i = 0; i < ks.Count; i += 4)
             u.Vec4(ks[i], i + 1 < ks.Count ? ks[i + 1] : 0, i + 2 < ks.Count ? ks[i + 2] : 0, i + 3 < ks.Count ? ks[i + 3] : 0);
         return u.ToBytes();
+    }
+
+    /// Conservative world-space bounding sphere of the drawn scene. Each prim gets a sphere around its frame origin;
+    /// smooth unions can grow the surface by up to k/4 per blend, so pad by the sum of those (intersect/difference only shrink).
+    static (Point3d Center, double Radius) Bound(FrepSceneData scene)
+    {
+        var prims = scene.Primitives;
+        if (prims.Count == 0) return (Point3d.Origin, 0);
+
+        static double PrimRadius(SdPrimitive p)
+        {
+            var v = p.P;
+            return p.Kind switch
+            {
+                SdKind.Sphere => Math.Abs(v.X),
+                SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
+                SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
+                SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
+                SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),
+                SdKind.Ellipsoid => Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))),
+                SdKind.Pyramid => Math.Sqrt(v.X * v.X + 0.5 * v.Y * v.Y), // origin at base center, apex at +h
+                _ => 0,
+            };
+        }
+
+        var box = BoundingBox.Empty;
+        foreach (var p in prims)
+        {
+            double r = PrimRadius(p);
+            box.Union(new BoundingBox(p.Frame.Origin - new Vector3d(r, r, r), p.Frame.Origin + new Vector3d(r, r, r)));
+        }
+        var c = box.Center;
+        double radius = 0;
+        foreach (var p in prims) radius = Math.Max(radius, c.DistanceTo(p.Frame.Origin) + PrimRadius(p));
+
+        // A smooth union lowers the field by up to k/4 for two operands, and by up to k for more (it
+        // compounds), so pad by k per node. The ellipsoid's field underestimates distance by up to the
+        // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
+        double pad = 0, stretch = 1;
+        foreach (var k in scene.Ks) if (k > 0) pad += k;
+        foreach (var p in prims)
+            if (p.Kind == SdKind.Ellipsoid)
+            {
+                double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                if (lo > 0) stretch = Math.Max(stretch, hi / lo);
+            }
+        radius += pad * stretch;
+        return (c, radius * 1.01 + 1e-6); // margin for float32 rounding
     }
 }
 

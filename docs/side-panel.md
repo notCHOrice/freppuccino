@@ -9,7 +9,9 @@ src/Freppuccino/Ui/
   IWebTransport.cs   per-OS part: WebView2Transport.cs (Windows), EtoWebTransport.cs (macOS)
   UiController.cs    Rhino events → snapshots for the page; page requests → Rhino (whitelisted)
   UiProtocol.cs      message types  ◄── keep in sync ──►  src/ui/src/bridge/protocol.ts
-src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radix, "mira" preset), lucide icons
+src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radix), styled with the FRepuccino brand kit
+  src/brand/         fonts, command icons, wordmark copied from brand-kit/ (icons recoloured: ink → currentColor)
+  src/index.css      brand tokens (brand-kit/tokens.json) mapped onto shadcn's CSS variables; Latte / Espresso themes
   src/bridge/        host.ts (transport + store + useHost), mock-host.ts (fake Rhino for the browser)
   src/components/    scene-tree.tsx (browser), inspector.tsx (create / primitive / combine), param-slider.tsx
   src/lib/scene.ts   display names, icons, labels per SDF type / operation
@@ -37,6 +39,15 @@ Layout: `WebViewHost.cs` is shared (start URL, missing-UI placeholder, origin ch
 
 In Rhino, run `FrepPanel`, or open the Freppuccino panel from the panels menu.
 
+## Brand
+
+The UI follows `brand-kit/` (tokens.json, fonts, command icons). To refresh after the kit changes: re-copy the
+woff2 fonts and the `light` command icons into `src/ui/src/brand/`, replacing `#3B2620` with `currentColor` in the
+icons (the dark set differs only in that colour), and update the colour values in `src/ui/src/index.css`.
+The kit has no cone / pyramid / ellipsoid icons yet; `src/brand/icons/{cone,pyramid,ellipsoid}.svg` are stand-ins
+drawn in its style, so replace them when the kit gets official ones. Primitive names, icons, parameter labels and
+creating commands live in one table, `PRIMITIVES` in `src/ui/src/lib/scene.ts`.
+
 ## Protocol
 
 JSON messages, each with a `type`. Host → page messages are snapshots (simple, and fine at this scale). Page → host messages are requests. Selection order is tracked on the page, because Rhino doesn't report pick order; it matters for subtract (target vs tool).
@@ -45,7 +56,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 
 | Host → page | When |
 |---|---|
-| `state {scene, selection, settings, theme}` | reply to `ready`; active document changed |
+| `state {scene, selection, settings: {units}, theme}` | reply to `ready`; active document changed |
 | `scene {scene}` | object added/deleted/replaced/attributes changed, CSG tree changed (coalesced on Idle) |
 | `selection {ids}` | Rhino selection or panel node selection changed |
 | `notice {level, text}` | feedback, including "not implemented yet" from stubs |
@@ -55,7 +66,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `ready` | ✅ |
 | `select {ids, mode: replace\|add\|toggle}` | ✅ primitives → Rhino selection; nodes → panel node selection. While FUnion/FIntersect/FDifference wait for operands, a node click is sent to the command line instead |
 | `setVisible {id, visible}` | ✅ primitive: Rhino show/hide; node: `FrepNode.Hidden`, dropped from the shader like a hidden primitive (undoable) |
-| `runCommand {command}` | ✅ whitelist only: `Freppuccino` + primitive commands (`FBox`, `FSphere`, `FCylinder`, `FCone`, `FTorus`, `FEllipsoid`, `FPyramid`) |
+| `runCommand {command}` | ✅ whitelist only: `FBox`, `FSphere`, `FCylinder`, `FCone`, `FPyramid`, `FEllipsoid`, `FTorus`, `Freppuccino` |
 | `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |

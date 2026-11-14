@@ -31,7 +31,7 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 ///
 /// Every primitive here changes by at most 1 per unit distance, and the CSG operations preserve that,
 /// so |field| <= distance to the surface: the mesher relies on it to skip empty space. That is why
-/// the ellipsoid and pyramid, here and in the shader, are not IQ's formulas (see PrimValue).
+/// the ellipsoid and pyramid, here and in the shader, are not IQ's formulas as published (see PrimValue).
 ///
 /// Build it with <see cref="AddPrimitive"/>, <see cref="AddNode"/> and <see cref="AddRoot"/>. With no
 /// roots declared, all primitives are smooth-unioned in order with <see cref="Blend"/>.
@@ -176,12 +176,23 @@ public sealed class FrepField
             }
             case FieldKind.Pyramid: // P.X = height, P.Y = base side; base centred on the origin, apex at +Y
             {
-                // The five face planes' signed distances combined by max (the pyramid is their
-                // intersection): exact surface, changing by at most 1 per unit distance. IQ's sdPyramid
-                // jumps in value across the base (inside, it measures distance to the slanted faces only).
-                double h = s.P.X, half = s.P.Y * 0.5;
-                double slanted = (h * Math.Max(Math.Abs(x), Math.Abs(z)) + half * (y - h)) / Len(h, half);
-                return Math.Max(slanted, -y);
+                // IQ's sdPyramid for a unit base, scaled by the side, with the shader's two corrections
+                // (see sdPyramid in FrepShaderGen): IQ's measures distance to the slanted faces only, so
+                // below the base use the distance to the base square, and inside let the base count.
+                double side = s.P.Y, h = s.P.X / side;
+                double px = Math.Abs(x / side), py = y / side, pz = Math.Abs(z / side);
+                double m2 = h * h + 0.25;
+                if (pz > px) (px, pz) = (pz, px);
+                px -= 0.5; pz -= 0.5;
+                if (py < 0) return Len(Math.Max(px, 0), py, Math.Max(pz, 0)) * side;
+                double qx = pz, qy = h * py - 0.5 * px, qz = h * px + 0.5 * py;
+                double a0 = Math.Max(-qx, 0);
+                double t = Math.Clamp((qy - 0.5 * pz) / (m2 + 0.25), 0, 1);
+                double a = m2 * (qx + a0) * (qx + a0) + qy * qy;
+                double b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
+                double d2 = Math.Min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.Min(a, b);
+                double signed = Math.Sqrt((d2 + qz * qz) / m2) * Math.Sign(Math.Max(qz, -py));
+                return Math.Max(signed, -py) * side;
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(s));
@@ -201,7 +212,7 @@ public sealed class FrepField
     ///   intersect:  smax >= max, so it lies in the overlap of the operands' {<= t};
     ///   difference: it lies in the base's {<= t}.
     /// The offset is in field value, not distance: a primitive whose field underestimates distance
-    /// (ellipsoid, pyramid) grows by more than t, which <see cref="PrimBounds"/> accounts for.
+    /// (the ellipsoid) grows by more than t, which <see cref="PrimBounds"/> accounts for.
     public (V3 Min, V3 Max) Bounds()
     {
         Seal();
@@ -290,13 +301,10 @@ public sealed class FrepField
                 hi = s.P * scale; lo = hi * -1;
                 break;
             }
-            case FieldKind.Pyramid:
+            case FieldKind.Pyramid: // an exact distance; local y runs from the base at 0 to the apex at h
             {
-                // -y <= t and (h m + b (y - h)) / L <= t with m = max(|x|, |z|), b = half the base side:
-                // y in [-t, h + t L / b], and at y = -t, m <= b + t (L + b) / h.
-                double h = s.P.X, b = s.P.Y * 0.5, len = Len(h, b);
-                double m = b + t * (len + b) / h;
-                lo = new V3(-m, -t, -m); hi = new V3(m, h + t * len / b, m);
+                double b = s.P.Y * 0.5;
+                lo = new V3(-b - t, -t, -b - t); hi = new V3(b + t, s.P.X + t, b + t);
                 break;
             }
             default: throw new ArgumentOutOfRangeException(nameof(s));

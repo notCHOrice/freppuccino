@@ -39,6 +39,9 @@ public static class FrepScene
     static FrepSceneData scene = FrepSceneData.Empty;
     // Parallel to scene.Primitives; safe since any delete/replace sets dirty.
     static List<RhinoObject> owners = [];
+    static List<Guid> ids = [];
+    static FrepTree tree = FrepTree.Empty; // the one scene was compiled from
+
     static uint docSerial;
     static bool dirty = true;
 
@@ -62,6 +65,7 @@ public static class FrepScene
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
         List<SdPrimitive>? prims = null;
+        bool reshaped = false;
         for (int i = 0; i < owners.Count; i++)
         {
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
@@ -69,8 +73,21 @@ public static class FrepScene
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
+            reshaped |= moved.Kind != scene.Primitives[i].Kind;
         }
-        return prims == null ? scene : scene with { Primitives = prims };
+        if (prims == null) return scene;
+        if (!reshaped) return scene with { Primitives = prims };
+
+        // A sphere stretched into an ellipsoid changes the shader's structure, so recompile (cached by source, so once
+        // per gesture). If the extra rows don't fit, preview those prims unchanged; the commit still converts them.
+        if (prims.Sum(p => FrepShaderGen.Rows(p.Kind)) > FrepShaderGen.PrimRowBudget(tree.Nodes.Count))
+        {
+            for (int i = 0; i < prims.Count; i++)
+                if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
+            return scene with { Primitives = prims };
+        }
+        var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
+        return scene with { Program = program, Primitives = prims, Ks = ks };
     }
 
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
@@ -83,9 +100,15 @@ public static class FrepScene
         switch (p.Kind)
         {
             case SdKind.Sphere:
-                ok = FSphereCommand.TryTransform(p.Frame, v.X, xf, out f, out var s, out _);
-                v = new Vector3d(s, 0, 0);
-                break;
+                if (FSphereCommand.TryTransform(p.Frame, v.X, xf, out f, out var s, out _))
+                {
+                    result = p with { Frame = f, P = new Vector3d(s, 0, 0) };
+                    return true;
+                }
+                // Non-uniform: becomes an ellipsoid, same as the commit in FSphereCommand.TransformSdf.
+                if (!FSphereCommand.TryTransformToEllipsoid(p.Frame, v.X, xf, out f, out var er, out _)) return false;
+                result = new SdPrimitive(SdKind.Ellipsoid, f, er);
+                return true;
             case SdKind.Box:
                 ok = FBoxCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
                 break;
@@ -120,13 +143,13 @@ public static class FrepScene
     {
         dirty = false;
         docSerial = doc.RuntimeSerialNumber;
-        var tree = FrepTrees.Get(doc);
+        tree = FrepTrees.Get(doc);
 
         // Prims first, so uniform rows for blend values are reserved up front; prims past the budget are dropped (= missing leaves).
         int budget = FrepShaderGen.PrimRowBudget(tree.Nodes.Count), rows = 0, dropped = 0;
         var prims = new List<SdPrimitive>();
         var newOwners = new List<RhinoObject>();
-        var ids = new List<Guid>();
+        var newIds = new List<Guid>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
@@ -134,14 +157,15 @@ public static class FrepScene
             int r = FrepShaderGen.Rows(prim.Kind);
             if (rows + r > budget) { dropped++; continue; }
             rows += r;
-            ids.Add(obj.Id);
+            newIds.Add(obj.Id);
             prims.Add(prim);
             newOwners.Add(obj);
         }
 
-        var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
-        scene = new FrepSceneData(program, prims, ks, dropped) { Ids = ids };
+        var (program, ks) = FrepShaderGen.Compile(prims, newIds, tree);
+        scene = new FrepSceneData(program, prims, ks, dropped) { Ids = newIds };
         owners = newOwners;
+        ids = newIds;
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).

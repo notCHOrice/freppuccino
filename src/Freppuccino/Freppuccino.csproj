@@ -25,14 +25,21 @@
 
   <!--
     Side panel UI (src/ui: React + Vite + shadcn). `npm run build` writes src/ui/dist, which is copied to $(OutDir)ui
-    and served by Ui/WebViewHost.cs. Built automatically for Release, or when dist is missing; otherwise run
-    `npm run build` yourself (or use the dev server, see docs/side-panel.md). Pass -p:SkipUiBuild=true to skip.
+    and served by Ui/WebViewHost.cs. Always built for Release; otherwise rebuilt incrementally, whenever any UI
+    source is newer than dist/index.html (or dist is missing), so a stale bundle never gets copied.
+    Pass -p:SkipUiBuild=true to skip (e.g. when using the dev server, see docs/side-panel.md).
   -->
   <PropertyGroup>
     <UiDir>$(MSBuildProjectDirectory)/../ui/</UiDir>
     <UiDist>$(UiDir)dist/</UiDist>
+    <!-- Release: point at a file that never exists so the target always runs. -->
+    <UiBuildOutput>$(UiDist)index.html</UiBuildOutput>
+    <UiBuildOutput Condition="'$(Configuration)' == 'Release'">$(UiDist).always-rebuild</UiBuildOutput>
   </PropertyGroup>
-  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true' And ('$(Configuration)' == 'Release' Or !Exists('$(UiDist)index.html'))">
+  <ItemGroup>
+    <UiSources Include="$(UiDir)src/**/*;$(UiDir)index.html;$(UiDir)package.json;$(UiDir)package-lock.json;$(UiDir)vite.config.ts;$(UiDir)tsconfig*.json;$(UiDir)components.json" />
+  </ItemGroup>
+  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true'" Inputs="@(UiSources)" Outputs="$(UiBuildOutput)">
     <Exec Command="npm ci" WorkingDirectory="$(UiDir)" Condition="!Exists('$(UiDir)node_modules')" ContinueOnError="WarnAndContinue" />
     <Exec Command="npm run build" WorkingDirectory="$(UiDir)" ContinueOnError="WarnAndContinue" />
   </Target>

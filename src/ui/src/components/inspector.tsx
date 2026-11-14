@@ -1,30 +1,32 @@
-import { ArrowUpDown, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowUpDown, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { NodeIcon } from '@/components/node-icon'
+import { BrandIcon, NodeIcon } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
 import { send, useHost } from '@/bridge/host'
 import type { OperationKind, SceneNode } from '@/bridge/protocol'
-import { OPERATIONS, PRIMITIVES, paramLabel, typeLabel } from '@/lib/scene'
+import { OPERATIONS, PRIMITIVES, displayParams, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
 export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string> }) {
   const { labels } = props
   const selected = props.selected.filter((n) => !n.missing)
   if (selected.length === 0) return <CreateSection />
-  if (selected.length === 1 && selected[0].kind === 'primitive') return <PrimitiveSection key={selected[0].id} node={selected[0]} labels={labels} />
-  if (selected.length === 1) return <CombineSection key={selected[0].id} operands={selected[0].children ?? []} labels={labels} existing={selected[0]} />
+  if (selected.length === 1 && selected[0].kind === 'primitive')
+    return <PrimitiveSection key={selected[0].id} node={selected[0]} labels={labels} />
+  if (selected.length === 1)
+    return <CombineSection key={selected[0].id} operands={selected[0].children ?? []} labels={labels} existing={selected[0]} />
   return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
 }
 
 function Section(props: { title: string; badge?: string; children: React.ReactNode; icon?: React.ReactNode }) {
   return (
-    <section className="grid gap-3 px-3 py-3">
-      <header className="flex items-center gap-1.5">
+    <section className="grid gap-3 px-4 py-4">
+      <header className="flex min-w-0 items-center gap-2">
         {props.icon}
-        <h2 className="truncate font-medium">{props.title}</h2>
+        <h2 className="type-heading truncate">{props.title}</h2>
         {props.badge && <Badge variant="secondary" className="ml-auto">{props.badge}</Badge>}
       </header>
       {props.children}
@@ -32,24 +34,35 @@ function Section(props: { title: string; badge?: string; children: React.ReactNo
   )
 }
 
-// ── Nothing selected: create + scene settings ──
+// ── Nothing selected: create ──
 
 function CreateSection() {
   return (
     <>
       <Section title="Create">
-        <div className="grid grid-cols-2 gap-2">
-          {Object.values(PRIMITIVES).map(({ label, icon: Icon, command }) => (
-            <Button key={command} variant="outline" onClick={() => send({ type: 'runCommand', command })}>
-              <Icon /> {label}
-            </Button>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
+          {Object.values(PRIMITIVES).map((p) => (
+            <button
+              key={p.command}
+              type="button"
+              title={p.command}
+              onClick={() => send({ type: 'runCommand', command: p.command })}
+              className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
+            >
+              <BrandIcon name={p.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />
+              <span className="type-small">{p.label}</span>
+            </button>
           ))}
         </div>
+        <p className="type-small text-muted-foreground">
+          Runs the Rhino command, e.g. <span className="type-command text-caramel-ink">FTorus</span>.
+        </p>
       </Section>
-      <Section title="Scene">
-        <p className="text-muted-foreground">Select two or more objects or nodes to combine them; blend is per operation.</p>
+      <div className="mx-4 h-px bg-border" />
+      <Section title="View">
+        <p className="type-small text-muted-foreground">Select two or more objects or nodes to combine them; blend is per operation.</p>
         <Button variant="secondary" onClick={() => send({ type: 'runCommand', command: 'Freppuccino' })}>
-          <Sparkles /> F-rep display mode
+          <BrandIcon name="preview" /> F-rep display mode
         </Button>
       </Section>
     </>
@@ -61,22 +74,22 @@ function CreateSection() {
 function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> }) {
   const { node } = props
   const units = useHost((s) => s.settings.units)
-  const params = sortParams(node.sdfType, node.params ?? {})
+  const params = displayParams(node)
   // Slider range is fixed per object (the section is keyed by id) so it doesn't move while dragging.
-  const [max] = useState(() => Math.max(1, ...params.map(([, v]) => v * 3)))
+  const [max] = useState(() => Math.max(1, ...params.map((p) => p.value * 3)))
 
   return (
-    <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-3.5 text-muted-foreground" />}>
+    <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
       {params.length === 0 && <p className="text-muted-foreground">No parameters.</p>}
-      {params.map(([key, value]) => (
+      {params.map((p) => (
         <ParamSlider
-          key={key}
-          label={paramLabel(node.sdfType, key)}
-          hint={units}
-          value={value}
-          min={0.001}
+          key={p.key}
+          label={p.label}
+          units={units}
+          value={p.value}
+          min={0}
           max={max}
-          onCommit={(v) => send({ type: 'setParam', id: node.id, name: key, value: v })}
+          onCommit={(v) => send({ type: 'setParam', id: node.id, name: p.key, value: v })}
         />
       ))}
     </Section>
@@ -151,7 +164,11 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
   const role = (i: number) => (ordered ? (i === 0 ? 'Target' : 'Tool') : `#${i + 1}`)
 
   return (
-    <Section title={existing ? labels.get(existing.id) ?? 'Operation' : 'Combine'} badge={existing ? 'Operation' : `${operands.length} operands`}>
+    <Section
+      title={existing ? (labels.get(existing.id) ?? 'Operation') : 'Combine'}
+      badge={existing ? 'Operation' : `${operands.length} operands`}
+      icon={<BrandIcon name={OPERATIONS[op].icon} className="size-6" />}
+    >
       <div className="flex items-center gap-1">
         <div className="grid min-w-0 flex-1 gap-1">
           {operands.map((o, i) => (
@@ -177,19 +194,16 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         }}
         className="w-full"
       >
-        {(Object.keys(OPERATIONS) as OperationKind[]).map((kind) => {
-          const { label, icon: Icon } = OPERATIONS[kind]
-          return (
-            <ToggleGroupItem key={kind} value={kind} className="flex-1" aria-label={label}>
-              <Icon /> {label}
-            </ToggleGroupItem>
-          )
-        })}
+        {(Object.keys(OPERATIONS) as OperationKind[]).map((kind) => (
+          <ToggleGroupItem key={kind} value={kind} className="flex-1 px-1" aria-label={OPERATIONS[kind].label}>
+            <BrandIcon name={OPERATIONS[kind].icon} /> {OPERATIONS[kind].label}
+          </ToggleGroupItem>
+        ))}
       </ToggleGroup>
 
       <ParamSlider
-        label="Blend"
-        hint={k === 0 ? 'sharp' : units}
+        label="Blend radius"
+        units={k === 0 ? 'sharp' : units}
         value={k}
         max={5}
         onChange={(v) => {
@@ -219,19 +233,12 @@ const PREVIEW_MS = 33
 
 function Operand(props: { node: SceneNode; label?: string; role: string }) {
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border px-2 py-1">
-      <NodeIcon node={props.node} className="size-3.5 shrink-0 text-muted-foreground" />
+    <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-card px-2 py-1.5">
+      <NodeIcon node={props.node} className="size-5" />
       <div className="grid min-w-0">
-        <span className="text-[0.625rem] text-muted-foreground uppercase">{props.role}</span>
-        <span className="truncate">{props.label}</span>
+        <span className="type-label text-muted-foreground">{props.role}</span>
+        <span className="truncate font-bold">{props.label}</span>
       </div>
     </div>
   )
-}
-
-/** Known params in PRIMITIVES order, then unknown ones by key. */
-function sortParams(sdfType: string | undefined, params: Record<string, number>): [string, number][] {
-  const known = Object.keys((sdfType && PRIMITIVES[sdfType]?.params) || {})
-  const rank = (k: string) => (known.includes(k) ? known.indexOf(k) : known.length)
-  return Object.entries(params).sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
 }
