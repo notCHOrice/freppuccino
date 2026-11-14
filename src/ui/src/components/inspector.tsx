@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { BrandIcon, NodeIcon, type BrandIconName } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
+import { ColorField } from '@/components/color-field'
 import { send, useHost } from '@/bridge/host'
 import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
@@ -133,8 +134,35 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
   const shown = (key: string, value: number) =>
     drag?.key === key ? drag.value : pending?.key === key ? pending.value : value
 
+  // SDF.Color: throttled previews while the picker is open; the final value is one undo step.
+  const liveColor = useRef({ timer: 0, color: '', previewed: false })
+  const previewColor = (color: string) => {
+    const l = liveColor.current
+    l.color = color
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      send({ type: 'setColor', id: node.id, color: l.color, preview: true })
+    }, PREVIEW_MS)
+  }
+  const commitColor = (color: string) => {
+    const l = liveColor.current
+    clearTimeout(l.timer)
+    Object.assign(l, { timer: 0, previewed: false })
+    send({ type: 'setColor', id: node.id, color })
+  }
+  useEffect(() => {
+    const l = liveColor.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed) send({ type: 'setColor', id: node.id, color: l.color })
+    }
+  }, [node.id])
+
   return (
     <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
+      <ColorField label="Color" value={node.color ?? '#FCFCFC'} onChange={previewColor} onCommit={commitColor} />
       {params.length === 0 && !node.custom && <p className="text-muted-foreground">No parameters.</p>}
       {params.map((p) => (
         <ParamSlider

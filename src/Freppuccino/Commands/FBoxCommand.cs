@@ -44,6 +44,7 @@ public class FBoxCommand : Command
 
         var attributes = doc.CreateDefaultAttributes();
         WriteSdf(attributes, box, doc.ModelUnitSystem);
+        SdfUserText.WriteDefaultColor(attributes);
 
         if (doc.Objects.AddBrep(brep, attributes) == Guid.Empty)
         {

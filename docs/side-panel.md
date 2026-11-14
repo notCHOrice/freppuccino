@@ -73,6 +73,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
+| `setColor {id, color, preview?}` | ✅ write `SDF.Color` (`"#RRGGBB"`) on a primitive; same preview/commit gesture as `setOperation` (one "F-rep color" undo step per picker drag) |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
 | `aiTool {callId, tool, args}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md) |
 | `aiSaveRun {title, transcript, images}` | ✅ writes an AI run log (`Ai/AiRunLog.cs`) |
@@ -87,7 +88,7 @@ Live edits: the inspector has no Update button. An op click sends one `setOperat
 
 ```
 SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
-            sdfType?, params?,          // primitive
+            sdfType?, params?, color?,  // primitive; color = SDF.Color "#RRGGBB" (white if missing)
             op?, k?, children?,         // operation: children are operands, in order
             ref?, refMissing? }         // twist|bend|repeat: params = {angle} / {angle, direction} / {x, y, z}; ref = line/box id
 ```
@@ -96,4 +97,4 @@ SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
 
 Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect (and FTwist/FBend/FRepeat, single node) take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
 
-Inspector: one primitive → its parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).
+Inspector: one primitive → its color (`SDF.Color`: current-color swatch / picker + hex field; new primitives start white `#FCFCFC`) and parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).

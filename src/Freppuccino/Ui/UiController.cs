@@ -85,6 +85,7 @@ public sealed class UiController : IDisposable
         RhinoApp.Idle -= OnIdle;
         RhinoApp.EscapeKeyPressed -= OnEscape;
         Command.BeginCommand -= OnBeginCommand;
+        CommitColor();
         FrepTrees.CommitAll();
         if (RhinoDoc.ActiveDoc is { } doc) EndParamGesture(doc);
     }
@@ -148,6 +149,7 @@ public sealed class UiController : IDisposable
     void SendState(RhinoDoc doc)
     {
         FrepTrees.CommitAll(); // page reload / doc switch mid-drag
+        CommitColor();
         EndParamGesture(doc);
         sentDocSerial = doc.RuntimeSerialNumber;
         sceneDirty = selectionDirty = false;
@@ -255,13 +257,14 @@ public sealed class UiController : IDisposable
             Locked: obj.IsLocked,
             SdfType: SdfUserText.ReadType(attributes),
             Params: ReadParams(attributes),
+            Color: SdfUserText.FormatColor(SdfUserText.ReadColorOrDefault(attributes)),
             Custom: SdfUserText.TryReadLinear(attributes, out _, out _, out _) ? true : null);
     }
 
     static readonly HashSet<string> HeaderKeys = new(StringComparer.Ordinal)
     {
         SdfUserText.VersionKey, SdfUserText.TypeKey, SdfUserText.UnitsKey,
-        SdfUserText.OriginKey, SdfUserText.XAxisKey, SdfUserText.YAxisKey,
+        SdfUserText.OriginKey, SdfUserText.XAxisKey, SdfUserText.YAxisKey, SdfUserText.ColorKey,
         SdfUserText.LinearXKey, SdfUserText.LinearYKey, SdfUserText.LinearZKey,
     };
 
@@ -318,6 +321,7 @@ public sealed class UiController : IDisposable
         if (doc == null) return;
         // Anything but a live blend or warp edit ends that gesture.
         if (type is not ("setOperation" or "setNodeParam")) FrepTrees.Commit(doc);
+        if (type is not "setColor") CommitColor();
         // A preview setParam continues the open size drag; every other message closes it as one undo step.
         if (type != "setParam") EndParamGesture(doc);
         try
@@ -338,6 +342,9 @@ public sealed class UiController : IDisposable
                     break;
                 case "setParam":
                     SetParam(doc, Parse<SetParamRequest>(message));
+                    break;
+                case "setColor":
+                    SetColor(doc, Parse<SetColorRequest>(message));
                     break;
                 case "applyOperation":
                     ApplyOperation(doc, Parse<ApplyOperationRequest>(message));
@@ -449,7 +456,13 @@ public sealed class UiController : IDisposable
         doc.Views.Redraw();
     }
 
-    void OnBeginCommand(object? sender, CommandEventArgs e) => EndParamGesture(e.Document);
+    // Any command (incl. Undo) ends an open size drag or color gesture whose final message never came,
+    // like FrepTrees does for nodes.
+    void OnBeginCommand(object? sender, CommandEventArgs e)
+    {
+        CommitColor();
+        EndParamGesture(e.Document);
+    }
 
     void SetParam(RhinoDoc doc, SetParamRequest request)
     {
@@ -596,6 +609,66 @@ public sealed class UiController : IDisposable
         if (i < 0 || !double.IsFinite(request.Value)) throw new JsonException($"bad param '{request.Name}' for {node.Name}");
         if (node.Param(i) != request.Value) FrepTrees.Preview(doc, tree.WithParam(id, i, request.Value), $"Edit {node.Name}");
         if (!request.Preview) FrepTrees.Commit(doc);
+    }
+
+    /// Open color-picker gesture: the object and its SDF.Color before the gesture (null = it had none).
+    (uint Doc, Guid Id, string? Before)? colorGesture;
+
+    /// SDF.Color edit. Previews write the attributes without undo; the final one puts the original value back
+    /// (silently) and then writes the new one in an undo record, so the whole drag is one undo step.
+    void SetColor(RhinoDoc doc, SetColorRequest request)
+    {
+        if (!Guid.TryParse(request.Id, out var id) || doc.Objects.FindId(id) is not { IsDeleted: false } obj ||
+            SdfUserText.ReadType(obj.Attributes) == null)
+            return;
+        if (!SdfUserText.TryParseColor(request.Color, out var color)) throw new JsonException($"bad color '{request.Color}'");
+
+        // A different object starts a new gesture.
+        if (colorGesture is { } g && (g.Doc != doc.RuntimeSerialNumber || g.Id != id)) CommitColor();
+
+        if (request.Preview)
+        {
+            colorGesture ??= (doc.RuntimeSerialNumber, id, obj.Attributes.GetUserString(SdfUserText.ColorKey));
+            WriteColor(doc, obj, SdfUserText.FormatColor(color), undo: false);
+            return;
+        }
+
+        string? before = colorGesture is { } open ? open.Before : obj.Attributes.GetUserString(SdfUserText.ColorKey);
+        colorGesture = null;
+        var after = SdfUserText.FormatColor(color);
+        if (string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
+        {
+            WriteColor(doc, obj, after, undo: false); // drag that ended where it started: just undo the previews
+            return;
+        }
+        if (obj.Attributes.GetUserString(SdfUserText.ColorKey) != before)
+            WriteColor(doc, doc.Objects.FindId(id), before, undo: false);
+        WriteColor(doc, doc.Objects.FindId(id), after, undo: true);
+    }
+
+    /// Ends an open color gesture (its final message never came) as one undo step at the last previewed color.
+    void CommitColor()
+    {
+        if (colorGesture is not { } g) return;
+        colorGesture = null;
+        if (RhinoDoc.FromRuntimeSerialNumber(g.Doc) is not { } doc || doc.Objects.FindId(g.Id) is not { IsDeleted: false } obj) return;
+        var now = obj.Attributes.GetUserString(SdfUserText.ColorKey);
+        if (now == g.Before) return;
+        WriteColor(doc, obj, g.Before, undo: false);
+        WriteColor(doc, doc.Objects.FindId(g.Id), now, undo: true);
+    }
+
+    /// Sets (or, for null, removes) SDF.Color. undo: wrap in its own undo record.
+    static void WriteColor(RhinoDoc doc, RhinoObject? obj, string? value, bool undo)
+    {
+        if (obj == null) return;
+        var attributes = obj.Attributes.Duplicate();
+        if (value == null) attributes.DeleteUserString(SdfUserText.ColorKey);
+        else attributes.SetUserString(SdfUserText.ColorKey, value);
+        uint record = undo && !doc.UndoRecordingIsActive ? doc.BeginUndoRecord("F-rep color") : 0;
+        doc.Objects.ModifyAttributes(obj, attributes, true);
+        if (record != 0) doc.EndUndoRecord(record);
+        doc.Views.Redraw();
     }
 
     /// Deletes nodes that nothing else references (nodes being deleted together count as going away).

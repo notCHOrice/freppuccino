@@ -58,6 +58,8 @@ public sealed record SceneNode(
     bool? Missing = null,
     string? Ref = null,
     bool? RefMissing = null,
+    // Primitive: SDF.Color "#RRGGBB" (white if the object has none).
+    string? Color = null,
     /// <summary>Primitive carries SDF.Linear.*: a scale or shear the parameters cannot express.</summary>
     bool? Custom = null);
 
@@ -114,6 +116,9 @@ public sealed record RunCommandRequest(string Command);
 /// Edit one SDF parameter of a primitive and rebuild its proxy, e.g. { id, name: "s", value: 2 }.
 /// Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
 public sealed record SetParamRequest(string Id, string Name, double Value, bool Preview = false);
+
+/// Set a primitive's SDF.Color ("#RRGGBB"). Preview = live picker tick (no undo); the next non-preview one ends the gesture as one undo step.
+public sealed record SetColorRequest(string Id, string Color, bool Preview = false);
 
 /// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);

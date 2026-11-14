@@ -31,7 +31,7 @@ public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P);
 
 /// Program == null: nothing to draw. Primitives/Colors/Warps/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
-/// Colors parallel to Primitives: each owner's Rhino display color (object/layer/material/parent source resolved).
+/// Colors parallel to Primitives: each owner's SDF.Color (white if missing).
 public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<System.Drawing.Color> Colors,
     IReadOnlyList<SdWarp> Warps, IReadOnlyList<double> Ks, int Dropped)
 {
@@ -217,7 +217,8 @@ public static class FrepScene
             rows += r;
             newIds.Add(obj.Id);
             prims.Add(prim);
-            colors.Add(obj.Attributes.DrawColor(doc));
+            // SDF.Color metadata (set from the panel); objects without it draw white.
+            colors.Add(SdfUserText.ReadColorOrDefault(obj.Attributes));
             newOwners.Add(obj);
         }
 
