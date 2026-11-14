@@ -1,17 +1,28 @@
 using System.Text;
+using Freppuccino.Scene;
 using Rhino.Display;
 using Rhino.Geometry;
 
 namespace Freppuccino.Shaders;
 
-/// Runtime-generated SDF scene: N spheres, smooth-unioned (IQ quadratic smin), raymarched on a fullscreen triangle.
-/// Structure (N) is baked into the source; parameters (camera, spheres, blend) are uniforms, so moving spheres never recompiles.
+/// Runtime-generated SDF scene: spheres then boxes, smooth-unioned (IQ quadratic smin), raymarched on a fullscreen triangle.
+/// Structure (sphere/box counts) is baked into the source; parameters (camera, primitives, blend) are uniforms,
+/// so moving or resizing primitives never recompiles.
 public static class FrepShaderGen
 {
-    /// Uniform header = 5 vec4 rows; rest of Uniforms.MaxBytes is spheres.
-    public const int MaxSpheres = Uniforms.MaxBytes / 16 - 5;
+    /// Uniform header = 6 vec4 rows; the rest of Uniforms.MaxBytes holds primitives.
+    public const int MaxPrimitiveRows = Uniforms.MaxBytes / 16 - 6;
+    public const int SphereRows = 1, BoxRows = 3;
 
-    static readonly Dictionary<int, ShaderSource> cache = [];
+    static readonly Dictionary<(int Spheres, int Boxes), ShaderSource> cache = [];
+
+    /// How many spheres and boxes fit in the uniform block (spheres first).
+    public static (int Spheres, int Boxes) Fit(int spheres, int boxes)
+    {
+        int ns = Math.Min(spheres, MaxPrimitiveRows / SphereRows);
+        int nb = Math.Min(boxes, (MaxPrimitiveRows - ns * SphereRows) / BoxRows);
+        return (ns, nb);
+    }
 
     const string Vertex = """
         #version 450
@@ -24,12 +35,16 @@ public static class FrepShaderGen
         }
         """;
 
-    /// N >= 1.
-    public static ShaderSource Scene(int n)
+    /// spheres + boxes >= 1; counts must come from <see cref="Fit"/>.
+    public static ShaderSource Scene(int spheres, int boxes)
     {
-        if (cache.TryGetValue(n, out var s)) return s;
-        var map = new StringBuilder("    float d = sdSphere(p, u.spheres[0]);\n");
-        for (int i = 1; i < n; i++) map.Append($"    d = smin(d, sdSphere(p, u.spheres[{i}]), u.params.x);\n");
+        if (cache.TryGetValue((spheres, boxes), out var s)) return s;
+        var terms = new List<string>();
+        int row = 0;
+        for (int i = 0; i < spheres; i++, row += SphereRows) terms.Add($"sdSphere(p, u.prims[{row}])");
+        for (int i = 0; i < boxes; i++, row += BoxRows) terms.Add($"sdBox(p, u.prims[{row}], u.prims[{row + 1}], u.prims[{row + 2}])");
+        var map = new StringBuilder($"    float d = {terms[0]};\n");
+        for (int i = 1; i < terms.Count; i++) map.Append($"    d = smin(d, {terms[i]}, u.params.x);\n");
         var frag = $$"""
             #version 450
             layout(location = 0) in vec2 vNdc;
@@ -42,7 +57,9 @@ public static class FrepShaderGen
                 vec4 camZ;       // xyz unit view direction; w = near
                 vec4 frustum;    // left, right, bottom, top (camera coords, at near)
                 vec4 params;     // x = blend k, y = eps per unit t, z = eps const, w = far
-                vec4 spheres[{{n}}]; // xyz center, w radius
+                // sphere: 1 row  (xyz center, w radius s)
+                // box:    3 rows (xyz center, w b.x), (xyz unit X axis, w b.y), (xyz unit Y axis, w b.z); Z = X × Y
+                vec4 prims[{{row}}];
             } u;
 
             const vec3 GREY = vec3(0.78);
@@ -54,6 +71,12 @@ public static class FrepShaderGen
                 return min(a, b) - h * h * k * 0.25;
             }
             float sdSphere(vec3 p, vec4 s) { return length(p - s.xyz) - s.w; }
+            float sdBox(vec3 p, vec4 o, vec4 x, vec4 y)
+            {
+                vec3 d = p - o.xyz;
+                vec3 q = abs(vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, cross(x.xyz, y.xyz)))) - vec3(o.w, x.w, y.w);
+                return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+            }
             float map(vec3 p)
             {
             {{map}}    return d;
@@ -97,11 +120,11 @@ public static class FrepShaderGen
                 outColor = vec4(mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0); // world +Z up: white, -Z down: light grey
             }
             """;
-        return cache[n] = new ShaderSource(Vertex, frag);
+        return cache[(spheres, boxes)] = new ShaderSource(Vertex, frag);
     }
 
-    /// Spheres beyond MaxSpheres are dropped (caller logs).
-    public static byte[] SceneUniforms(RhinoViewport vp, IReadOnlyList<Sphere> spheres, double blend)
+    /// Writes the first <paramref name="fit"/> spheres and boxes (from <see cref="Fit"/>); the rest are dropped (caller logs).
+    public static byte[] SceneUniforms(RhinoViewport vp, FrepSceneData scene, (int Spheres, int Boxes) fit, double blend)
     {
         vp.GetFrustum(out var l, out var r, out var b, out var t, out var near, out var far);
         var persp = vp.IsPerspectiveProjection;
@@ -115,10 +138,17 @@ public static class FrepShaderGen
             .Vec4(dir.X, dir.Y, dir.Z, near)
             .Vec4(l, r, b, t)
             .Vec4(blend, persp ? slope / near : 0, persp ? 0 : slope, far);
-        for (int i = 0; i < Math.Min(spheres.Count, MaxSpheres); i++)
+        for (int i = 0; i < fit.Spheres; i++)
         {
-            var s = spheres[i];
-            u.Vec4(s.Center.X, s.Center.Y, s.Center.Z, s.Radius);
+            var (f, radius) = scene.Spheres[i];
+            u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, radius);
+        }
+        for (int i = 0; i < fit.Boxes; i++)
+        {
+            var (f, half) = scene.Boxes[i];
+            u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, half.X)
+             .Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, half.Y)
+             .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, half.Z);
         }
         return u.ToBytes();
     }

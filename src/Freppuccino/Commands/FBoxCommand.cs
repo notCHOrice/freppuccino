@@ -76,43 +76,37 @@ public class FBoxCommand : Command
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
-        if (!SdfUserText.TryReadFrame(attributes, out var frame) || !SdfUserText.TryReadVec3(attributes, "b", out var b))
+        if (!TryRead(attributes, out var frame, out var b))
         {
             reason = "missing or unreadable SDF.Frame.* / SDF.b.*";
             return false;
         }
 
-        var origin = frame.Origin;
-        origin.Transform(xform);
+        if (!TryTransform(frame, b, xform, out frame, out b, out reason))
+            return false;
 
-        // Vector3d.Transform applies only the linear part, so translation doesn't affect the axes.
-        var x = frame.XAxis; x.Transform(xform);
-        var y = frame.YAxis; y.Transform(xform);
-        var z = frame.ZAxis; z.Transform(xform);
+        SdfUserText.WriteFrame(attributes, frame);
+        SdfUserText.WriteVec3(attributes, "b", b.X, b.Y, b.Z);
+        return true;
+    }
 
-        double sx = x.Length, sy = y.Length, sz = z.Length;
-        const double degenerate = 1e-12;
-        if (sx < degenerate || sy < degenerate || sz < degenerate)
+    /// <summary>Reads the frame (origin = box center) and half-extents b.</summary>
+    public static bool TryRead(ObjectAttributes attributes, out Plane frame, out Vector3d b)
+    {
+        b = Vector3d.Unset;
+        return SdfUserText.TryReadFrame(attributes, out frame) && SdfUserText.TryReadVec3(attributes, "b", out b);
+    }
+
+    /// <summary>Pure version of <see cref="TransformSdf"/>; also used for the live gumball preview.</summary>
+    public static bool TryTransform(Plane frame, Vector3d b, Transform xform, out Plane newFrame, out Vector3d newB, out string? reason)
+    {
+        newB = b;
+        if (!SdfTransforms.TryTransformFrame(frame, xform, out newFrame, out var scale, out reason))
         {
-            reason = "transform flattens the box";
+            if (reason != null) reason += "; sdBox can't represent it";
             return false;
         }
-
-        x /= sx; y /= sy; z /= sz;
-
-        const double perpendicularTolerance = 1e-6;
-        if (Math.Abs(x * y) > perpendicularTolerance ||
-            Math.Abs(y * z) > perpendicularTolerance ||
-            Math.Abs(z * x) > perpendicularTolerance)
-        {
-            reason = "transform skews the box (shear or non-uniform scale off the box axes); sdBox can't represent it";
-            return false;
-        }
-
-        // Mirroring can flip X × Y relative to the transformed Z; that's fine, sdBox is symmetric.
-        SdfUserText.WriteFrame(attributes, new Plane(origin, x, y));
-        SdfUserText.WriteVec3(attributes, "b", b.X * sx, b.Y * sy, b.Z * sz);
-        reason = null;
+        newB = new Vector3d(b.X * scale.X, b.Y * scale.Y, b.Z * scale.Z);
         return true;
     }
 }
