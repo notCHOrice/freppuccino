@@ -24,14 +24,15 @@ public sealed unsafe class MetalBackend : IGpuBackend
         selSetDepthCompare = Sel("setDepthCompareFunction:"), selSetDepthWrite = Sel("setDepthWriteEnabled:"),
         selNewDss = Sel("newDepthStencilStateWithDescriptor:"),
         selSetPso = Sel("setRenderPipelineState:"), selSetDss = Sel("setDepthStencilState:"), selSetCull = Sel("setCullMode:"),
-        selDraw = Sel("drawPrimitives:vertexStart:vertexCount:");
+        selDraw = Sel("drawPrimitives:vertexStart:vertexCount:"),
+        selSetVertexBytes = Sel("setVertexBytes:length:atIndex:"), selSetFragmentBytes = Sel("setFragmentBytes:length:atIndex:");
 
     IntPtr device, dss;                                                  // device borrowed (identity only); dss owned
     readonly Dictionary<string, (IntPtr vs, IntPtr fs)> functions = [];  // per ShaderSource.Hash; zeros = compile failed
     readonly Dictionary<(string, MetalPassFormat), IntPtr> psos = [];    // zero = build failed
     bool loggedUnavailable, loggedException;
 
-    public bool Draw(DisplayPipeline pipeline, ShaderSource program)
+    public bool Draw(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms)
     {
         try
         {
@@ -47,7 +48,14 @@ public sealed unsafe class MetalBackend : IGpuBackend
             Send(enc, selSetPso, pso);
             Send(enc, selSetDss, dss);
             Send(enc, selSetCull, CullNone);
-            Send(enc, selDraw, PrimitiveTriangle, 0, 3);
+            if (!uniforms.IsEmpty)
+                fixed (byte* u = uniforms)
+                {
+                    // copied by Metal at encode time; index chosen to stay clear of Rhino's buffer slots (see Uniforms.MetalIndex)
+                    Send(enc, selSetVertexBytes, u, (nuint)uniforms.Length, Uniforms.MetalIndex);
+                    Send(enc, selSetFragmentBytes, u, (nuint)uniforms.Length, Uniforms.MetalIndex);
+                }
+            Send(enc, selDraw, PrimitiveTriangle, 0, program.VertexCount);
             return true;
         }
         catch (Exception ex)
@@ -94,8 +102,8 @@ public sealed unsafe class MetalBackend : IGpuBackend
         IntPtr vs = IntPtr.Zero, fs = IntPtr.Zero;
         try
         {
-            vs = Function(ShaderCompiler.ToMsl(ShaderCompiler.ToSpirv(program.Vertex, ShaderStage.Vertex)), "vertex");
-            fs = Function(ShaderCompiler.ToMsl(ShaderCompiler.ToSpirv(program.Fragment, ShaderStage.Fragment)), "fragment");
+            vs = Function(ShaderCompiler.ToMsl(ShaderCompiler.ToSpirv(program.Vertex, ShaderStage.Vertex), ShaderStage.Vertex), "vertex");
+            fs = Function(ShaderCompiler.ToMsl(ShaderCompiler.ToSpirv(program.Fragment, ShaderStage.Fragment), ShaderStage.Fragment), "fragment");
             return functions[program.Hash] = (vs, fs);
         }
         catch (ShaderCompileException ex)

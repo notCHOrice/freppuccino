@@ -12,7 +12,7 @@ static unsafe class D3D11Native
     const int QueryInterface = 0, Release = 2;
 
     // ID3D11Device (+ ID3D11Device1)
-    const int Dev_CreateVertexShader = 12, Dev_CreatePixelShader = 15, Dev_CreateDepthStencilState = 21,
+    const int Dev_CreateBuffer = 3, Dev_CreateVertexShader = 12, Dev_CreatePixelShader = 15, Dev_CreateDepthStencilState = 21,
         Dev_CreateRasterizerState = 22, Dev_GetFeatureLevel = 37, Dev_GetCreationFlags = 38,
         Dev1_CreateDeviceContextState = 47;
 
@@ -20,6 +20,8 @@ static unsafe class D3D11Native
     const int Child_SetPrivateData = 5;
 
     // ID3D11DeviceContext (+ ID3D11DeviceContext1)
+    const int Ctx_VSSetConstantBuffers = 7, Ctx_PSSetConstantBuffers = 16, Ctx_UpdateSubresource = 48,
+        Ctx_VSGetConstantBuffers = 72, Ctx_PSGetConstantBuffers = 77;
     const int Ctx_PSSetShader = 9, Ctx_VSSetShader = 11, Ctx_Draw = 13, Ctx_IASetInputLayout = 17, Ctx_GSSetShader = 23,
         Ctx_IASetPrimitiveTopology = 24, Ctx_OMSetRenderTargets = 33, Ctx_OMSetBlendState = 35, Ctx_OMSetDepthStencilState = 36,
         Ctx_RSSetState = 43, Ctx_RSSetViewports = 44, Ctx_HSSetShader = 60, Ctx_DSSetShader = 64,
@@ -38,6 +40,8 @@ static unsafe class D3D11Native
     public static readonly Guid IID_ID3DUserDefinedAnnotation = new("b2daad8b-03d4-4dbf-95eb-32ab4b63d0ab");
     static readonly Guid WKPDID_D3DDebugObjectName = new("429b8c22-9188-4b0c-8742-acb0bf85c200");
 
+    public const int USAGE_DEFAULT = 0;
+    public const uint BIND_CONSTANT_BUFFER = 4;
     public const uint SDK_VERSION = 7, CREATE_DEVICE_SINGLETHREADED = 1, CONTEXT_STATE_SINGLETHREADED = 1;
     public const int FEATURE_LEVEL_11_0 = 0xb000, DEVICE_CONTEXT_IMMEDIATE = 0, TOPOLOGY_TRIANGLELIST = 4;
     public const int MaxRenderTargets = 8, MaxViewports = 16;
@@ -76,6 +80,26 @@ static unsafe class D3D11Native
         fixed (byte* c = code) hr = ((delegate* unmanaged<IntPtr, byte*, nuint, IntPtr, IntPtr*, int>)Vt(dev)[Dev_CreatePixelShader])(dev, c, (nuint)code.Length, IntPtr.Zero, &r);
         ps = hr < 0 ? IntPtr.Zero : r; return hr;
     }
+
+    /// Default-usage buffer, no initial data.
+    public static int CreateBuffer(IntPtr dev, in BufferDesc d, out IntPtr buf)
+    {
+        IntPtr r = IntPtr.Zero; int hr;
+        fixed (BufferDesc* p = &d) hr = ((delegate* unmanaged<IntPtr, BufferDesc*, void*, IntPtr*, int>)Vt(dev)[Dev_CreateBuffer])(dev, p, null, &r);
+        buf = r; return hr;
+    }
+
+    /// Whole-resource update (box null), as required for constant buffers.
+    public static void UpdateSubresource(IntPtr c, IntPtr res, ReadOnlySpan<byte> data)
+    {
+        fixed (byte* p = data) ((delegate* unmanaged<IntPtr, IntPtr, uint, void*, void*, uint, uint, void>)Vt(c)[Ctx_UpdateSubresource])(c, res, 0, null, p, 0, 0);
+    }
+
+    public static void VSSetConstantBuffer(IntPtr c, uint slot, IntPtr b) => ((delegate* unmanaged<IntPtr, uint, uint, IntPtr*, void>)Vt(c)[Ctx_VSSetConstantBuffers])(c, slot, 1, &b);
+    public static void PSSetConstantBuffer(IntPtr c, uint slot, IntPtr b) => ((delegate* unmanaged<IntPtr, uint, uint, IntPtr*, void>)Vt(c)[Ctx_PSSetConstantBuffers])(c, slot, 1, &b);
+    /// AddRef'd (or zero).
+    public static IntPtr VSGetConstantBuffer(IntPtr c, uint slot) { IntPtr b = IntPtr.Zero; ((delegate* unmanaged<IntPtr, uint, uint, IntPtr*, void>)Vt(c)[Ctx_VSGetConstantBuffers])(c, slot, 1, &b); return b; }
+    public static IntPtr PSGetConstantBuffer(IntPtr c, uint slot) { IntPtr b = IntPtr.Zero; ((delegate* unmanaged<IntPtr, uint, uint, IntPtr*, void>)Vt(c)[Ctx_PSGetConstantBuffers])(c, slot, 1, &b); return b; }
 
     public static int CreateRasterizerState(IntPtr dev, in RasterizerDesc d, out IntPtr rs)
     {
@@ -243,6 +267,10 @@ static unsafe class D3D11Native
 
 [StructLayout(LayoutKind.Sequential)]
 struct Viewport { public float X, Y, Width, Height, MinDepth, MaxDepth; }
+
+/// D3D11_BUFFER_DESC (24 bytes)
+[StructLayout(LayoutKind.Sequential)]
+struct BufferDesc { public uint ByteWidth; public int Usage; public uint BindFlags, CPUAccessFlags, MiscFlags, StructureByteStride; }
 
 /// D3D11_RASTERIZER_DESC (40 bytes)
 [StructLayout(LayoutKind.Sequential)]

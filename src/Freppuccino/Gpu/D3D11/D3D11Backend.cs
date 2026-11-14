@@ -34,20 +34,21 @@ public sealed class D3D11Backend : IGpuBackend
     IntPtr device;          // Rhino's, not owned; identity only (cache key)
     IntPtr device1;         // ours (QI'd)
     IntPtr rs, dss;         // ours
+    IntPtr cb;              // ours: Uniforms.MaxBytes constant buffer, b0
     IntPtr ctxState;        // ours (ID3DDeviceContextState), lazily created
     bool ctxStateFailed;
     int featureLevel;
     bool initOk;
 
-    public bool Draw(DisplayPipeline pipeline, ShaderSource program)
+    public bool Draw(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms)
     {
         if (!OperatingSystem.IsWindows()) return false;
-        try { return DrawWin(pipeline, program); }
+        try { return DrawWin(pipeline, program, uniforms); }
         catch (Exception ex) { LogOnce("draw:" + ex.GetType().Name, "Freppuccino D3D11: " + ex); return false; }
     }
 
     [SupportedOSPlatform("windows")]
-    bool DrawWin(DisplayPipeline pipeline, ShaderSource program)
+    bool DrawWin(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms)
     {
         var dev = pipeline.GetDirect3d11Device();
         var ctx = pipeline.GetDirect3d11DeviceContext();
@@ -65,11 +66,12 @@ public sealed class D3D11Backend : IGpuBackend
         };
         if (StateMode == D3D11StateMode.Swap && !swap) LogOnce("swapfallback", "Freppuccino D3D11: Swap requested but unavailable; using Manual");
 
+        var draw = new DrawArgs(prog, uniforms.IsEmpty ? null : uniforms.ToArray(), program.VertexCount);
         var ann = QI(ctx, IID_ID3DUserDefinedAnnotation);
         if (ann != IntPtr.Zero) BeginEvent(ann, "Freppuccino");
         try
         {
-            if (swap) DrawSwapped(ctx, prog); else DrawManual(ctx, prog);
+            if (swap) DrawSwapped(ctx, draw); else DrawManual(ctx, draw);
         }
         finally
         {
@@ -91,7 +93,8 @@ public sealed class D3D11Backend : IGpuBackend
         device1 = QI(dev, IID_ID3D11Device1); // only needed for Swap
         Check(CreateRasterizerState(dev, RasterizerDesc.SolidNoCull, out rs), "CreateRasterizerState");
         Check(CreateDepthStencilState(dev, DepthStencilDesc.Disabled, out dss), "CreateDepthStencilState");
-        SetName(rs, "Freppuccino RS"); SetName(dss, "Freppuccino DSS");
+        Check(CreateBuffer(dev, new BufferDesc { ByteWidth = Uniforms.MaxBytes, Usage = USAGE_DEFAULT, BindFlags = BIND_CONSTANT_BUFFER }, out cb), "CreateBuffer");
+        SetName(rs, "Freppuccino RS"); SetName(dss, "Freppuccino DSS"); SetName(cb, "Freppuccino CB");
         return true;
     }
 
@@ -115,7 +118,7 @@ public sealed class D3D11Backend : IGpuBackend
     }
 
     [SupportedOSPlatform("windows")]
-    void DrawSwapped(IntPtr ctx, Program prog)
+    void DrawSwapped(IntPtr ctx, DrawArgs draw)
     {
         // Our state object starts empty: carry Rhino's RT/DS views + viewports across.
         Span<IntPtr> rtvs = stackalloc IntPtr[MaxRenderTargets];
@@ -127,8 +130,8 @@ public sealed class D3D11Backend : IGpuBackend
         {
             OMSetRenderTargets(ctx, rtvs, dsv);
             RSSetViewports(ctx, vps[..nvp]);
-            Bind(ctx, prog);
-            D3D11Native.Draw(ctx, 3, 0);
+            Bind(ctx, draw);
+            D3D11Native.Draw(ctx, draw.VertexCount, 0);
             // Don't let our (inactive) state hold Rhino's views between frames.
             OMSetRenderTargets(ctx, ReadOnlySpan<IntPtr>.Empty, IntPtr.Zero);
         }
@@ -142,9 +145,9 @@ public sealed class D3D11Backend : IGpuBackend
     }
 
     [SupportedOSPlatform("windows")]
-    unsafe void DrawManual(IntPtr ctx, Program prog)
+    unsafe void DrawManual(IntPtr ctx, DrawArgs draw)
     {
-        // Save (Get* AddRefs). VB/IB/CB/SRV/samplers/RT/viewport untouched by us → not saved.
+        // Save (Get* AddRefs). VB/IB/SRV/samplers/RT/viewport and CB slots other than 0 untouched by us → not saved.
         int topo = IAGetPrimitiveTopology(ctx);
         IntPtr il = IAGetInputLayout(ctx);
         IntPtr vs = VSGetShader(ctx), ps = PSGetShader(ctx), gs = GSGetShader(ctx), hs = HSGetShader(ctx), ds = DSGetShader(ctx);
@@ -152,10 +155,11 @@ public sealed class D3D11Backend : IGpuBackend
         float* bf = stackalloc float[4];
         IntPtr bs = OMGetBlendState(ctx, bf, out uint mask);
         IntPtr dssOld = OMGetDepthStencilState(ctx, out uint sref);
+        IntPtr vcb = draw.Uniforms != null ? VSGetConstantBuffer(ctx, 0) : IntPtr.Zero, pcb = draw.Uniforms != null ? PSGetConstantBuffer(ctx, 0) : IntPtr.Zero;
         try
         {
-            Bind(ctx, prog);
-            D3D11Native.Draw(ctx, 3, 0);
+            Bind(ctx, draw);
+            D3D11Native.Draw(ctx, draw.VertexCount, 0);
         }
         finally
         {
@@ -165,15 +169,28 @@ public sealed class D3D11Backend : IGpuBackend
             RSSetState(ctx, rsOld);
             OMSetBlendState(ctx, bs, bf, mask);
             OMSetDepthStencilState(ctx, dssOld, sref);
+            if (draw.Uniforms != null) { VSSetConstantBuffer(ctx, 0, vcb); PSSetConstantBuffer(ctx, 0, pcb); SafeRelease(ref vcb); SafeRelease(ref pcb); }
             SafeRelease(ref il); SafeRelease(ref vs); SafeRelease(ref ps); SafeRelease(ref gs); SafeRelease(ref hs); SafeRelease(ref ds);
             SafeRelease(ref rsOld); SafeRelease(ref bs); SafeRelease(ref dssOld);
         }
     }
 
-    /// TriangleList, no input layout/VB, our VS/PS, no GS/HS/DS, cull none, opaque blend (null = default), depth off.
+    sealed record DrawArgs(Program Prog, byte[]? Uniforms, uint VertexCount);
+
+    /// TriangleList, no input layout/VB, our VS/PS, no GS/HS/DS, cull none, opaque blend (null = default), depth off, uniforms → b0.
     [SupportedOSPlatform("windows")]
-    unsafe void Bind(IntPtr ctx, Program prog)
+    unsafe void Bind(IntPtr ctx, DrawArgs draw)
     {
+        var prog = draw.Prog;
+        if (draw.Uniforms != null)
+        {
+            Span<byte> full = stackalloc byte[Uniforms.MaxBytes]; // CB updates must cover the whole buffer
+            full.Clear();
+            draw.Uniforms.CopyTo(full);
+            UpdateSubresource(ctx, cb, full);
+            VSSetConstantBuffer(ctx, 0, cb);
+            PSSetConstantBuffer(ctx, 0, cb);
+        }
         IASetPrimitiveTopology(ctx, TOPOLOGY_TRIANGLELIST);
         IASetInputLayout(ctx, IntPtr.Zero);
         VSSetShader(ctx, prog.Vs);
@@ -219,7 +236,7 @@ public sealed class D3D11Backend : IGpuBackend
         foreach (var p in programs.Values) { var v = p.Vs; var f = p.Ps; SafeRelease(ref v); SafeRelease(ref f); }
         programs.Clear(); failed.Clear();
         SafeRelease(ref ctxState); ctxStateFailed = false;
-        SafeRelease(ref rs); SafeRelease(ref dss); SafeRelease(ref device1);
+        SafeRelease(ref rs); SafeRelease(ref dss); SafeRelease(ref cb); SafeRelease(ref device1);
         device = IntPtr.Zero; initOk = false;
     }
 

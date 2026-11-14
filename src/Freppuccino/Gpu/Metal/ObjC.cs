@@ -27,6 +27,7 @@ static unsafe class ObjC
     public static IntPtr Send(IntPtr o, IntPtr s, byte* a) => ((delegate* unmanaged<IntPtr, IntPtr, byte*, IntPtr>)send)(o, s, a);
     public static IntPtr Send(IntPtr o, IntPtr s, IntPtr a, IntPtr* err) => ((delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr*, IntPtr>)send)(o, s, a, err);
     public static IntPtr Send(IntPtr o, IntPtr s, IntPtr a, IntPtr b, IntPtr* err) => ((delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, IntPtr*, IntPtr>)send)(o, s, a, b, err);
+    public static void Send(IntPtr o, IntPtr s, void* a, nuint b, nuint c) => ((delegate* unmanaged<IntPtr, IntPtr, void*, nuint, nuint, void>)send)(o, s, a, b, c);
     public static void Send(IntPtr o, IntPtr s, nuint a, nuint b, nuint c) => ((delegate* unmanaged<IntPtr, IntPtr, nuint, nuint, nuint, void>)send)(o, s, a, b, c);
 
     static readonly IntPtr selAlloc = Sel("alloc"), selInit = Sel("init"), selRelease = Sel("release"),

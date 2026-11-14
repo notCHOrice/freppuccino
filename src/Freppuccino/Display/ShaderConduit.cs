@@ -1,15 +1,19 @@
 using Freppuccino.Gpu;
+using Freppuccino.Scene;
 using Freppuccino.Shaders;
 using Rhino;
 using Rhino.Display;
+using Rhino.Geometry;
 
 namespace Freppuccino.Display;
 
 /// Order (observed, Mac): unselected objects -> PostDrawObjects (us) -> DrawForeground -> selected/highlight pass -> DrawOverlay (gumball etc).
+/// We draw depth-off over the unselected wires; later Rhino draws land on top. One RhinoStateReset after our draws (Rhino state cache).
 public sealed class ShaderConduit : DisplayConduit
 {
-    public ShaderSource Program { get; set; } = TriangleShader.Source;
-    bool loggedFailure;
+    const string Badge = "FREP MODE";
+    const int BadgeTextHeight = 11, BadgeMargin = 10, BadgePadX = 9, BadgePadY = 5;
+    bool loggedFailure, loggedCap;
 
     protected override void PostDrawObjects(DrawEventArgs e)
     {
@@ -17,12 +21,48 @@ public sealed class ShaderConduit : DisplayConduit
         if (!FreppuccinoDisplayMode.IsActive(dp)) return;
         try
         {
-            if (GpuBackends.For(dp)?.Draw(dp, Program) == true) RhinoStateReset.Apply(dp);
+            var gpu = GpuBackends.For(dp);
+            if (gpu == null) return;
+            bool drew = false;
+
+            var spheres = SphereScene.Get(e.RhinoDoc);
+            if (spheres.Count > 0)
+            {
+                if (spheres.Count > FrepShaderGen.MaxSpheres && !loggedCap)
+                {
+                    RhinoApp.WriteLine($"Freppuccino: {spheres.Count} spheres, drawing first {FrepShaderGen.MaxSpheres}");
+                    loggedCap = true;
+                }
+                int n = Math.Min(spheres.Count, FrepShaderGen.MaxSpheres);
+                drew |= gpu.Draw(dp, FrepShaderGen.Scene(n), FrepShaderGen.SceneUniforms(dp.Viewport, spheres, FrepSettings.Blend));
+            }
+
+            var (r, size) = BadgeRect(dp);
+            drew |= gpu.Draw(dp, PillShader.Source, PillShader.Uniforms(r.Left, r.Top, r.Right, r.Bottom, size.Width, size.Height));
+
+            if (drew) RhinoStateReset.Apply(dp);
         }
         catch (Exception ex)
         {
             if (!loggedFailure) RhinoApp.WriteLine("Freppuccino: " + ex);
             loggedFailure = true;
         }
+    }
+
+    protected override void DrawForeground(DrawEventArgs e)
+    {
+        var dp = e.Display;
+        if (!FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
+        var (r, _) = BadgeRect(dp);
+        dp.Draw2dText(Badge, System.Drawing.Color.FromArgb(30, 30, 30), new Point2d((r.Left + r.Right) * 0.5, (r.Top + r.Bottom) * 0.5), true, BadgeTextHeight, "Arial");
+    }
+
+    /// Badge rect in Rhino 2D screen coords (y down), sized from the measured text.
+    static (System.Drawing.RectangleF rect, System.Drawing.Size view) BadgeRect(DisplayPipeline dp)
+    {
+        var size = dp.Viewport.Size;
+        var t = dp.Measure2dText(Badge, new Point2d(0, 0), false, 0, BadgeTextHeight, "Arial");
+        float w = Math.Abs(t.Width) + 2 * BadgePadX, h = Math.Abs(t.Height) + 2 * BadgePadY; // Height comes back negative (y-up rect)
+        return (new System.Drawing.RectangleF(BadgeMargin, BadgeMargin, w, h), size);
     }
 }

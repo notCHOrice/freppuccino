@@ -37,7 +37,10 @@ public static class ShaderCompiler
         }
     }
 
-    public static string ToMsl(byte[] spirv) => Xc.Cross(spirv, Xc.BackendMsl, (Xc.OptMslVersion, 20100));
+    /// Uniform block (set 0, binding 0) -> [[buffer(Uniforms.MetalIndex)]].
+    public static string ToMsl(byte[] spirv, ShaderStage stage) => Xc.Cross(spirv, Xc.BackendMsl, (Xc.OptMslVersion, 20100),
+        comp => Xc.MslBind(comp, stage, 0, 0, Uniforms.MetalIndex));
+    /// Uniform block -> cbuffer register(b0) (from the binding decoration).
     public static string ToHlsl(byte[] spirv) => Xc.Cross(spirv, Xc.BackendHlsl, (Xc.OptHlslShaderModel, 50));
 
     static class Sc
@@ -75,9 +78,20 @@ public static class ShaderCompiler
         [DllImport(L)] static extern int spvc_compiler_options_set_uint(IntPtr opts, int opt, uint v);
         [DllImport(L)] static extern int spvc_compiler_install_compiler_options(IntPtr comp, IntPtr opts);
         [DllImport(L)] static extern int spvc_compiler_compile(IntPtr comp, out IntPtr src);
+        [DllImport(L)] static extern int spvc_compiler_msl_add_resource_binding(IntPtr comp, in MslResourceBinding b);
+
+        /// spvc_msl_resource_binding (v1 layout)
+        [StructLayout(LayoutKind.Sequential)]
+        struct MslResourceBinding { public int Stage; public uint DescSet, Binding, MslBuffer, MslTexture, MslSampler; }
+
+        public static void MslBind(IntPtr comp, ShaderStage stage, uint set, uint binding, uint buffer)
+        {
+            var b = new MslResourceBinding { Stage = stage == ShaderStage.Vertex ? 0 : 4 /*SpvExecutionModel*/, DescSet = set, Binding = binding, MslBuffer = buffer };
+            if (spvc_compiler_msl_add_resource_binding(comp, b) != 0) throw new ShaderCompileException("spirv-cross: msl_add_resource_binding failed");
+        }
 
         /// All spvc allocations belong to the context; destroying it frees everything (incl. the returned string, copied first).
-        public static string Cross(byte[] spirv, int backend, (int opt, uint value) option)
+        public static string Cross(byte[] spirv, int backend, (int opt, uint value) option, Action<IntPtr>? configure = null)
         {
             if (spirv.Length == 0 || spirv.Length % 4 != 0) throw new ShaderCompileException($"spirv-cross: bad SPIR-V length {spirv.Length}");
             var words = new uint[spirv.Length / 4];
@@ -90,6 +104,7 @@ public static class ShaderCompiler
                 Check(spvc_compiler_create_compiler_options(comp, out var opts), ctx);
                 Check(spvc_compiler_options_set_uint(opts, option.opt, option.value), ctx);
                 Check(spvc_compiler_install_compiler_options(comp, opts), ctx);
+                configure?.Invoke(comp);
                 Check(spvc_compiler_compile(comp, out var src), ctx);
                 return Marshal.PtrToStringUTF8(src) ?? throw new ShaderCompileException("spirv-cross: null output");
             }
