@@ -40,6 +40,12 @@ public static class SdfUserText
         attributes.SetUserString(VersionKey, SchemaVersion);
         attributes.SetUserString(TypeKey, sdfType);
         attributes.SetUserString(UnitsKey, units.ToString());
+        WriteFrame(attributes, frame);
+    }
+
+    /// <summary>Writes SDF.Frame.Origin / XAxis / YAxis only (used when a transform moves the primitive).</summary>
+    public static void WriteFrame(ObjectAttributes attributes, Plane frame)
+    {
         attributes.SetUserString(OriginKey, Format(frame.Origin.X, frame.Origin.Y, frame.Origin.Z));
         attributes.SetUserString(XAxisKey, Format(frame.XAxis.X, frame.XAxis.Y, frame.XAxis.Z));
         attributes.SetUserString(YAxisKey, Format(frame.YAxis.X, frame.YAxis.Y, frame.YAxis.Z));
@@ -62,6 +68,57 @@ public static class SdfUserText
         WriteFloat(attributes, name + ".x", x);
         WriteFloat(attributes, name + ".y", y);
         WriteFloat(attributes, name + ".z", z);
+    }
+
+    /// <summary>SDF.Type, or null if the object carries no F-rep metadata.</summary>
+    public static string? ReadType(ObjectAttributes attributes)
+    {
+        var type = attributes.GetUserString(TypeKey);
+        return string.IsNullOrEmpty(type) ? null : type;
+    }
+
+    /// <summary>Reads SDF.Frame.*; Z axis is X × Y.</summary>
+    public static bool TryReadFrame(ObjectAttributes attributes, out Plane frame)
+    {
+        frame = Plane.Unset;
+        if (!TryParse(attributes.GetUserString(OriginKey), out var ox, out var oy, out var oz) ||
+            !TryParse(attributes.GetUserString(XAxisKey), out var xx, out var xy, out var xz) ||
+            !TryParse(attributes.GetUserString(YAxisKey), out var yx, out var yy, out var yz))
+            return false;
+
+        frame = new Plane(new Point3d(ox, oy, oz), new Vector3d(xx, xy, xz), new Vector3d(yx, yy, yz));
+        return frame.IsValid;
+    }
+
+    /// <summary>Reads SDF.&lt;name&gt;.</summary>
+    public static bool TryReadFloat(ObjectAttributes attributes, string name, out double value) =>
+        TryParse(attributes.GetUserString(Prefix + name), out value);
+
+    /// <summary>Reads SDF.&lt;name&gt;.x / .y / .z.</summary>
+    public static bool TryReadVec3(ObjectAttributes attributes, string name, out Vector3d value)
+    {
+        value = Vector3d.Unset;
+        if (!TryReadFloat(attributes, name + ".x", out var x) ||
+            !TryReadFloat(attributes, name + ".y", out var y) ||
+            !TryReadFloat(attributes, name + ".z", out var z))
+            return false;
+        value = new Vector3d(x, y, z);
+        return true;
+    }
+
+    private static bool TryParse(string? text, out double value)
+    {
+        value = 0.0;
+        return !string.IsNullOrWhiteSpace(text) &&
+               double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryParse(string? text, out double x, out double y, out double z)
+    {
+        x = y = z = 0.0;
+        var parts = text?.Split(',');
+        return parts is { Length: 3 } &&
+               TryParse(parts[0], out x) && TryParse(parts[1], out y) && TryParse(parts[2], out z);
     }
 
     private static string Format(double x, double y, double z) =>

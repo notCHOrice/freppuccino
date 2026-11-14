@@ -67,4 +67,52 @@ public class FBoxCommand : Command
             Math.Abs(box.Y.Length) * 0.5,
             Math.Abs(box.Z.Length) * 0.5);
     }
+
+    /// <summary>
+    /// Moves the frame and rescales b. Works for any transform that keeps the box axes perpendicular:
+    /// move, rotate, mirror, uniform scale, and non-uniform scale along the box's own axes.
+    /// Shear, or non-uniform scale along other directions, turns the box into a parallelepiped,
+    /// which sdBox can't represent, so it is rejected.
+    /// </summary>
+    public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
+    {
+        if (!SdfUserText.TryReadFrame(attributes, out var frame) || !SdfUserText.TryReadVec3(attributes, "b", out var b))
+        {
+            reason = "missing or unreadable SDF.Frame.* / SDF.b.*";
+            return false;
+        }
+
+        var origin = frame.Origin;
+        origin.Transform(xform);
+
+        // Vector3d.Transform applies only the linear part, so translation doesn't affect the axes.
+        var x = frame.XAxis; x.Transform(xform);
+        var y = frame.YAxis; y.Transform(xform);
+        var z = frame.ZAxis; z.Transform(xform);
+
+        double sx = x.Length, sy = y.Length, sz = z.Length;
+        const double degenerate = 1e-12;
+        if (sx < degenerate || sy < degenerate || sz < degenerate)
+        {
+            reason = "transform flattens the box";
+            return false;
+        }
+
+        x /= sx; y /= sy; z /= sz;
+
+        const double perpendicularTolerance = 1e-6;
+        if (Math.Abs(x * y) > perpendicularTolerance ||
+            Math.Abs(y * z) > perpendicularTolerance ||
+            Math.Abs(z * x) > perpendicularTolerance)
+        {
+            reason = "transform skews the box (shear or non-uniform scale off the box axes); sdBox can't represent it";
+            return false;
+        }
+
+        // Mirroring can flip X × Y relative to the transformed Z; that's fine, sdBox is symmetric.
+        SdfUserText.WriteFrame(attributes, new Plane(origin, x, y));
+        SdfUserText.WriteVec3(attributes, "b", b.X * sx, b.Y * sy, b.Z * sz);
+        reason = null;
+        return true;
+    }
 }
