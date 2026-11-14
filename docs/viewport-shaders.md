@@ -50,7 +50,7 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ```
 FreppuccinoPlugin (AtStartup)
   OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept)
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(ShadedId), HighlightSurfaces=false + UpdateDisplayMode (recreated if an old wireframe copy exists)
 ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if N>0; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
 Command "FrepBlend"               set smooth-union k (session only)
