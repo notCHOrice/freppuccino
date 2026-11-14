@@ -27,8 +27,6 @@ export interface SceneNode {
 }
 
 export interface UiSettings {
-  /** global smooth-union blend k, model units */
-  blend: number
   units: string
 }
 
@@ -39,19 +37,20 @@ export type HostMessage =
   | { type: 'state'; scene: SceneNode[]; selection: Guid[]; settings: UiSettings; theme: Theme }
   | { type: 'scene'; scene: SceneNode[] }
   | { type: 'selection'; ids: Guid[] }
-  | { type: 'settings'; settings: UiSettings }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; text: string }
 
 // ── UI → Host ──
 export type SelectMode = 'replace' | 'add' | 'toggle'
-export type AllowedCommand = 'FBox' | 'FSphere' | 'Freppuccino'
+/** Must match UiController.AllowedCommands */
+export type AllowedCommand =
+  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FPyramid' | 'FEllipsoid' | 'FTorus'
+  | 'Freppuccino'
 
 export type UiMessage =
   | { type: 'ready' }
   | { type: 'select'; ids: Guid[]; mode: SelectMode }
   | { type: 'setVisible'; id: Guid; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
-  | { type: 'setBlend'; k: number }
   /** STUB on the host */
   | { type: 'setParam'; id: Guid; name: string; value: number }
   /** STUB on the host. For subtract, a is the target and b the tool. */

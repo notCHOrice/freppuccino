@@ -1,29 +1,38 @@
-import { Box, Circle, Shapes, SquaresIntersect, SquaresSubtract, SquaresUnite, type LucideIcon } from 'lucide-react'
-import type { OperationKind, SceneNode } from '@/bridge/protocol'
+import type { BrandIconName } from '@/components/brand-icon'
+import type { AllowedCommand, OperationKind, SceneNode } from '@/bridge/protocol'
 
 interface PrimitiveInfo {
   label: string
-  icon: LucideIcon
-  /** display names for SDF params; unknown params show their raw key */
+  icon: BrandIconName
+  /** Rhino command that creates it */
+  command: AllowedCommand
+  /** display names for SDF params, in display order; unknown params show their raw key after these */
   params: Record<string, string>
 }
 
-/** Keyed by SDF.Type (IQ function name). Unknown types still show, with raw names. */
+/**
+ * Keyed by SDF.Type (IQ function name), in the order the Create grid shows them.
+ * Param meanings come from the F* commands (src/Freppuccino/Commands). Unknown types still show, with raw names.
+ */
 export const PRIMITIVES: Record<string, PrimitiveInfo> = {
-  sdSphere: { label: 'Sphere', icon: Circle, params: { s: 'Radius' } },
-  sdBox: { label: 'Box', icon: Box, params: { 'b.x': 'Half X', 'b.y': 'Half Y', 'b.z': 'Half Z' } },
+  sdBox: { label: 'Box', icon: 'box', command: 'FBox', params: { 'b.x': 'Half X', 'b.y': 'Half Y', 'b.z': 'Half Z' } },
+  sdSphere: { label: 'Sphere', icon: 'sphere', command: 'FSphere', params: { s: 'Radius' } },
+  sdCappedCylinder: { label: 'Cylinder', icon: 'cylinder', command: 'FCylinder', params: { r: 'Radius', h: 'Half height' } },
+  sdCappedCone: { label: 'Cone', icon: 'cone', command: 'FCone', params: { r1: 'Base radius', r2: 'Top radius', h: 'Half height' } },
+  sdPyramid: { label: 'Pyramid', icon: 'pyramid', command: 'FPyramid', params: { s: 'Base side', h: 'Height' } },
+  sdEllipsoid: { label: 'Ellipsoid', icon: 'ellipsoid', command: 'FEllipsoid', params: { 'r.x': 'Semi-axis X', 'r.y': 'Semi-axis Y', 'r.z': 'Semi-axis Z' } },
+  sdTorus: { label: 'Torus', icon: 'torus', command: 'FTorus', params: { 't.x': 'Major radius', 't.y': 'Tube radius' } },
 }
 
-export const OPERATIONS: Record<OperationKind, { label: string; icon: LucideIcon }> = {
-  union: { label: 'Union', icon: SquaresUnite },
-  subtract: { label: 'Subtract', icon: SquaresSubtract },
-  intersect: { label: 'Intersect', icon: SquaresIntersect },
+export const OPERATIONS: Record<OperationKind, { label: string; icon: BrandIconName }> = {
+  union: { label: 'Union', icon: 'union' },
+  subtract: { label: 'Subtract', icon: 'subtract' },
+  intersect: { label: 'Intersect', icon: 'intersect' },
 }
 
-/** Prefer <NodeIcon> (components/node-icon.tsx) in JSX. */
-export function nodeIcon(node: SceneNode): LucideIcon {
-  if (node.kind === 'operation') return node.op ? OPERATIONS[node.op].icon : Shapes
-  return (node.sdfType && PRIMITIVES[node.sdfType]?.icon) || Shapes
+export function nodeIconName(node: SceneNode): BrandIconName | undefined {
+  if (node.kind === 'operation') return node.op && OPERATIONS[node.op].icon
+  return node.sdfType ? PRIMITIVES[node.sdfType]?.icon : undefined
 }
 
 export function typeLabel(node: SceneNode): string {
@@ -31,8 +40,12 @@ export function typeLabel(node: SceneNode): string {
   return (node.sdfType && PRIMITIVES[node.sdfType]?.label) || node.sdfType || 'Primitive'
 }
 
-export function paramLabel(sdfType: string | undefined, key: string): string {
-  return (sdfType && PRIMITIVES[sdfType]?.params[key]) || key
+/** Params with display labels: known ones in catalogue order, then any others (raw key). */
+export function displayParams(node: SceneNode): { key: string; label: string; value: number }[] {
+  const values = node.params ?? {}
+  const known = (node.sdfType && PRIMITIVES[node.sdfType]?.params) || {}
+  const ordered = [...Object.keys(known).filter((k) => k in values), ...Object.keys(values).filter((k) => !(k in known))]
+  return ordered.map((key) => ({ key, label: known[key] ?? key, value: values[key] }))
 }
 
 /** Display labels for every node: the Rhino name if set, else "Sphere 1", "Union 2", ... in tree order. */

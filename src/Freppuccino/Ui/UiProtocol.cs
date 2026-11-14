@@ -51,7 +51,7 @@ public sealed record SceneNode(
     double? K = null,
     IReadOnlyList<SceneNode>? Children = null);
 
-public sealed record UiSettings(double Blend, string Units);
+public sealed record UiSettings(string Units);
 
 // ───────────────────────────── Host → UI ─────────────────────────────
 
@@ -77,11 +77,6 @@ public sealed record SelectionMessage(IReadOnlyList<Guid> Ids) : HostMessage
     public override string Type => "selection";
 }
 
-public sealed record SettingsMessage(UiSettings Settings) : HostMessage
-{
-    public override string Type => "settings";
-}
-
 /// Transient feedback shown in the panel ("info" | "warning" | "error").
 public sealed record NoticeMessage(string Level, string Text) : HostMessage
 {
@@ -98,8 +93,6 @@ public sealed record SetVisibleRequest(Guid Id, bool Visible);
 
 /// Only commands in UiController.AllowedCommands run.
 public sealed record RunCommandRequest(string Command);
-
-public sealed record SetBlendRequest(double K);
 
 /// STUB: edit one SDF parameter of a primitive, e.g. { id, name: "s", value: 2 }.
 public sealed record SetParamRequest(Guid Id, string Name, double Value);

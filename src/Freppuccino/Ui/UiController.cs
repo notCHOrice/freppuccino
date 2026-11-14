@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Freppuccino.Display;
 using Freppuccino.Sdf;
 using Rhino;
 using Rhino.DocObjects;
@@ -10,18 +9,20 @@ namespace Freppuccino.Ui;
 /// Glue between Rhino and the side panel page: pushes scene / selection / settings snapshots when they change
 /// (coalesced on Idle) and handles requests from the page.
 ///
-/// Wired: selection sync both ways, show/hide, global blend, a whitelist of commands.
+/// Wired: selection sync both ways, show/hide, a whitelist of commands.
 /// Stubbed (UI exists, no implementation yet): <see cref="SetParamRequest"/>, <see cref="ApplyOperationRequest"/>,
 /// <see cref="SetOperationRequest"/>.
 /// </summary>
 public sealed class UiController : IDisposable
 {
     /// Commands the page may run. Keep this a whitelist: the page must not be able to run arbitrary scripts.
-    static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase) { "FBox", "FSphere", "Freppuccino" };
+    static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "FBox", "FSphere", "FCylinder", "FCone", "FPyramid", "FEllipsoid", "FTorus", "Freppuccino",
+    };
 
     readonly WebViewHost web;
     bool sceneDirty, selectionDirty;
-    double sentBlend = double.NaN;
     uint sentDocSerial;
 
     public UiController(WebViewHost web)
@@ -82,24 +83,17 @@ public sealed class UiController : IDisposable
             selectionDirty = false;
             web.Send(new SelectionMessage(SelectedIds(doc)));
         }
-        // FrepBlend (command line) changes the same setting.
-        if (FrepSettings.Blend != sentBlend)
-        {
-            sentBlend = FrepSettings.Blend;
-            web.Send(new SettingsMessage(Settings(doc)));
-        }
     }
 
     void SendState(RhinoDoc doc)
     {
         sentDocSerial = doc.RuntimeSerialNumber;
-        sentBlend = FrepSettings.Blend;
         sceneDirty = selectionDirty = false;
         var theme = Rhino.Runtime.HostUtils.RunningInDarkMode ? "dark" : "light";
         web.Send(new StateMessage(BuildScene(doc), SelectedIds(doc), Settings(doc), theme));
     }
 
-    static UiSettings Settings(RhinoDoc doc) => new(FrepSettings.Blend, doc.ModelUnitSystem.ToString());
+    static UiSettings Settings(RhinoDoc doc) => new(doc.ModelUnitSystem.ToString());
 
     /// Today: a flat list of primitives in document order. Once operations exist (docs/side-panel.md) this is
     /// where the graph gets walked and operands get nested under their operation node.
@@ -177,11 +171,6 @@ public sealed class UiController : IDisposable
                     break;
                 case "runCommand":
                     RunCommand(Parse<RunCommandRequest>(message));
-                    break;
-                case "setBlend":
-                    FrepSettings.Blend = Math.Max(0.0, Parse<SetBlendRequest>(message).K);
-                    sentBlend = FrepSettings.Blend; // the page already shows it; don't echo
-                    doc.Views.Redraw();
                     break;
                 case "setParam":
                     // TODO: write SDF.<name> (SdfUserText.WriteFloat) on a copy of the attributes and

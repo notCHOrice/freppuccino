@@ -60,7 +60,7 @@ let state: HostState = {
   synced: false,
   scene: [],
   selection: [],
-  settings: { blend: 0, units: '' },
+  settings: { units: '' },
   theme: window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
   notice: null,
 }
@@ -91,9 +91,6 @@ transport.listen((m) => {
     case 'selection':
       set({ selection: orderSelection(state.selection, m.ids) })
       break
-    case 'settings':
-      set({ settings: m.settings })
-      break
     case 'notice':
       set({ notice: { id: ++noticeId, level: m.level, text: m.text } })
       break
@@ -101,8 +98,6 @@ transport.listen((m) => {
 })
 
 export function send(message: UiMessage) {
-  // Optimistic: the host doesn't echo values the page just set.
-  if (message.type === 'setBlend') set({ settings: { ...state.settings, blend: message.k } })
   transport.post(message)
 }
 

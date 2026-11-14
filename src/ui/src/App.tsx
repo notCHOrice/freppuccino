@@ -3,12 +3,13 @@ import { useEffect, useMemo } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Separator } from '@/components/ui/separator'
 import { Inspector } from '@/components/inspector'
 import { SceneTree } from '@/components/scene-tree'
 import { dismissNotice, send, useHost } from '@/bridge/host'
 import { indexNodes, labelNodes } from '@/lib/scene'
 import { cn } from '@/lib/utils'
+import appIcon from '@/brand/app-icon.svg'
+import wordmark from '@/brand/wordmark.svg?raw'
 
 export default function App() {
   const host = useHost((s) => s.host)
@@ -27,17 +28,25 @@ export default function App() {
   const selected = useMemo(() => selection.map((id) => byId.get(id)).filter((n) => !!n), [selection, byId])
 
   return (
-    <div className="relative flex h-dvh flex-col overflow-hidden text-xs">
-      <header className="flex h-8 shrink-0 items-center gap-2 px-3">
-        <h1 className="font-semibold">Freppuccino</h1>
-        {host === 'mock' && <Badge variant="outline">Mock host</Badge>}
-        {!synced && <span className="text-muted-foreground">connecting…</span>}
+    <div className="relative flex h-dvh flex-col overflow-hidden">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+        <img src={appIcon} alt="" className="size-6" />
+        {/* Wordmark: ink = currentColor, "FRep" = --wordmark-accent (caramel / caramel-ink per theme) */}
+        <span
+          role="img"
+          aria-label="FRepuccino"
+          className="h-4 text-ink [&>svg]:h-full [&>svg]:w-auto"
+          dangerouslySetInnerHTML={{ __html: wordmark }}
+        />
+        <span className="ml-auto flex items-center gap-1.5">
+          {host === 'mock' && <Badge variant="new">Mock host</Badge>}
+          {!synced && <span className="type-small text-muted-foreground">connecting…</span>}
+        </span>
       </header>
-      <Separator />
 
-      <div className="flex h-7 shrink-0 items-center px-3 text-muted-foreground">
-        <span className="font-medium tracking-wide uppercase text-[0.625rem]">Browser</span>
-        <span className="ml-auto tabular-nums">{byId.size}</span>
+      <div className="flex h-9 shrink-0 items-center px-4 text-muted-foreground">
+        <span className="type-label">Browser</span>
+        <span className="type-numeric ml-auto">{byId.size}</span>
       </div>
       <ScrollArea className="min-h-24 flex-1">
         <SceneTree
@@ -49,8 +58,7 @@ export default function App() {
         />
       </ScrollArea>
 
-      <Separator />
-      <div className="max-h-[65%] shrink-0 overflow-y-auto">
+      <div className="max-h-[65%] shrink-0 overflow-y-auto border-t bg-card">
         <Inspector selected={selected} labels={labels} />
       </div>
 
@@ -71,12 +79,12 @@ function NoticeToast() {
     <div
       role="status"
       className={cn(
-        'absolute inset-x-2 bottom-2 flex items-start gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-md',
-        notice.level === 'error' && 'border-destructive/50 text-destructive',
+        'type-small absolute inset-x-3 bottom-3 flex items-center gap-2 rounded-full border-2 border-ink bg-popover py-1.5 pr-1.5 pl-4 text-popover-foreground shadow-float',
+        notice.level === 'error' && 'border-destructive text-destructive',
       )}
     >
       <span className="flex-1">{notice.text}</span>
-      <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => dismissNotice(notice.id)}>
+      <Button variant="ghost" size="icon-xs" className="rounded-full" aria-label="Dismiss" onClick={() => dismissNotice(notice.id)}>
         <X />
       </Button>
     </div>
