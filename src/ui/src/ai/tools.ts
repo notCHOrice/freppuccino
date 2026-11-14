@@ -31,6 +31,20 @@ const SHAPE_FIELDS = {
   base_center: vec3('pyramid: center of the square base'),
   height: { type: 'number', description: 'pyramid: height from base to apex' },
   base_size: { type: 'number', description: 'pyramid: side length of the square base' },
+  color: { type: 'string', description: 'display color, "#RRGGBB" or a color name; blends mix colors smoothly' },
+}
+
+// Deform (warp) fields: create with deform, change with edit_operation, read back from get_scene.
+const DEFORM_FIELDS = {
+  axis_start: vec3('twist / bend: start of the axis line (twist is 0 here; bending starts here)'),
+  axis_end: vec3('twist / bend: end of the axis line. Default for both: the target\'s bounding box, bottom center → top center'),
+  angle_degrees: { type: 'number', description: 'twist: total twist from axis_start to axis_end (keeps going past the ends); bend: total bend over the axis length' },
+  toward: vec3('bend: direction the shape bends toward (any vector not parallel to the axis)'),
+  count: vec3('repeat: number of copies along each lattice axis, e.g. [5,1,1]; 1 = no repetition on that axis'),
+  spacing: vec3('repeat: distance between copies along each lattice axis (0 where count is 1)'),
+  centered: { type: 'boolean', description: 'repeat: false (default) = the original is the first copy and the rest go the + way; true = copies spread both ways around it' },
+  x_axis: vec3('repeat: optional lattice X direction (default [1,0,0])'),
+  y_axis: vec3('repeat: optional lattice Y direction (default [0,1,0])'),
 }
 
 const TYPES = ['sphere', 'box', 'ellipsoid', 'cylinder', 'cone', 'torus', 'pyramid']
@@ -42,8 +56,9 @@ function tool(name: string, description: string, properties: Record<string, unkn
 export const TOOLS: ToolDef[] = [
   tool(
     'get_scene',
-    'Lists every F-rep primitive (ref, type, shape fields, used_by) and operation node (ref N#, op, k, operands), the roots ' +
-      '(what is drawn), the bounding box and the model units. Call it first, and whenever you are unsure of refs or positions.',
+    'Lists every F-rep primitive (ref, type, shape fields, color, used_by) and operation node (ref N#; CSG: op, k, operands; ' +
+      'deforms: op, target and the deform fields), the roots (what is drawn), the bounding box and the model units. ' +
+      'Call it first, and whenever you are unsure of refs or positions.',
   ),
   tool(
     'create_primitive',
@@ -64,7 +79,7 @@ export const TOOLS: ToolDef[] = [
   ),
   tool(
     'transform',
-    'Moves / rotates / scales primitives, or every primitive under an operation node. Order: scale, then rotate, then translate, ' +
+    'Moves / rotates / scales primitives, or everything under an operation node (deform axes / boxes move along). Order: scale, then rotate, then translate, ' +
       'about pivot (default: center of their bounding box). Non-uniform scale turns spheres into ellipsoids; it fails for shapes ' +
       'that cannot represent the result (e.g. a cylinder squashed across its axis).',
     {
@@ -93,15 +108,37 @@ export const TOOLS: ToolDef[] = [
     ['op', 'operands'],
   ),
   tool(
+    'deform',
+    'Wraps a primitive or node (target) in a deform node, which is drawn instead of the target (like combine, it consumes it). ' +
+      'twist: rotates the shape around the axis line, angle growing linearly from axis_start (0) to axis_end (angle_degrees). ' +
+      'bend: bends the part between axis_start and axis_end into an arc of angle_degrees toward "toward"; the part before ' +
+      'axis_start stays put and the part past axis_end continues straight (rigidly). bend radius = axis length / angle in radians. ' +
+      'repeat: copies the target count[i] times, spacing[i] apart, along the lattice axes (world X/Y/Z by default). ' +
+      'Deforms stack: twist a node, then bend the twisted node. A warning in the result means it will render badly: act on it. ' +
+      'Returns the node ref (N#).',
+    {
+      op: { type: 'string', enum: ['twist', 'bend', 'repeat'] },
+      target: { type: 'string', description: 'primitive or node ref to deform; usually the top node of a finished part' },
+      ...DEFORM_FIELDS,
+    },
+    ['op', 'target'],
+  ),
+  tool(
     'edit_operation',
-    "Changes an operation node's op and/or blend k.",
-    { ref: { type: 'string', description: 'node ref, e.g. "N3"' }, op: { type: 'string', enum: ['union', 'subtract', 'intersect'] }, k: { type: 'number' } },
+    "Changes an operation node: a CSG node's op and/or blend k, or a deform node's fields (omitted fields keep their value; " +
+      "a deform can't change its op).",
+    {
+      ref: { type: 'string', description: 'node ref, e.g. "N3"' },
+      op: { type: 'string', enum: ['union', 'subtract', 'intersect'] },
+      k: { type: 'number' },
+      ...DEFORM_FIELDS,
+    },
     ['ref'],
   ),
   tool(
     'delete',
-    'Deletes primitives and/or operation nodes. Something still used by another operation is kept (delete the parent first). ' +
-      'recursive=true also deletes everything under the given nodes that nothing else uses.',
+    'Deletes primitives and/or operation nodes (a deform\'s axis line / box goes with it). Something still used by another ' +
+      'operation is kept (delete the parent first). recursive=true also deletes everything under the given nodes that nothing else uses.',
     { refs: refs('refs to delete'), recursive: { type: 'boolean' } },
     ['refs'],
   ),
@@ -192,8 +229,10 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return String(args.ref)
     case 'combine':
       return `${result.ref} = ${args.op}(${(args.operands as string[]).join(', ')})${args.k ? ` k=${args.k}` : ''}`
+    case 'deform':
+      return `${result.ref} = ${args.op}(${args.target})${result.warning ? ' ⚠' : ''}`
     case 'edit_operation':
-      return `${result.ref}: ${result.op} k=${result.k}`
+      return result.k !== undefined ? `${result.ref}: ${result.op} k=${result.k}` : `${result.ref}: ${result.op}${result.warning ? ' ⚠' : ''}`
     case 'delete':
       return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
     case 'transform':

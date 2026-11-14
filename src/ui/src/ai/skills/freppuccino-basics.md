@@ -1,6 +1,6 @@
 ---
 name: freppuccino-basics
-description: Coordinate system, primitives, CSG semantics and blending rules. Always loaded.
+description: Coordinate system, primitives, colors, CSG semantics, blending rules and when to deform. Always loaded.
 always: true
 ---
 ## Space and scale
@@ -18,6 +18,13 @@ always: true
 - torus(center, axis, major_radius, minor_radius): the ring lies in the plane perpendicular to axis.
   axis [0,0,1] = lying flat; axis [0,1,0] = standing up in the XZ plane (like a mug handle seen from the front).
 - pyramid(base_center, height, base_size, axis): square base, apex at base_center + axis * height.
+- Every primitive takes an optional color ("#RRGGBB" or a name). Give parts their real colors (a tan cone, red stripes);
+  colors blend smoothly across blended joins. Uncolored parts render light grey.
+
+## Deforms (deform tool)
+- twist, bend and repeat wrap one finished part: spirals and swirls, coils, ropes, hooks and curved parts, arrays and
+  patterns of identical features (studs, pickets, holes). Load the deformations skill before using them.
+- Repeat beats creating many identical primitives: it is one primitive in the shader budget, and edits apply to every copy.
 
 ## CSG (combine)
 - Roots (anything not used by an operation) are all drawn, merged with a sharp union.

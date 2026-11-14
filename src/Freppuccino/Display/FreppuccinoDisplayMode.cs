@@ -6,7 +6,7 @@ namespace Freppuccino.Display;
 /// Created once per machine; recreated if missing or out of date (older Wireframe / shaded copies, other transparency).
 /// Persisted via UpdateDisplayMode.
 ///
-/// "Freppuccino Capture" (hidden from menus) is the same with the proxy Breps invisible (fully transparent, no edges), for the
+/// "Freppuccino Capture" (hidden from menus) is the same with the proxy Breps invisible (fully transparent, no edges) and curves hidden (warp axes), for the
 /// AI's screenshots (Ai/AiCapture.cs): only the shader's CSG result, grid and axes, so subtracted tools don't show as ghosts.
 public static class FreppuccinoDisplayMode
 {
@@ -33,6 +33,7 @@ public static class FreppuccinoDisplayMode
             a.ShowSilhouttes = false;
             a.ShowTangentEdges = false;
             a.ShowTangentSeams = false;
+            a.ShowCurves = false; // warp axis lines
         }, inMenu: false);
     }
 
@@ -62,7 +63,7 @@ public static class FreppuccinoDisplayMode
         m.DisplayAttributes.ShadingEnabled && Math.Abs(m.DisplayAttributes.FrontMaterialTransparency - Transparency) < 1e-3;
 
     static bool IsCurrentCapture(DisplayModeDescription m) =>
-        m.DisplayAttributes.ShadingEnabled && m.DisplayAttributes.FrontMaterialTransparency > 0.999 && !m.DisplayAttributes.ShowSurfaceEdges && !m.InMenu;
+        m.DisplayAttributes.ShadingEnabled && m.DisplayAttributes.FrontMaterialTransparency > 0.999 && !m.DisplayAttributes.ShowSurfaceEdges && !m.DisplayAttributes.ShowCurves && !m.InMenu;
 
     public static bool IsActive(DisplayPipeline p) =>
         p.DisplayPipelineAttributes?.Id is { } id && id != Guid.Empty && (id == Id || id == CaptureId);

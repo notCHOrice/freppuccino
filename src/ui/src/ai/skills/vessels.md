@@ -24,6 +24,7 @@ description: Cups, mugs, bowls, vases, bottles, pots: hollow shapes, wall thickn
 2. handle: torus, center [52,0,50], axis [0,1,0], major_radius 18, minor_radius 5
 3. cavity: cone, start [0,0,7], end [0,0,105], start_radius 32, end_radius 36
 4. N_a = union(body, handle, k 3), then N_b = subtract(N_a, cavity, k 1.5)
+Color every part the same (e.g. "#F2EEE6" ceramic white or "#2B6A8C" glaze); the cavity's color shows on the inside.
 Check: front view shows the handle attached on the right and the walls; top view shows the open interior.
 
 ## Saucer / foot / base

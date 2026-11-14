@@ -21,6 +21,7 @@ description: Animals, characters, toys (rubber duck, cat, snowman, mushroom...):
 4. beak: ellipsoid, center [48,0,64], radii [12,9,4]
 5. eye_l / eye_r: spheres, radius 3.5, centers [40, 9, 74] and [40, -9, 74]
 6. N_a = union(body, tail, k 8); N_b = union(N_a, head, k 12); N_c = union(N_b, beak, k 2); N_d = union(N_c, eye_l, eye_r, k 0)
+Colors: body, tail, head "#FFD21F"; beak "#FF8C1A"; eyes "#1A1A1A".
 7. Optional flat bottom: N_e = intersect(N_d, base_box) with base_box: box center [0,0,60], size [200,200,120]
 Check: front view shows the head above the body's front half and the beak pointing +X; top view is symmetric.
 

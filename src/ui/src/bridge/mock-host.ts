@@ -169,6 +169,13 @@ export function createMockHost(): Transport {
         scene = [...scene.filter((x) => !operands.includes(x)), node]
         return { ref: node.id }
       }
+      case 'deform': {
+        const target = find(String(args.target))
+        const node = { ...opNode(args.op as SceneNode['op'], 0, [target]), params: {} }
+        scene = [...scene.filter((x) => x !== target), node]
+        const { op, target: _, ...fields } = args
+        return { ref: node.id, op, target: target.name ?? target.id, ...fields }
+      }
       case 'edit_operation': {
         const n = find(String(args.ref))
         scene = map(scene, (x) => (x.id === n.id ? { ...x, op: (args.op as SceneNode['op']) ?? x.op, k: (args.k as number) ?? x.k } : x))

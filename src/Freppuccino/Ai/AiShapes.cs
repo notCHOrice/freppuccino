@@ -187,20 +187,39 @@ public static class AiShapes
     {
         if (s[key] is not JsonArray a || a.Count != 3)
             throw new AiToolException($"'{key}' must be an array of 3 numbers [x, y, z]");
-        try { return new Vector3d((double)a[0]!, (double)a[1]!, (double)a[2]!); }
-        catch (Exception e) when (e is InvalidOperationException or FormatException or NullReferenceException)
-        {
-            throw new AiToolException($"'{key}' must be an array of 3 numbers [x, y, z]");
-        }
+        if (ToDouble(a[0]) is { } x && ToDouble(a[1]) is { } y && ToDouble(a[2]) is { } z) return new Vector3d(x, y, z);
+        throw new AiToolException($"'{key}' must be an array of 3 numbers [x, y, z]");
     }
 
     public static double Number(JsonObject s, string key)
     {
         if (s[key] is not JsonValue v) throw new AiToolException($"missing '{key}' (number)");
-        try { return (double)v; }
-        catch (Exception e) when (e is InvalidOperationException or FormatException)
+        return ToDouble(v) ?? throw new AiToolException($"'{key}' must be a number");
+    }
+
+    /// Any JSON number, whether parsed (JsonElement) or built in code (int / double values); null otherwise.
+    static double? ToDouble(JsonNode? n) =>
+        n is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number &&
+        double.TryParse(v.ToJsonString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
+            ? d
+            : null;
+
+    /// <summary>Optional "color": "#RRGGBB" or a CSS / .NET color name ("tan", "HotPink"); null when absent.</summary>
+    public static System.Drawing.Color? Color(JsonObject s)
+    {
+        if (s["color"] is not JsonValue v || !v.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text)) return null;
+        text = text.Trim();
+        try
         {
-            throw new AiToolException($"'{key}' must be a number");
+            if (!text.StartsWith('#') && text.Length == 6 && int.TryParse(text, System.Globalization.NumberStyles.HexNumber, null, out _))
+                text = "#" + text;
+            var c = System.Drawing.ColorTranslator.FromHtml(text);
+            if (c.IsEmpty || (c.A == 0 && !text.StartsWith('#'))) throw new FormatException();
+            return System.Drawing.Color.FromArgb(255, c.R, c.G, c.B);
+        }
+        catch (Exception)
+        {
+            throw new AiToolException($"'color' must be \"#RRGGBB\" or a color name (got \"{text}\")");
         }
     }
 

@@ -99,11 +99,12 @@ public static class FrepPrimitives
     }
 
     /// <summary>Adds a primitive (proxy Brep + SDF.* user text). Caller handles the undo record and redraw.</summary>
-    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name)
+    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name, System.Drawing.Color? color = null)
     {
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = doc.CreateDefaultAttributes();
         if (!string.IsNullOrEmpty(name)) attributes.Name = name;
+        if (color is { } c) SetColor(attributes, c);
         WriteSdf(attributes, p, doc.ModelUnitSystem);
         var id = doc.Objects.AddBrep(brep, attributes);
         if (id == Guid.Empty) throw new InvalidOperationException($"couldn't add {p.Kind} to the document");
@@ -111,14 +112,22 @@ public static class FrepPrimitives
     }
 
     /// <summary>Rewrites an existing primitive in place (same object id, so CSG references stay valid).</summary>
-    public static void Replace(RhinoDoc doc, RhinoObject obj, SdPrimitive p, string? name = null)
+    public static void Replace(RhinoDoc doc, RhinoObject obj, SdPrimitive p, string? name = null, System.Drawing.Color? color = null)
     {
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = obj.Attributes.Duplicate();
         if (name != null) attributes.Name = name;
+        if (color is { } c) SetColor(attributes, c);
         WriteSdf(attributes, p, doc.ModelUnitSystem);
         var id = obj.Id;
         if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
         if (!doc.Objects.ModifyAttributes(id, attributes, true)) throw new InvalidOperationException("couldn't update the object's SDF values");
+    }
+
+    /// <summary>Object color (the viewport shader draws each primitive in its display color; blends mix them).</summary>
+    public static void SetColor(ObjectAttributes attributes, System.Drawing.Color color)
+    {
+        attributes.ColorSource = ObjectColorSource.ColorFromObject;
+        attributes.ObjectColor = color;
     }
 }

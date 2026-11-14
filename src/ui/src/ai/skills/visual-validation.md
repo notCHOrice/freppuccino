@@ -3,8 +3,10 @@ name: visual-validation
 description: How to read capture_views screenshots and catch common mistakes. Load before your first capture.
 ---
 ## What the screenshots show
-- The F-rep result as the user sees it: CSG applied, blends applied. White matte surfaces on a grey background.
-  Subtracted tools are invisible. The XY grid shows in perspective and top views.
+- The F-rep result as the user sees it: CSG, blends and deforms applied, each part in its color (light grey when
+  uncolored) on a grey background. Grey parts are hard to read against it: color parts while checking.
+  Subtracted tools, deform axis lines and repeat boxes are invisible. The XY grid shows in perspective and top views.
+- Bent and repeated results are framed generously, so they can look small: use focus and size 768 to inspect them.
 - front: looking along +Y, so X points right and Z up. right: looking along -X, so Y points right and Z up.
   top: looking down, X right, Y up. back / left / bottom are the mirror views.
 - perspective looks from front-right-above; perspective_back from back-left-above; perspective_below shows the underside.

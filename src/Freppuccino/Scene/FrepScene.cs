@@ -212,6 +212,16 @@ public static class FrepScene
     /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
     public static BoundingBox BoundsOf(RhinoDoc doc, FrepOperand o) => new Bounds(doc, FrepTrees.Get(doc), []).Of(o);
 
+    /// <see cref="Bounds"/> with live warps applied (Repeat copies, bent / twisted extents); for framing views (AI screenshots).
+    public static BoundingBox WarpedBoundsOf(RhinoDoc doc, FrepOperand o)
+    {
+        var tree = FrepTrees.Get(doc);
+        var refs = new Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)>();
+        foreach (var n in tree.Nodes)
+            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region)) refs[n.Id] = (obj!, axis, region);
+        return new Bounds(doc, tree, refs).Of(o);
+    }
+
     /// World bounding box of an operand's result, from leaf objects' Rhino geometry; live warps grown like the shader bound.
     sealed class Bounds(RhinoDoc doc, FrepTree tree, Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)> refs)
     {

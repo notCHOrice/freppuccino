@@ -27,6 +27,7 @@ public static partial class AiTools
         "update_primitive" => Update(doc, args),
         "transform" => TransformObjects(doc, args),
         "combine" => Combine(doc, args),
+        "deform" => Deform(doc, args),
         "edit_operation" => EditOperation(doc, args),
         "delete" => Delete(doc, args),
         "set_visible" => SetVisible(doc, args),
@@ -57,23 +58,25 @@ public static partial class AiTools
                 ? AiShapes.ToSpec(p)
                 : new JsonObject { ["type"] = SdfUserText.ReadType(obj.Attributes), ["invalid"] = true };
             o.Insert(0, "ref", refs[obj.Id]);
+            if (obj.Attributes.ColorSource == ObjectColorSource.ColorFromObject) o["color"] = Hex(obj.Attributes.ObjectColor);
             if (obj.IsHidden) o["visible"] = false;
             var used = UsedBy(FrepOperand.Object(obj.Id));
             if (used.Count > 0) o["used_by"] = used;
             prims.Add(o);
-            if (!obj.IsHidden) bbox.Union(obj.Geometry.GetBoundingBox(true));
         }
 
         var ops = new JsonArray();
         foreach (var n in tree.Nodes)
         {
-            var o = new JsonObject
-            {
-                ["ref"] = n.Name,
-                ["op"] = OpName(n.Op),
-                ["k"] = AiShapes.Round(n.K),
-                ["operands"] = new JsonArray([.. n.Operands.Select(x => (JsonNode)OperandRef(doc, x, refs))]),
-            };
+            var o = n.Op.IsWarp()
+                ? DescribeWarp(doc, tree, n, refs)
+                : new JsonObject
+                {
+                    ["ref"] = n.Name,
+                    ["op"] = OpName(n.Op),
+                    ["k"] = AiShapes.Round(n.K),
+                    ["operands"] = new JsonArray([.. n.Operands.Select(x => (JsonNode)OperandRef(doc, x, refs))]),
+                };
             if (n.Hidden) o["visible"] = false;
             var used = UsedBy(FrepOperand.Node(n.Id));
             if (used.Count > 0) o["used_by"] = used;
@@ -82,6 +85,7 @@ public static partial class AiTools
 
         var roots = tree.Nodes.Where(n => !tree.IsReferenced(FrepOperand.Node(n.Id))).Select(n => (JsonNode)n.Name)
             .Concat(objects.Where(o => !tree.IsReferenced(FrepOperand.Object(o.Id))).Select(o => (JsonNode)refs[o.Id]));
+        foreach (var b in VisibleRootBounds(doc)) bbox.Union(b);
 
         var result = new JsonObject
         {
@@ -103,8 +107,9 @@ public static partial class AiTools
         var type = Str(args, "type").ToLowerInvariant();
         var prim = AiShapes.FromSpec(type, args);
         var name = UniqueName(doc, args["name"]?.GetValue<string>() ?? type);
+        var color = AiShapes.Color(args);
         Guid id = Guid.Empty;
-        Mutate(doc, $"create {name}", () => id = FrepPrimitives.Add(doc, prim, name));
+        Mutate(doc, $"create {name}", () => id = FrepPrimitives.Add(doc, prim, name, color));
         return new JsonObject { ["ref"] = name, ["guid"] = id.ToString("D") };
     }
 
@@ -117,17 +122,19 @@ public static partial class AiTools
         var spec = AiShapes.ToSpec(current);
         var type = spec["type"]!.GetValue<string>();
         foreach (var (key, value) in args)
-            if (key is not ("ref" or "name" or "type")) spec[key] = value?.DeepClone();
+            if (key is not ("ref" or "name" or "type" or "color")) spec[key] = value?.DeepClone();
         var prim = AiShapes.FromSpec(type, spec);
 
         string? newName = null;
         if (args["name"]?.GetValue<string>() is { } requested && requested != obj.Attributes.Name)
             newName = UniqueName(doc, requested);
         var label = newName ?? RefOf(doc, obj);
-        Mutate(doc, $"update {label}", () => FrepPrimitives.Replace(doc, obj, prim, newName));
+        var color = AiShapes.Color(args);
+        Mutate(doc, $"update {label}", () => FrepPrimitives.Replace(doc, obj, prim, newName, color));
 
         var after = AiShapes.ToSpec(prim);
         after.Insert(0, "ref", newName ?? RefOf(doc, obj));
+        if (color is { } c) after["color"] = Hex(c);
         return after;
     }
 
@@ -135,8 +142,13 @@ public static partial class AiTools
     static JsonNode TransformObjects(RhinoDoc doc, JsonObject args)
     {
         var tree = FrepTrees.Get(doc);
-        var leaves = Refs(args, "refs").SelectMany(r => Leaves(doc, tree, Resolve(doc, tree, r))).Distinct().ToList();
+        var targets = Refs(args, "refs").Select(r => Resolve(doc, tree, r)).ToList();
+        var leaves = targets.SelectMany(t => Leaves(doc, tree, t)).Distinct().ToList();
         if (leaves.Count == 0) throw new AiToolException("nothing to transform");
+        // Warps under the targets move with them: their reference lines / boxes get the same transform.
+        var subtree = new HashSet<FrepOperand>(targets);
+        foreach (var t in targets) AddDescendants(tree, t, subtree);
+        var warps = subtree.Where(o => o.IsNode).Select(o => tree.Find(o.NodeId)).OfType<FrepNode>().Where(n => n.Op.IsWarp()).ToList();
 
         var bbox = BoundingBox.Empty;
         foreach (var o in leaves) bbox.Union(o.Geometry.GetBoundingBox(true));
@@ -175,6 +187,16 @@ public static partial class AiTools
         Mutate(doc, "transform", () =>
         {
             foreach (var (obj, prim) in updates) FrepPrimitives.Replace(doc, obj, prim);
+            foreach (var refId in warps.Select(n => n.Ref).Distinct())
+                if (doc.Objects.FindId(refId) is { IsDeleted: false }) doc.Objects.Transform(refId, xf, true);
+            // Repeat spacing follows a uniform scale (twist / bend follow their line).
+            if (args["scale"] is JsonValue && AiShapes.Number(args, "scale") is var f && f > 0 && warps.Any(n => n.Op == FrepOp.Repeat))
+            {
+                var t = FrepTrees.Get(doc);
+                foreach (var n in warps.Where(n => n.Op == FrepOp.Repeat))
+                    for (int i = 0; i < 3; i++) t = t.WithParam(n.Id, i, n.Param(i) * f);
+                FrepTrees.Set(doc, t, "AI: transform");
+            }
         });
         return new JsonObject { ["transformed"] = new JsonArray([.. updates.Select(u => (JsonNode)RefOf(doc, u.Obj))]) };
     }
@@ -208,6 +230,10 @@ public static partial class AiTools
         var operand = Resolve(doc, tree, Str(args, "ref"));
         if (!operand.IsNode) throw new AiToolException("edit_operation takes an operation node (N…); use update_primitive for primitives");
         var node = tree.Find(operand.NodeId)!;
+        if (node.Op.IsWarp()) return EditWarp(doc, tree, node, args);
+        if (args.Select(kv => kv.Key).Where(key => key is not ("ref" or "op" or "k")).ToList() is { Count: > 0 } extra)
+            throw new AiToolException($"{node.Name} is a {OpName(node.Op)}: it only takes op and k (got {string.Join(", ", extra)}); " +
+                                      "deform fields apply to twist / bend / repeat nodes");
         var op = args.ContainsKey("op") ? ParseOp(Str(args, "op")) : node.Op;
         var k = args.ContainsKey("k") ? Math.Max(0, AiShapes.Number(args, "k")) : node.K;
         Mutate(doc, $"edit {node.Name}", () => FrepTrees.Set(doc, tree.WithOp(node.Id, op, k), $"AI: edit {node.Name}"));
@@ -239,6 +265,7 @@ public static partial class AiTools
                 }
             } while (progress);
             FrepTrees.Set(doc, t, "AI: delete");
+            DeleteOrphanRefs(doc, t, tree.Nodes.Where(n => t.Find(n.Id) == null).Select(n => n.Ref));
             foreach (var o in pending.Where(o => !o.IsNode && !t.IsReferenced(o)).ToList())
             {
                 var name = OperandRef(doc, o, null);
@@ -281,6 +308,7 @@ public static partial class AiTools
         {
             FrepTrees.Set(doc, tree with { Nodes = [] }, "AI: clear scene");
             foreach (var o in objects) doc.Objects.Delete(o.Id, true);
+            foreach (var r in AiRefObjects(doc).ToList()) doc.Objects.Delete(r.Id, true);
         });
         return new JsonObject { ["deleted_primitives"] = objects.Count, ["deleted_operations"] = tree.Nodes.Count };
     }
@@ -298,12 +326,11 @@ public static partial class AiTools
         if (views.Count > 6) throw new AiToolException("at most 6 views per call");
         var size = args.ContainsKey("size") ? (int)Math.Clamp(AiShapes.Number(args, "size"), 128, MaxSize) : DefaultSize;
 
-        // Frame the given refs, else every visible primitive.
+        // Frame the given refs, else everything drawn; warped results (bends, Repeat copies) included.
         var tree = FrepTrees.Get(doc);
-        var targets = args["focus"] is JsonArray
-            ? Refs(args, "focus").SelectMany(r => Leaves(doc, tree, Resolve(doc, tree, r))).ToList()
-            : SdfObjects(doc).Where(o => !o.IsHidden).ToList();
-        var boxes = targets.Select(o => o.Geometry.GetBoundingBox(true)).Where(b => b.IsValid).ToList();
+        var boxes = args["focus"] is JsonArray
+            ? Refs(args, "focus").Select(r => FrepScene.WarpedBoundsOf(doc, Resolve(doc, tree, r))).Where(b => b.IsValid).ToList()
+            : VisibleRootBounds(doc);
         var images = AiCapture.Capture(doc, views, size, size, boxes);
         return new JsonObject
         {
@@ -313,6 +340,17 @@ public static partial class AiTools
     }
 
     // ───────────────────────── helpers ─────────────────────────
+
+    /// Bounds of everything drawn: each visible root, warps applied.
+    static List<BoundingBox> VisibleRootBounds(RhinoDoc doc)
+    {
+        var tree = FrepTrees.Get(doc);
+        var roots = tree.Nodes.Where(n => !n.Hidden && !tree.IsReferenced(FrepOperand.Node(n.Id))).Select(n => FrepOperand.Node(n.Id))
+            .Concat(SdfObjects(doc).Where(o => !o.IsHidden && !tree.IsReferenced(FrepOperand.Object(o.Id))).Select(o => FrepOperand.Object(o.Id)));
+        return [.. roots.Select(r => FrepScene.WarpedBoundsOf(doc, r)).Where(b => b.IsValid)];
+    }
+
+    static string Hex(System.Drawing.Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 
     /// One undo record per tool call.
     static void Mutate(RhinoDoc doc, string description, Action action)
@@ -434,7 +472,10 @@ public static partial class AiTools
         FrepOp.Union => "union",
         FrepOp.Difference => "subtract",
         FrepOp.Intersect => "intersect",
-        _ => op.ToString(),
+        FrepOp.Twist => "twist",
+        FrepOp.Bend => "bend",
+        FrepOp.Repeat => "repeat",
+        _ => op.ToString().ToLowerInvariant(),
     };
 
     static string Str(JsonObject args, string key) =>
