@@ -78,7 +78,18 @@ static class PrimitiveProxy
                 Torus(frame, t.X, t.Y),
             _ => null,
         };
-        return brep is { IsValid: true };
+        if (brep is not { IsValid: true }) return false;
+        if (!SdfUserText.TryReadFrame(attributes, out var pose) || !SdfUserText.TryReadLinear(attributes, out var x, out var y, out var z))
+            return true;
+        // The brep is built on the parameter frame. The stored map sends those coordinates to world.
+        var fromFrame = Transform.PlaneToPlane(pose, Plane.WorldXY);
+        var toWorld = Transform.Identity;
+        toWorld.M00 = x.X; toWorld.M01 = y.X; toWorld.M02 = z.X; toWorld.M03 = pose.Origin.X;
+        toWorld.M10 = x.Y; toWorld.M11 = y.Y; toWorld.M12 = z.Y; toWorld.M13 = pose.Origin.Y;
+        toWorld.M20 = x.Z; toWorld.M21 = y.Z; toWorld.M22 = z.Z; toWorld.M23 = pose.Origin.Z;
+        toWorld.M33 = 1;
+        brep.Transform(toWorld * fromFrame);
+        return brep.IsValid;
     }
 
     static Brep? Sphere(Plane frame, double radius)

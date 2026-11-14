@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Freppuccino.Csg;
 using Freppuccino.Meshing;
 using Freppuccino.Scene;
+using Freppuccino.Sdf;
 using Rhino;
 using Rhino.Commands;
 using Rhino.Geometry;
@@ -101,7 +102,19 @@ public class FrepMeshCommand : Command
         var index = new Dictionary<Guid, int>();
         for (int i = 0; i < scene.Primitives.Count; i++)
         {
-            var (kind, frame, p) = scene.Primitives[i];
+            var prim = scene.Primitives[i];
+            var (kind, frame, p) = prim;
+            var x = frame.XAxis;
+            var y = frame.YAxis;
+            var z = frame.ZAxis;
+            double lip = 1;
+            if (kind is not (SdKind.Sphere or SdKind.Ellipsoid) && prim.Basis is { } basis)
+            {
+                x = basis.X;
+                y = basis.Y;
+                z = basis.Z;
+                if (SdfTransforms.TryMetrics(basis, out _, out _, out _, out var sigmaMin, out _)) lip = sigmaMin;
+            }
             var fieldKind = kind switch
             {
                 SdKind.Sphere => FieldKind.Sphere,
@@ -113,7 +126,7 @@ public class FrepMeshCommand : Command
                 SdKind.Pyramid => FieldKind.Pyramid,
                 _ => throw new NotSupportedException($"FrepMesh cannot mesh {kind} yet"),
             };
-            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p));
+            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(x), V(y), V(p), V(z), lip);
         }
 
         var warps = new Dictionary<int, SdWarp>();

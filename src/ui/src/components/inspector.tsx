@@ -135,7 +135,7 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
 
   return (
     <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
-      {params.length === 0 && <p className="text-muted-foreground">No parameters.</p>}
+      {params.length === 0 && !node.custom && <p className="text-muted-foreground">No parameters.</p>}
       {params.map((p) => (
         <ParamSlider
           key={p.key}

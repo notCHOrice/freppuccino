@@ -17,6 +17,9 @@ namespace Freppuccino.Sdf;
 ///   SDF.Frame.Origin  "x,y,z"  world position of the primitive's local origin
 ///   SDF.Frame.XAxis   "x,y,z"  local X axis (unit vector, world space)
 ///   SDF.Frame.YAxis   "x,y,z"  local Y axis (unit vector, world space); Z = X × Y
+///   SDF.Linear.X/Y/Z  optional columns of the canonical-to-world map, when a gumball transform
+///                     is not just a rotate/scale along those axes (shear, or scale off-axis).
+///                     Absent means the frame axes. Parameters stay in the frame's coordinates.
 ///   SDF.&lt;param&gt;       IQ parameters, vectors split per component (SDF.b.x, SDF.b.y, ...)
 ///
 /// IQ functions are defined in local space with the primitive centered at the origin,
@@ -33,6 +36,9 @@ public static class SdfUserText
     public const string OriginKey = Prefix + "Frame.Origin";
     public const string XAxisKey = Prefix + "Frame.XAxis";
     public const string YAxisKey = Prefix + "Frame.YAxis";
+    public const string LinearXKey = Prefix + "Linear.X";
+    public const string LinearYKey = Prefix + "Linear.Y";
+    public const string LinearZKey = Prefix + "Linear.Z";
 
     /// <summary>Writes the common header and local frame. Call once per primitive, then add parameters.</summary>
     public static void WriteHeader(ObjectAttributes attributes, string sdfType, Plane frame, UnitSystem units)
@@ -41,6 +47,34 @@ public static class SdfUserText
         attributes.SetUserString(TypeKey, sdfType);
         attributes.SetUserString(UnitsKey, units.ToString());
         WriteFrame(attributes, frame);
+    }
+
+    /// <summary>Columns of the canonical-to-world map (world space). Omitted when they are the frame axes.</summary>
+    public static void WriteLinear(ObjectAttributes attributes, Vector3d x, Vector3d y, Vector3d z)
+    {
+        attributes.SetUserString(LinearXKey, Format(x.X, x.Y, x.Z));
+        attributes.SetUserString(LinearYKey, Format(y.X, y.Y, y.Z));
+        attributes.SetUserString(LinearZKey, Format(z.X, z.Y, z.Z));
+    }
+
+    public static void ClearLinear(ObjectAttributes attributes)
+    {
+        attributes.DeleteUserString(LinearXKey);
+        attributes.DeleteUserString(LinearYKey);
+        attributes.DeleteUserString(LinearZKey);
+    }
+
+    public static bool TryReadLinear(ObjectAttributes attributes, out Vector3d x, out Vector3d y, out Vector3d z)
+    {
+        x = y = z = Vector3d.Unset;
+        if (!TryParse(attributes.GetUserString(LinearXKey), out var xx, out var xy, out var xz) ||
+            !TryParse(attributes.GetUserString(LinearYKey), out var yx, out var yy, out var yz) ||
+            !TryParse(attributes.GetUserString(LinearZKey), out var zx, out var zy, out var zz))
+            return false;
+        x = new Vector3d(xx, xy, xz);
+        y = new Vector3d(yx, yy, yz);
+        z = new Vector3d(zx, zy, zz);
+        return x.IsValid && y.IsValid && z.IsValid;
     }
 
     /// <summary>Writes SDF.Frame.Origin / XAxis / YAxis only (used when a transform moves the primitive).</summary>

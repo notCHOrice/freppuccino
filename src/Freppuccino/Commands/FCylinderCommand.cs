@@ -56,8 +56,8 @@ public class FCylinderCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame, scales h along the axis and r across it. Works for move, rotate, mirror, uniform scale
-    /// and scale along the axis. Scaling the cross-section non-uniformly makes it elliptical, so it is rejected.
+    /// Moves the frame, scales h along the axis and r across it when the cross-section stays round.
+    /// An elliptical or sheared cylinder is stored as SDF.Linear.*; h and r stay in the original frame.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -66,14 +66,21 @@ public class FCylinderCommand : Command
             reason = "missing or unreadable SDF.Frame.* / SDF.h / SDF.r";
             return false;
         }
+        return SdfTransforms.CommitAffine(attributes, frame, xform, scale =>
+        {
+            if (!TryAbsorbScale(h, r, scale, out var nh, out var nr)) return false;
+            SdfUserText.WriteFloat(attributes, "h", nh);
+            SdfUserText.WriteFloat(attributes, "r", nr);
+            return true;
+        }, out reason);
+    }
 
-        if (!TryTransform(frame, h, r, xform, out frame, out h, out r, out reason))
-            return false;
-
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteFloat(attributes, "h", h);
-        SdfUserText.WriteFloat(attributes, "r", r);
-        return true;
+    /// <summary>Axis scale goes into h, the shared radial scale into r. Unequal X/Z scales stay in the linear map.</summary>
+    public static bool TryAbsorbScale(double h, double r, Vector3d scale, out double newH, out double newR)
+    {
+        newH = h * scale.Y;
+        newR = r * (scale.X + scale.Z) * 0.5;
+        return SdfTransforms.NearlyEqual(scale.X, scale.Z) && newH > 0 && newR > 0;
     }
 
     /// <summary>Reads the frame (origin = center, Y = axis), half height h and radius r.</summary>

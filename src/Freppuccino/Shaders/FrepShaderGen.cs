@@ -3,6 +3,7 @@ using System.Text;
 using Freppuccino.Csg;
 using Freppuccino.Meshing;
 using Freppuccino.Scene;
+using Freppuccino.Sdf;
 using Rhino.Display;
 using Rhino.Geometry;
 
@@ -25,8 +26,15 @@ public static class FrepShaderGen
     const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
-    /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
-    public static int Rows(SdKind kind) => kind == SdKind.Sphere ? 1 : 3;
+    /// Sphere: 1 row (xyz center, w s). Ellipsoid: 3 rows (origin, unit X, unit Y; Z = X × Y).
+    /// Every other kind: 4 rows. The fourth is the third row of A⁻¹ and σ_min(A), so a sheared or off-axis-scaled
+    /// primitive (SDF.Linear.*) still raymarches. Rigid primitives pass the frame axes and σ_min = 1, which is the old toLocal.
+    public static int Rows(SdKind kind) => kind switch
+    {
+        SdKind.Sphere => 1,
+        SdKind.Ellipsoid => 3,
+        _ => 4,
+    };
     /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
     static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
@@ -50,17 +58,21 @@ public static class FrepShaderGen
     {
         if (kind == SdKind.Sphere) return $"sdSphere({p}, u.data[{row}])";
         string o = $"u.data[{row}]", x = $"u.data[{row + 1}]", y = $"u.data[{row + 2}]";
-        string q = $"toLocal({p}, {o}, {x}, {y})";
-        return kind switch
+        if (kind == SdKind.Ellipsoid)
+            return $"sdEllipsoid(toLocal({p}, {o}, {x}, {y}), vec3({o}.w, {x}.w, {y}.w))";
+        // z.xyz = third row of A⁻¹, z.w = σ_min(A). Distance times σ_min stays Lipschitz 1 in world space.
+        string z = $"u.data[{row + 3}]";
+        string q = $"toLocalAffine({p}, {o}, {x}, {y}, {z})";
+        string sd = kind switch
         {
             SdKind.Box => $"sdBox({q}, vec3({o}.w, {x}.w, {y}.w))",
             SdKind.Torus => $"sdTorus({q}, vec2({o}.w, {x}.w))",
             SdKind.Cylinder => $"sdCappedCylinder({q}, {o}.w, {x}.w)",
             SdKind.Cone => $"sdCappedCone({q}, {o}.w, {x}.w, {y}.w)",
-            SdKind.Ellipsoid => $"sdEllipsoid({q}, vec3({o}.w, {x}.w, {y}.w))",
             SdKind.Pyramid => $"sdPyramidScaled({q}, {o}.w, {x}.w)",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
+        return $"({sd}) * {z}.w";
     }
 
     const string Vertex = """
@@ -274,6 +286,12 @@ public static class FrepShaderGen
             vec3 d = p - o.xyz;
             return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, cross(x.xyz, y.xyz)));
         }
+        // x, y, z are the rows of A⁻¹. For a rigid frame they are the frame axes, so this matches toLocal.
+        vec3 toLocalAffine(vec3 p, vec4 o, vec4 x, vec4 y, vec4 z)
+        {
+            vec3 d = p - o.xyz;
+            return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, z.xyz));
+        }
 
         // IQ, https://iquilezles.org/articles/distfunctions/ (all in local space, Y-up)
         float sdSphere(vec3 p, vec4 s) { return length(p - s.xyz) - s.w; }
@@ -459,12 +477,21 @@ public static class FrepShaderGen
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
         // Same order as Compile(): prim rows, colors, warp rows, then k's.
-        foreach (var (kind, f, v) in scene.Primitives)
+        foreach (var prim in scene.Primitives)
         {
+            var (kind, f, v) = prim;
             u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, v.X);
             if (kind == SdKind.Sphere) continue;
-            u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
-             .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, v.Z);
+            if (kind == SdKind.Ellipsoid)
+            {
+                u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
+                 .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, v.Z);
+                continue;
+            }
+            LocalRows(prim, out var rx, out var ry, out var rz, out var lip);
+            u.Vec4(rx.X, rx.Y, rx.Z, v.Y)
+             .Vec4(ry.X, ry.Y, ry.Z, v.Z)
+             .Vec4(rz.X, rz.Y, rz.Z, lip);
         }
         var cs = scene.Colors;
         double C(int i) => i < cs.Count ? PackColor(cs[i]) : 0;
@@ -480,6 +507,19 @@ public static class FrepShaderGen
     static void WarpUniforms(Uniforms u, SdWarp w)
     {
         foreach (var r in FrepWarpMath.Rows(w)) u.Vec4(r.X, r.Y, r.Z, r.W);
+    }
+
+    /// Rows of A⁻¹ and σ_min. No stored map: the frame itself, σ_min = 1.
+    internal static void LocalRows(SdPrimitive prim, out Vector3d rx, out Vector3d ry, out Vector3d rz, out double lip)
+    {
+        var basis = prim.Basis ?? SdfBasis.FromPlane(prim.Frame);
+        if (!SdfTransforms.TryMetrics(basis, out rx, out ry, out rz, out lip, out _))
+        {
+            rx = prim.Frame.XAxis;
+            ry = prim.Frame.YAxis;
+            rz = prim.Frame.ZAxis;
+            lip = 1;
+        }
     }
 
     static double PrimRadius(SdPrimitive p)
@@ -518,7 +558,10 @@ public static class FrepShaderGen
                 if (prim.TryGetValue(o.ObjectId, out var i))
                 {
                     var p = scene.Primitives[i];
-                    var r = new Vector3d(1, 1, 1) * PrimRadius(p);
+                    double stretch = 1;
+                    if (p.Basis is { } basis && SdfTransforms.TryMetrics(basis, out _, out _, out _, out _, out var sigmaMax))
+                        stretch = sigmaMax;
+                    var r = new Vector3d(1, 1, 1) * (PrimRadius(p) * stretch);
                     b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
                 }
             }

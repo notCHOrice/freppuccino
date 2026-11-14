@@ -34,6 +34,8 @@ export interface SceneNode {
   ref?: Id
   /** deform: ref deleted or no longer a line / box (child drawn unwarped) */
   refMissing?: boolean
+  /** primitive: a gumball scale or shear the parameters cannot express (SDF.Linear.*). Sliders are hidden. */
+  custom?: boolean
 }
 
 export interface UiSettings {

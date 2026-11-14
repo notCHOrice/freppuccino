@@ -53,8 +53,8 @@ public class FTorusCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame and rescales t. Works for move, rotate, mirror and uniform scale.
-    /// Non-uniform scale makes the ring or tube elliptical, which sdTorus can't represent, so it is rejected.
+    /// Moves the frame and rescales t for a move, rotate, mirror, or uniform scale.
+    /// A non-uniform scale or shear is stored as SDF.Linear.*; t stays in the original frame.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -63,13 +63,20 @@ public class FTorusCommand : Command
             reason = "missing or unreadable SDF.Frame.* / SDF.t.*";
             return false;
         }
+        return SdfTransforms.CommitAffine(attributes, frame, xform, scale =>
+        {
+            if (!TryAbsorbScale(t, scale, out var next)) return false;
+            SdfUserText.WriteVec2(attributes, "t", next.X, next.Y);
+            return true;
+        }, out reason);
+    }
 
-        if (!TryTransform(frame, t, xform, out frame, out t, out reason))
-            return false;
-
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteVec2(attributes, "t", t.X, t.Y);
-        return true;
+    /// <summary>Uniform scale of both radii. Any other scale stays in the linear map.</summary>
+    public static bool TryAbsorbScale(Vector2d t, Vector3d scale, out Vector2d result)
+    {
+        double s = (scale.X + scale.Y + scale.Z) / 3.0;
+        result = new Vector2d(t.X * s, t.Y * s);
+        return SdfTransforms.NearlyEqual(scale.X, scale.Y) && SdfTransforms.NearlyEqual(scale.Y, scale.Z) && result.X > 0 && result.Y > 0;
     }
 
     /// <summary>Reads the frame (origin = torus center, Y = axis) and t = (major, minor).</summary>
