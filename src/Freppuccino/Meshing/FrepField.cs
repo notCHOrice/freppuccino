@@ -13,10 +13,17 @@ public readonly record struct V3(double X, double Y, double Z)
     public V3 Normalized() { var l = Length; return l > 0 ? this * (1 / l) : this; }
 }
 
+/// One shader uniform row (vec4); warp params, see Csg.FrepWarpMath.Rows.
+public readonly record struct V4(double X, double Y, double Z, double W)
+{
+    public V3 Xyz => new(X, Y, Z);
+}
+
 /// Same kinds and parameter packing as Scene.SdKind / SdPrimitive.P.
 public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 
-public enum FieldOp { Union, Intersect, Difference }
+/// Twist/Bend/Repeat: domain warps of one operand (see <see cref="FrepField.AddWarp"/>).
+public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat }
 
 /// A primitive (by index) or an earlier node (by index).
 public readonly record struct FieldRef(bool IsNode, int Index)
@@ -30,7 +37,8 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 /// smooth min/max, and a hard minimum over the roots. Keep the two in sync.
 ///
 /// Every primitive here changes by at most 1 per unit distance, and the CSG operations preserve that,
-/// so |field| <= distance to the surface: the mesher relies on it to skip empty space. That is why
+/// so |field| <= distance to the surface: the mesher relies on it to skip empty space.
+/// Twist/bend warps divide by their local stretch bound for the same reason (as the shader does). That is why
 /// the ellipsoid and pyramid, here and in the shader, are not IQ's formulas as published (see PrimValue).
 ///
 /// Build it with <see cref="AddPrimitive"/>, <see cref="AddNode"/> and <see cref="AddRoot"/>. With no
@@ -38,13 +46,15 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 public sealed class FrepField
 {
     readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P);
-    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands);
+    // Rows: warp params (null for CSG).
+    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null);
 
     readonly List<Prim> prims = [];
     readonly List<Node> nodes = [];
     readonly List<FieldRef> roots = [];
     readonly object sealing = new();
     volatile bool isSealed;
+    bool hasWarps;
 
     /// Blend distance of the implicit union used when no roots are declared; 0 = hard union.
     public double Blend { get; init; }
@@ -70,6 +80,16 @@ public sealed class FrepField
         return nodes.Count - 1;
     }
 
+    /// Domain warp of <paramref name="child"/>; <paramref name="rows"/> as packed by Csg.FrepWarpMath.Rows (shader uniform layout).
+    public int AddWarp(FieldOp op, V4[] rows, FieldRef child)
+    {
+        int want = op switch { FieldOp.Twist => 2, FieldOp.Bend => 3, FieldOp.Repeat => 5, _ => throw new ArgumentOutOfRangeException(nameof(op)) };
+        if (rows.Length != want) throw new ArgumentException($"{op} needs {want} rows", nameof(rows));
+        nodes.Add(new Node(op, 0, [child], rows));
+        hasWarps = true;
+        return nodes.Count - 1;
+    }
+
     public void AddRoot(FieldRef root) => roots.Add(root);
 
     public bool HasRoots => roots.Count > 0;
@@ -86,34 +106,154 @@ public sealed class FrepField
         }
     }
 
+    // Per-thread memo: one slice of (prims + nodes) per point context; each warp opens a new context for its subtree.
+    [ThreadStatic] static double[]? scratch;
+
     public double Value(V3 p)
     {
         Seal();
+        if (!hasWarps) return FlatValue(p);
+        int stride = prims.Count + nodes.Count, top = 0;
+        var memo = scratch ?? new double[Math.Max(64, stride * 2)];
+        int ctx = Push(ref memo, ref top, stride);
+        double result = double.PositiveInfinity;
+        foreach (var r in roots) result = Math.Min(result, Eval(r, p, ctx, ref memo, ref top, stride));
+        scratch = memo;
+        return result;
+    }
+
+    // No warps: one context, all operands evaluated in order (~30% faster than Eval).
+    double FlatValue(V3 p)
+    {
         int np = prims.Count, nn = nodes.Count;
         Span<double> v = np + nn <= 256 ? stackalloc double[np + nn] : new double[np + nn];
         for (int i = 0; i < np; i++) v[i] = PrimValue(prims[i], p);
         for (int i = 0; i < nn; i++)
         {
             var n = nodes[i];
-            double d = Get(v, np, n.Operands[0]);
-            for (int o = 1; o < n.Operands.Length; o++)
-            {
-                double t = Get(v, np, n.Operands[o]);
-                d = n.Op switch
-                {
-                    FieldOp.Union => Smin(d, t, n.K),
-                    FieldOp.Intersect => -Smin(-d, -t, n.K),
-                    _ => -Smin(-d, t, n.K),
-                };
-            }
+            double d = v[Slot(n.Operands[0])];
+            for (int o = 1; o < n.Operands.Length; o++) d = Combine(n, d, v[Slot(n.Operands[o])]);
             v[np + i] = d;
         }
         double result = double.PositiveInfinity;
-        foreach (var r in roots) result = Math.Min(result, Get(v, np, r));
+        foreach (var r in roots) result = Math.Min(result, v[Slot(r)]);
         return result;
     }
 
-    static double Get(ReadOnlySpan<double> v, int np, FieldRef r) => v[r.IsNode ? np + r.Index : r.Index];
+    int Slot(FieldRef r) => r.IsNode ? prims.Count + r.Index : r.Index;
+
+    static double Combine(in Node n, double d, double t) => n.Op switch
+    {
+        FieldOp.Union => Smin(d, t, n.K),
+        FieldOp.Intersect => -Smin(-d, -t, n.K),
+        _ => -Smin(-d, t, n.K),
+    };
+
+    static int Push(ref double[] memo, ref int top, int stride)
+    {
+        int ctx = top;
+        top += stride;
+        if (memo.Length < top) Array.Resize(ref memo, Math.Max(top, memo.Length * 2));
+        memo.AsSpan(ctx, stride).Fill(double.NaN);
+        return ctx;
+    }
+
+    double Eval(FieldRef r, V3 p, int ctx, ref double[] memo, ref int top, int stride)
+    {
+        int slot = ctx + Slot(r);
+        double d = memo[slot];
+        if (!double.IsNaN(d)) return d;
+        if (!r.IsNode) d = PrimValue(prims[r.Index], p);
+        else
+        {
+            var n = nodes[r.Index];
+            if (n.Rows is { } w)
+            {
+                var q = Warp(n.Op, w, p, out double lip);
+                int saved = top;
+                d = Eval(n.Operands[0], q, Push(ref memo, ref top, stride), ref memo, ref top, stride) / lip;
+                top = saved;
+            }
+            else
+            {
+                d = Eval(n.Operands[0], p, ctx, ref memo, ref top, stride);
+                for (int o = 1; o < n.Operands.Length; o++) d = Combine(n, d, Eval(n.Operands[o], p, ctx, ref memo, ref top, stride));
+            }
+        }
+        return memo[slot] = d;
+    }
+
+    // Domain warps, ported from opTwist/opBend/opRepeat in Shaders/FrepShaderGen.cs; keep in sync. Returns the point to
+    // evaluate the child at; lip = local Lipschitz bound (child value is divided by it). Row layouts: see the GLSL.
+    static V3 Warp(FieldOp op, V4[] w, V3 p, out double lip)
+    {
+        lip = 1;
+        switch (op)
+        {
+            case FieldOp.Twist:
+            {
+                V3 a = w[0].Xyz, d = w[1].Xyz;
+                double rate = w[0].W, extent = w[1].W;
+                var v = p - a;
+                double h = V3.Dot(v, d);
+                var r = v - d * h;
+                double ang = -rate * h, c = Math.Cos(ang), s = Math.Sin(ang);
+                double sh = Math.Abs(rate) * Math.Min(r.Length, extent);
+                lip = TwistLip(sh);
+                return a + d * h + r * c + V3.Cross(d, r) * s;
+            }
+            case FieldOp.Bend:
+            {
+                V3 a = w[0].Xyz, d = w[1].Xyz, n = w[2].Xyz;
+                double L = w[0].W, beta = w[1].W, minR = w[2].W;
+                var v = p - a;
+                double h = V3.Dot(v, d);
+                if (beta < 1e-5 || h <= 0) return p;
+                double y = V3.Dot(v, n);
+                var b = v - d * h - n * y;
+                double R = L / beta;
+                double cx = h, cy = R - y; // from the arc center
+                double alpha = Math.Atan2(cx, cy), h0, y0;
+                if (alpha <= beta)
+                {
+                    double rho = Len(cx, cy);
+                    h0 = R * alpha;
+                    y0 = R - rho;
+                    lip = Math.Max(1, R / Math.Max(rho, minR));
+                }
+                else
+                {
+                    double qx = h - R * Math.Sin(beta), qy = y - R * (1 - Math.Cos(beta)); // from the arc end
+                    h0 = L + qx * Math.Cos(beta) + qy * Math.Sin(beta);
+                    y0 = -qx * Math.Sin(beta) + qy * Math.Cos(beta);
+                }
+                return a + d * h0 + n * y0 + b;
+            }
+            case FieldOp.Repeat:
+            {
+                V3 o = w[0].Xyz, x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y);
+                var dl = p - o;
+                static double Cell(double local, double s, double lo, double hi) =>
+                    Math.Clamp(Math.Round(local / Math.Max(s, 1e-9), MidpointRounding.AwayFromZero), lo, hi) * s;
+                double ix = Cell(V3.Dot(dl, x), w[0].W, w[3].X, w[4].X);
+                double iy = Cell(V3.Dot(dl, y), w[1].W, w[3].Y, w[4].Y);
+                double iz = Cell(V3.Dot(dl, z), w[2].W, w[3].Z, w[4].Z);
+                return p - x * ix - y * iy - z * iz;
+            }
+            default:
+                throw new ArgumentOutOfRangeException(nameof(op));
+        }
+    }
+
+    /// Upper bound of Warp's lip over the child's extent.
+    static double MaxLip(FieldOp op, V4[] w) => op switch
+    {
+        FieldOp.Twist => TwistLip(Math.Abs(w[0].W) * w[1].W),
+        FieldOp.Bend when w[1].W >= 1e-5 => Math.Max(1, w[0].W / w[1].W / Math.Max(w[2].W, 1e-12)),
+        _ => 1,
+    };
+
+    static double TwistLip(double sh) => 0.5 * (sh + Math.Sqrt(sh * sh + 4));
 
     /// Gradient by central differences over <paramref name="step"/>. At a crease it mixes both sides, but
     /// only within <paramref name="step"/> of the crease.
@@ -210,7 +350,9 @@ public sealed class FrepField
     ///               d = k/4 for two operands and k for more (the deficit below the plain minimum
     ///               compounds as x' = x + (k - x)²/4k, which approaches but never exceeds k);
     ///   intersect:  smax >= max, so it lies in the overlap of the operands' {<= t};
-    ///   difference: it lies in the base's {<= t}.
+    ///   difference: it lies in the base's {<= t};
+    ///   warp:       child(q) / lip <= t needs child(q) <= t · max lip; the child's box is then mapped forward
+    ///               (see <see cref="WarpBox"/>).
     /// The offset is in field value, not distance: a primitive whose field underestimates distance
     /// (the ellipsoid) grows by more than t, which <see cref="PrimBounds"/> accounts for.
     public (V3 Min, V3 Max) Bounds()
@@ -237,6 +379,7 @@ public sealed class FrepField
             if (t == none) continue;
             var n = nodes[i];
             if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
+            if (n.Rows is { } w) { Ask(n.Operands[0], t * MaxLip(n.Op, w)); continue; }
             double d = n.Op == FieldOp.Union && n.Operands.Length > 1 ? Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25) : 0;
             foreach (var o in n.Operands) Ask(o, t + d);
         }
@@ -249,7 +392,11 @@ public sealed class FrepField
             if (nodeLevel[i] == none) continue;
             var n = nodes[i];
             var box = Box(n.Operands[0]);
-            if (n.Op == FieldOp.Union)
+            if (n.Rows is { } w)
+            {
+                if (!IsEmpty(box)) box = WarpBox(n.Op, w, box);
+            }
+            else if (n.Op == FieldOp.Union)
                 for (int o = 1; o < n.Operands.Length; o++) box = Join(box, Box(n.Operands[o]));
             else if (n.Op == FieldOp.Intersect)
                 for (int o = 1; o < n.Operands.Length; o++)
@@ -276,6 +423,98 @@ public sealed class FrepField
     static (V3 Min, V3 Max) Join((V3 Min, V3 Max) a, (V3 Min, V3 Max) b) => (
         new V3(Math.Min(a.Min.X, b.Min.X), Math.Min(a.Min.Y, b.Min.Y), Math.Min(a.Min.Z, b.Min.Z)),
         new V3(Math.Max(a.Max.X, b.Max.X), Math.Max(a.Max.Y, b.Max.Y), Math.Max(a.Max.Z, b.Max.Z)));
+
+    /// World box holding the warp's image of a child box (child-space q → world p with Warp(p) = q).
+    ///   twist:  rotation about the axis, keeps h and radius: finite cylinder around the axis;
+    ///   bend:   h <= 0 is identity (child box); arc region keeps b and rho = R - y: annular sector;
+    ///           tail is rigid: child box corners moved;
+    ///   repeat: child box ⊕ box of the farthest cell offsets.
+    public static (V3 Min, V3 Max) WarpBox(FieldOp op, V4[] w, (V3 Min, V3 Max) child)
+    {
+        Span<V3> corners = stackalloc V3[8];
+        for (int i = 0; i < 8; i++)
+            corners[i] = new V3((i & 1) == 0 ? child.Min.X : child.Max.X, (i & 2) == 0 ? child.Min.Y : child.Max.Y,
+                (i & 4) == 0 ? child.Min.Z : child.Max.Z);
+        switch (op)
+        {
+            case FieldOp.Twist:
+            {
+                V3 a = w[0].Xyz, d = w[1].Xyz;
+                double h0 = double.PositiveInfinity, h1 = double.NegativeInfinity, r = 0;
+                foreach (var c in corners)
+                {
+                    double h = V3.Dot(c - a, d);
+                    h0 = Math.Min(h0, h);
+                    h1 = Math.Max(h1, h);
+                    r = Math.Max(r, (c - a - d * h).Length);
+                }
+                // Disc of radius r perpendicular to d spans r·sqrt(1 - d_i²) along axis i.
+                var e = new V3(r * Math.Sqrt(Math.Max(0, 1 - d.X * d.X)), r * Math.Sqrt(Math.Max(0, 1 - d.Y * d.Y)),
+                    r * Math.Sqrt(Math.Max(0, 1 - d.Z * d.Z)));
+                return Join((a + d * h0 - e, a + d * h0 + e), (a + d * h1 - e, a + d * h1 + e));
+            }
+            case FieldOp.Bend:
+            {
+                V3 a = w[0].Xyz, d = w[1].Xyz, n = w[2].Xyz, bd = V3.Cross(d, n);
+                double L = w[0].W, beta = w[1].W;
+                if (beta < 1e-5) return child;
+                double R = L / beta, sb = Math.Sin(beta), cb = Math.Cos(beta);
+                // Child box in the (d, n, bd) frame at a; tail corners mapped by the inverse of Warp's rigid tail map.
+                V3 lo = new(double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity), hi = lo * -1;
+                var box = child;
+                foreach (var c in corners)
+                {
+                    var v = c - a;
+                    double h = V3.Dot(v, d), y = V3.Dot(v, n), b = V3.Dot(v, bd);
+                    lo = new V3(Math.Min(lo.X, h), Math.Min(lo.Y, y), Math.Min(lo.Z, b));
+                    hi = new V3(Math.Max(hi.X, h), Math.Max(hi.Y, y), Math.Max(hi.Z, b));
+                    double qh = h - L;
+                    var p = a + d * (R * sb + qh * cb - y * sb) + n * (R * (1 - cb) + qh * sb + y * cb) + bd * b;
+                    box = Join(box, (p, p));
+                }
+                // Arc: q = (R alpha, R - rho, b) ↦ (rho sin alpha, R - rho cos alpha, b); alpha <= pi (atan2 range).
+                double r0 = Math.Max(0, R - hi.Y), r1 = R - lo.Y;
+                double a0 = Math.Max(0, lo.X / R), a1 = Math.Min(Math.Min(beta, Math.PI), hi.X / R);
+                if (r1 >= r0 && a1 >= a0)
+                {
+                    double sh0 = double.PositiveInfinity, sh1 = double.NegativeInfinity, sy0 = sh0, sy1 = sh1;
+                    void Add(double rho, double al)
+                    {
+                        double h = rho * Math.Sin(al), y = R - rho * Math.Cos(al);
+                        sh0 = Math.Min(sh0, h); sh1 = Math.Max(sh1, h);
+                        sy0 = Math.Min(sy0, y); sy1 = Math.Max(sy1, y);
+                    }
+                    const double Q = Math.PI / 2;
+                    foreach (var rho in (ReadOnlySpan<double>)[r0, r1])
+                    {
+                        Add(rho, a0);
+                        Add(rho, a1);
+                        for (double k = Math.Ceiling(a0 / Q) * Q; k <= a1; k += Q) Add(rho, k); // extremes at quarter turns
+                    }
+                    for (int i = 0; i < 8; i++)
+                    {
+                        var p = a + d * ((i & 1) == 0 ? sh0 : sh1) + n * ((i & 2) == 0 ? sy0 : sy1) + bd * ((i & 4) == 0 ? lo.Z : hi.Z);
+                        box = Join(box, (p, p));
+                    }
+                }
+                return box;
+            }
+            case FieldOp.Repeat:
+            {
+                V3 x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y);
+                var box = child;
+                for (int i = 0; i < 8; i++)
+                {
+                    var off = x * (((i & 1) == 0 ? w[3].X : w[4].X) * w[0].W) + y * (((i & 2) == 0 ? w[3].Y : w[4].Y) * w[1].W) +
+                              z * (((i & 4) == 0 ? w[3].Z : w[4].Z) * w[2].W);
+                    box = Join(box, (child.Min + off, child.Max + off));
+                }
+                return box;
+            }
+            default:
+                throw new ArgumentOutOfRangeException(nameof(op));
+        }
+    }
 
     /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
     static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)

@@ -23,8 +23,30 @@ Conventions every generated shader follows:
 - Fragment output: `layout(location=0) out vec4`.
 
 Programs:
-- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/colors/k's are uniforms. Color: each prim's Rhino display color (`ObjectAttributes.DrawColor`, packed 0xRRGGBB floats, 4 per row after the prim rows); `sceneColor()` replays the DAG over `vec4(rgb, d)` once at the hit point: union/intersect mix operand colors by the smin/smax weight (pure away from the blend, fading across a smooth fillet; k = 0 picks the nearer operand), difference keeps the base's color. Shade: `color * mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Silhouette inset by `FrepShaderGen.SilhouetteInsetPx` (1 px, `params.x`: SDF + inset × pixel footprint at t) so Rhino's wires drawn underneath stay visible around the shading. 4 KB uniform cap (prims past it dropped).
+- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. FTwist/FBend/FRepeat nodes warp the point for their subtree (`opTwist`/`opBend`/`opRepeat`; each warp = new point context, subtree re-emitted per context), driven by a live Rhino line/box (`Csg/FrepRefs.cs`); deleted line/box = child drawn unwarped; twist/bend divide the child distance by a local Lipschitz bound. Raymarched on a fullscreen triangle, only inside `bound` (sphere around the warped scene's box, from in-memory prims/warps so it follows drags). Structure baked into source (cached by generated map + color code); camera/frustum/bound/prims/colors/warp frames/k's are uniforms. Color: each prim's Rhino display color (`ObjectAttributes.DrawColor`, packed 0xRRGGBB floats, 4 per row after the prim rows); `sceneColor()` replays the DAG (incl. warp contexts) over `vec4(rgb, d)` once at the hit point: union/intersect mix operand colors by the smin/smax weight (pure away from the blend, fading across a smooth fillet; k = 0 picks the nearer operand), difference keeps the base's color, warps keep the child's. Shade: `color * mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Silhouette inset by `FrepShaderGen.SilhouetteInsetPx` (1 px, `params.x`: SDF + inset × pixel footprint at t) so Rhino's wires drawn underneath stay visible around the shading. 4 KB uniform cap (prims past it dropped).
 - `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground. Placed top-left just below Rhino's viewport title (`TitleClearance`) so view names don't overlap it.
+
+### Scene uniform layout
+
+Header (7 vec4 rows, `HeaderRows`): camPos, camX, camY, camZ, frustum, params, bound. Then data rows in `Compile()` order: prims (sphere 1 row, others 3), prim colors (4 per row), warp rows (one block per live warp, tree order), node k's (4 per row). `PrimRowBudget(tree)` = data rows − k rows − warp rows (prims + their color rows must fit); prims past it are dropped.
+
+### Warps (FTwist / FBend / FRepeat)
+
+One operand each. Node stores `Ref` (Guid of a Rhino line or box, read live via `Csg/FrepRefs.cs`; hidden ok) + `Params`. Moving the ref (incl. gumball drag) updates the warp without recompiling.
+
+| Op | Ref | Params | Rows | Behaviour |
+|---|---|---|---|---|
+| Twist | line | angle (°, total start→end) | 2: (start, rad/unit), (dir, extent) | rotate about the infinite axis; linear past the ends |
+| Bend | line | angle (°, over line length), direction (° about axis; 0 = world +Z ⟂ axis, +X if axis vertical) | 3: (start, L), (dir, β), (n, minR) | arc of radius L/β; before start unchanged, past end rigid tangent continuation |
+| Repeat | box | x, y, z spacing (model units) | 5: (anchor, sx), (X, sy), (Y, sz), lo, hi | lattice anchored at child bbox centre, axes = box frame; cell = clamp(round(local/s), lo, hi), lo/hi so copies stay in the box |
+
+- Codegen: each warp opens a point context `q{c}`; its subtree is re-emitted in that context (memoized by operand × context).
+- Distance: twist/bend divide the child value by a per-point Lipschitz bound (`l{c}`, clamped by child extent); repeat doesn't (clips a child wider than the spacing).
+- Missing cases: ref deleted / wrong type → passthrough (child unwarped; panel says so); child missing → empty; node hidden → absent.
+- `bound` (raymarch sphere): computed per frame from in-memory prims/warps (`FrepShaderGen.Bound`), so it follows drags. Prims = sphere around frame origin; union/intersect = union of operand boxes; difference = base; hidden node = absent; warps via `FrepField.WarpBox` (shared with the mesher): twist = cylinder about axis over child's axial span, bend = child box ∪ annular arc sector ∪ rigidly moved tail corners, repeat = child box ⊕ farthest cell offsets. Padded by Σk × max ellipsoid stretch. `FrepScene.Bounds` (warp extent/anchor, nested warps) uses the same `Warped`.
+- Shared math: `Csg/FrepWarpMath.cs` (ref resolution, `SdWarp` extent/anchor, packed rows, bend frame) feeds both the shader uniforms and the mesher.
+- Mesher (`Meshing/FrepField.cs`): line-for-line port of `opTwist`/`opBend`/`opRepeat` with per-warp point contexts; keep in sync with the GLSL. Only diff: repeat rounds halves away from zero (GLSL `round` is driver-defined on exact cell boundaries).
+- Known: bend `lip` jumps between arc and straight regions (field shrinks, surface unaffected); twist/bend Lipschitz clamp only holds within child extent; repeat assumes the child fits one cell.
 
 Original slice program (removed):
 
@@ -53,7 +75,7 @@ FreppuccinoPlugin (AtStartup)
 FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(GhostedId) + 80% transparency + UpdateDisplayMode   (Ghosted underlay; recreated if missing or not ghosted at 80%, e.g. an older Wireframe copy)
 ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
-Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FrepPanel lists the tree (edit op/k, delete, click node = pick it)
+Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FTwist/FBend/FRepeat wrap one operand, pick axis line / box; FrepPanel lists the tree (edit op/k, delete, click node = pick it)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

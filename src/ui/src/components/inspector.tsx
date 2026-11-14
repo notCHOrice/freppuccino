@@ -3,21 +3,31 @@ import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { BrandIcon, NodeIcon } from '@/components/brand-icon'
+import { BrandIcon, NodeIcon, type BrandIconName } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
 import { send, useHost } from '@/bridge/host'
-import type { OperationKind, SceneNode } from '@/bridge/protocol'
-import { OPERATIONS, PRIMITIVES, displayParams, typeLabel } from '@/lib/scene'
+import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
+import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
 export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string> }) {
   const { labels } = props
   const selected = props.selected.filter((n) => !n.missing)
   if (selected.length === 0) return <CreateSection />
-  if (selected.length === 1 && selected[0].kind === 'primitive')
-    return <PrimitiveSection key={selected[0].id} node={selected[0]} labels={labels} />
+  const one = selected[0]
   if (selected.length === 1)
-    return <CombineSection key={selected[0].id} operands={selected[0].children ?? []} labels={labels} existing={selected[0]} />
+    return (
+      <>
+        {one.kind === 'primitive' ? (
+          <PrimitiveSection key={one.id} node={one} labels={labels} />
+        ) : isDeform(one.op) ? (
+          <DeformSection key={one.id} node={one} labels={labels} />
+        ) : (
+          <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} />
+        )}
+        <DeformButtons />
+      </>
+    )
   return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
 }
 
@@ -42,16 +52,7 @@ function CreateSection() {
       <Section title="Create">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
           {Object.values(PRIMITIVES).map((p) => (
-            <button
-              key={p.command}
-              type="button"
-              title={p.command}
-              onClick={() => send({ type: 'runCommand', command: p.command })}
-              className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
-            >
-              <BrandIcon name={p.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />
-              <span className="type-small">{p.label}</span>
-            </button>
+            <CommandTile key={p.command} label={p.label} icon={p.icon} command={p.command} />
           ))}
         </div>
         <p className="type-small text-muted-foreground">
@@ -102,7 +103,8 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
   const { labels, existing } = props
   const units = useHost((s) => s.settings.units)
   const [swapped, setSwapped] = useState(false)
-  const [op, setOp] = useState<OperationKind>(existing?.op ?? 'union')
+  const existingOp = isDeform(existing?.op) ? undefined : existing?.op
+  const [op, setOp] = useState<OperationKind>(existingOp ?? 'union')
   const [k, setK] = useState(existing?.k ?? 0)
 
   // Host values win when they change (undo, another edit); unrelated scene updates keep local edits.
@@ -114,7 +116,7 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
   if (existing && !dragging && caughtUp && (pending || existing.op !== synced.op || existing.k !== synced.k)) {
     setPending(null)
     setSynced({ op: existing.op, k: existing.k })
-    if (existing.op) setOp(existing.op)
+    if (existingOp) setOp(existingOp)
     if (existing.k !== undefined) setK(existing.k)
   }
 
@@ -225,6 +227,96 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         </Button>
       )}
     </Section>
+  )
+}
+
+// ── One deform node: its params ──
+
+function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) {
+  const { node, labels } = props
+  const units = useHost((s) => s.settings.units)
+  const params = displayParams(node)
+  const isAngle = node.op !== 'repeat'
+  const [max] = useState(() => (isAngle ? 360 : Math.max(1, ...params.map((p) => p.value * 3))))
+
+  // Throttled previews while dragging; release sends the final value (= one undo step).
+  const live = useRef({ timer: 0, name: '', value: 0, previewed: false })
+  const preview = (name: string, value: number) => {
+    const l = live.current
+    Object.assign(l, { name, value })
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      send({ type: 'setNodeParam', id: node.id, name: l.name, value: l.value, preview: true })
+    }, PREVIEW_MS)
+  }
+  const commit = (name: string, value: number) => {
+    const l = live.current
+    clearTimeout(l.timer)
+    Object.assign(l, { timer: 0, previewed: false })
+    send({ type: 'setNodeParam', id: node.id, name, value })
+  }
+  useEffect(() => {
+    const l = live.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed) send({ type: 'setNodeParam', id: node.id, name: l.name, value: l.value })
+    }
+  }, [node.id])
+
+  const child = node.children?.[0]
+  return (
+    <Section title={labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
+      {child && <Operand node={child} label={labels.get(child.id)} role="Child" />}
+      {node.refMissing && (
+        <p className="type-small text-muted-foreground">{node.op === 'repeat' ? 'Box' : 'Axis line'} deleted; drawn unwarped.</p>
+      )}
+      {params.map((p) => (
+        <ParamSlider
+          key={p.key}
+          label={p.label}
+          units={isAngle ? '°' : units}
+          value={p.value}
+          min={isAngle ? -max : 0}
+          max={max}
+          step={isAngle ? 1 : 0.01}
+          onChange={(v) => preview(p.key, v)}
+          onCommit={(v) => commit(p.key, v)}
+        />
+      ))}
+      <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [node.id] })}>
+        <Trash2 /> Delete
+      </Button>
+    </Section>
+  )
+}
+
+/** Runs FTwist / FBend / FRepeat on the selection (they then ask for the line / box). */
+function DeformButtons() {
+  return (
+    <Section title="Deform">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
+        {(Object.keys(DEFORMS) as DeformKind[]).map((kind) => (
+          <CommandTile key={kind} {...DEFORMS[kind]} />
+        ))}
+      </div>
+    </Section>
+  )
+}
+
+/** Icon + label button that runs a Rhino command (Create / Deform grids). */
+function CommandTile(props: { label: string; icon: BrandIconName; command: AllowedCommand }) {
+  return (
+    <button
+      type="button"
+      title={props.command}
+      onClick={() => send({ type: 'runCommand', command: props.command })}
+      className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
+    >
+      <BrandIcon name={props.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />
+      <span className="type-small">{props.label}</span>
+    </button>
   )
 }
 
