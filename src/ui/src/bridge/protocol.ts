@@ -46,8 +46,10 @@ export type HostMessage =
 
 // ── UI → Host ──
 export type SelectMode = 'replace' | 'add' | 'toggle'
+/** Must match UiController.AllowedCommands */
 export type AllowedCommand =
-  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FTorus' | 'FEllipsoid' | 'FPyramid' | 'Freppuccino'
+  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FPyramid' | 'FEllipsoid' | 'FTorus'
+  | 'Freppuccino'
 
 export type UiMessage =
   | { type: 'ready' }
