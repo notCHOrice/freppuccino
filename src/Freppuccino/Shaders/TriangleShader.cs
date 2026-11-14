@@ -1,4 +1,4 @@
-namespace Freppucino.Shaders;
+namespace Freppuccino.Shaders;
 
 public static class TriangleShader
 {

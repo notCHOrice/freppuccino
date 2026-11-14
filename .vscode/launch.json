@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rhino 9 + Freppuccino",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "osx": {
+        "program": "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros",
+        "args": ["-nosplash"]
+      },
+      "windows": {
+        "program": "C:\\Program Files\\Rhino 9\\System\\Rhino.exe",
+        "targetArchitecture": "x86_64",
+        "args": ["/netcore", "/nosplash"]
+      },
+      "env": {
+        "RHINO_PACKAGE_DIRS": "${workspaceFolder}/src/Freppuccino/bin/Debug/net10.0/",
+        "FREPPUCCINO_AUTOSTART": "1"
+      },
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "internalConsole"
+    }
+  ]
+}

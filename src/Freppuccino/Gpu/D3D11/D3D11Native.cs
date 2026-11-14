@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
-namespace Freppucino.Gpu.D3D11;
+namespace Freppuccino.Gpu.D3D11;
 
 /// Hand-rolled COM vtable calls (no binding package). Indices verified against mingw-w64 d3d11.h / d3d11_1.h C vtables.
 /// ID3D11Device1 / ID3D11DeviceContext1 vtables are linear: IUnknown(0-2) → base interface → *1 additions.

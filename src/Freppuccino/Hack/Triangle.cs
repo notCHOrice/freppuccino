@@ -5,7 +5,7 @@ using Rhino;
 using Rhino.Display;
 
 // THROWAWAY: port of the s3.cs spike. Delete Hack/ to remove.
-namespace Freppucino.Hack;
+namespace Freppuccino.Hack;
 
 static class O
 {
@@ -165,7 +165,7 @@ fragment main0_out main0(main0_in in [[stage_in]])
             O.M3(enc, O.S("drawPrimitives:vertexStart:vertexCount:"), (IntPtr)3, (IntPtr)0, (IntPtr)3);
             Dirty(e.Display);
             if (Log.Count < 10) Log.Add($"drew in {ch} vp={e.Viewport.Name}");
-        } catch (Exception ex) { if (Log.Count < 10) Log.Add("EX " + ex.Message); RhinoApp.WriteLine("Freppucino hack: " + ex); }
+        } catch (Exception ex) { if (Log.Count < 10) Log.Add("EX " + ex.Message); RhinoApp.WriteLine("Freppuccino hack: " + ex); }
     }
         // HACK for Rhino's Metal state cache: a dummy Rhino draw with different state so its next real draw rebinds its own PSO/DSS
     public static int DirtyMode = 4;
@@ -193,12 +193,12 @@ static class Boot
     public static void Start()
     {
         // recreate from Wireframe each load (old one was a Shaded copy)
-        var m = DisplayModeDescription.FindByName("Freppucino");
+        var m = DisplayModeDescription.FindByName("Freppuccino");
         if (m != null) DisplayModeDescription.DeleteDisplayMode(m.Id);
-        Tri.ModeId = DisplayModeDescription.CopyDisplayMode(DisplayModeDescription.WireframeId, "Freppucino");
+        Tri.ModeId = DisplayModeDescription.CopyDisplayMode(DisplayModeDescription.WireframeId, "Freppuccino");
         var nm = DisplayModeDescription.GetDisplayMode(Tri.ModeId);
         if (nm != null) DisplayModeDescription.UpdateDisplayMode(nm); // persist
         Conduit = new Tri { Enabled = true };
-        RhinoApp.WriteLine($"Freppucino hack: conduit on, mode {Tri.ModeId}");
+        RhinoApp.WriteLine($"Freppuccino hack: conduit on, mode {Tri.ModeId}");
     }
 }

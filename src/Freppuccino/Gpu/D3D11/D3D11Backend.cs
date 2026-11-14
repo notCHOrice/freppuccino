@@ -1,10 +1,10 @@
 using System.Runtime.Versioning;
-using Freppucino.Shaders;
+using Freppuccino.Shaders;
 using Rhino;
 using Rhino.Display;
-using static Freppucino.Gpu.D3D11.D3D11Native;
+using static Freppuccino.Gpu.D3D11.D3D11Native;
 
-namespace Freppucino.Gpu.D3D11;
+namespace Freppuccino.Gpu.D3D11;
 
 /// How we isolate our draw from Rhino's D3D11 state.
 public enum D3D11StateMode
@@ -43,7 +43,7 @@ public sealed class D3D11Backend : IGpuBackend
     {
         if (!OperatingSystem.IsWindows()) return false;
         try { return DrawWin(pipeline, program); }
-        catch (Exception ex) { LogOnce("draw:" + ex.GetType().Name, "Freppucino D3D11: " + ex); return false; }
+        catch (Exception ex) { LogOnce("draw:" + ex.GetType().Name, "Freppuccino D3D11: " + ex); return false; }
     }
 
     [SupportedOSPlatform("windows")]
@@ -51,7 +51,7 @@ public sealed class D3D11Backend : IGpuBackend
     {
         var dev = pipeline.GetDirect3d11Device();
         var ctx = pipeline.GetDirect3d11DeviceContext();
-        if (dev == IntPtr.Zero || ctx == IntPtr.Zero) { LogOnce("null", "Freppucino D3D11: null device/context"); return false; }
+        if (dev == IntPtr.Zero || ctx == IntPtr.Zero) { LogOnce("null", "Freppuccino D3D11: null device/context"); return false; }
         if (dev != device) { ReleaseAll(); initOk = Init(dev); }
         if (!initOk) return false;
 
@@ -63,10 +63,10 @@ public sealed class D3D11Backend : IGpuBackend
             D3D11StateMode.Manual => false,
             _ => EnsureContextState(ctx),
         };
-        if (StateMode == D3D11StateMode.Swap && !swap) LogOnce("swapfallback", "Freppucino D3D11: Swap requested but unavailable; using Manual");
+        if (StateMode == D3D11StateMode.Swap && !swap) LogOnce("swapfallback", "Freppuccino D3D11: Swap requested but unavailable; using Manual");
 
         var ann = QI(ctx, IID_ID3DUserDefinedAnnotation);
-        if (ann != IntPtr.Zero) BeginEvent(ann, "Freppucino");
+        if (ann != IntPtr.Zero) BeginEvent(ann, "Freppuccino");
         try
         {
             if (swap) DrawSwapped(ctx, prog); else DrawManual(ctx, prog);
@@ -85,13 +85,13 @@ public sealed class D3D11Backend : IGpuBackend
         featureLevel = FeatureLevel(dev);
         if (featureLevel < FEATURE_LEVEL_11_0)
         {
-            LogOnce("fl", $"Freppucino D3D11: feature level 0x{featureLevel:X} < 11_0; SM5 shaders unsupported");
+            LogOnce("fl", $"Freppuccino D3D11: feature level 0x{featureLevel:X} < 11_0; SM5 shaders unsupported");
             return false;
         }
         device1 = QI(dev, IID_ID3D11Device1); // only needed for Swap
         Check(CreateRasterizerState(dev, RasterizerDesc.SolidNoCull, out rs), "CreateRasterizerState");
         Check(CreateDepthStencilState(dev, DepthStencilDesc.Disabled, out dss), "CreateDepthStencilState");
-        SetName(rs, "Freppucino RS"); SetName(dss, "Freppucino DSS");
+        SetName(rs, "Freppuccino RS"); SetName(dss, "Freppuccino DSS");
         return true;
     }
 
@@ -103,13 +103,13 @@ public sealed class D3D11Backend : IGpuBackend
         if (ctxStateFailed) return false;
         ctxStateFailed = true; // until proven otherwise
         int type = ContextType(ctx);
-        if (type != DEVICE_CONTEXT_IMMEDIATE) { LogOnce("deferred", $"Freppucino D3D11: context type {type} (not immediate); using Manual state save/restore"); return false; }
-        if (device1 == IntPtr.Zero) { LogOnce("dev1", "Freppucino D3D11: no ID3D11Device1; using Manual"); return false; }
+        if (type != DEVICE_CONTEXT_IMMEDIATE) { LogOnce("deferred", $"Freppuccino D3D11: context type {type} (not immediate); using Manual state save/restore"); return false; }
+        if (device1 == IntPtr.Zero) { LogOnce("dev1", "Freppuccino D3D11: no ID3D11Device1; using Manual"); return false; }
         // Mirror device threading flag (required to match). Emulate ID3D11Device1 at Rhino's feature level.
         uint flags = (CreationFlags(device) & CREATE_DEVICE_SINGLETHREADED) != 0 ? CONTEXT_STATE_SINGLETHREADED : 0;
         int hr = CreateDeviceContextState(device1, flags, featureLevel, IID_ID3D11Device1, out ctxState);
-        if (hr < 0) { LogOnce("cdcs", $"Freppucino D3D11: CreateDeviceContextState failed 0x{hr:X8}; using Manual"); return false; }
-        SetName(ctxState, "Freppucino ContextState");
+        if (hr < 0) { LogOnce("cdcs", $"Freppuccino D3D11: CreateDeviceContextState failed 0x{hr:X8}; using Manual"); return false; }
+        SetName(ctxState, "Freppuccino ContextState");
         ctxStateFailed = false;
         return true;
     }
@@ -197,14 +197,14 @@ public sealed class D3D11Backend : IGpuBackend
             var psCode = D3D11Native.Compile(ShaderCompiler.ToHlsl(ShaderCompiler.ToSpirv(src.Fragment, ShaderStage.Fragment)), "main", "ps_5_0", $"freppucino_{tag}.frag.hlsl");
             Check(CreateVertexShader(device, vsCode, out vs), "CreateVertexShader");
             Check(CreatePixelShader(device, psCode, out ps), "CreatePixelShader");
-            SetName(vs, $"Freppucino VS {tag}"); SetName(ps, $"Freppucino PS {tag}");
+            SetName(vs, $"Freppuccino VS {tag}"); SetName(ps, $"Freppuccino PS {tag}");
             return programs[src.Hash] = new Program(vs, ps);
         }
         catch (Exception ex)
         {
             SafeRelease(ref vs); SafeRelease(ref ps);
             failed.Add(src.Hash);
-            RhinoApp.WriteLine($"Freppucino D3D11: shader {src.Hash} failed: {ex.Message}");
+            RhinoApp.WriteLine($"Freppuccino D3D11: shader {src.Hash} failed: {ex.Message}");
             return null;
         }
     }

@@ -1,5 +1,5 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/Freppucino/Freppucino.csproj" />
+    <Project Path="src/Freppuccino/Freppuccino.csproj" />
   </Folder>
 </Solution>

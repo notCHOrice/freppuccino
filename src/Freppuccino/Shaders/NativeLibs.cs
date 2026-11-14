@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace Freppucino.Shaders;
+namespace Freppuccino.Shaders;
 
 /// Resolves shaderc_shared / spirv-cross from <plugin dir>/runtimes/<rid>/native/ (Rhino's ALC may ignore deps.json native probing).
 public static class NativeLibs

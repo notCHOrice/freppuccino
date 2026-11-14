@@ -9,8 +9,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Version>0.1.0</Version>
-    <Title>Freppucino</Title>
-    <Description>Freppucino Rhino plugin</Description>
+    <Title>Freppuccino</Title>
+    <Description>Freppuccino Rhino plugin</Description>
     <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
 
@@ -21,6 +21,10 @@
     <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="EmbeddedResources/**/*" />
+  </ItemGroup>
+
   <!-- THROWAWAY hack kept for reference, not compiled -->
   <ItemGroup>
     <Compile Remove="Hack/**" />
@@ -29,11 +33,11 @@
   <!-- `dotnet run` launches Rhino 9 w/ RHINO_PACKAGE_DIRS pointing at the build output, so the .rhp auto-loads. -->
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
     <RunCommand>/usr/bin/env</RunCommand>
-    <RunArguments>RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
+    <RunArguments>FREPPUCCINO_AUTOSTART=1 RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
   </PropertyGroup>
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <RunCommand>cmd.exe</RunCommand>
-    <RunArguments>/c "set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
+    <RunArguments>/c "set FREPPUCCINO_AUTOSTART=1&amp;&amp; set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
   </PropertyGroup>
 
 </Project>

@@ -1,6 +1,6 @@
 # Viewport shaders: design (approach B, native GPU)
 
-Goal: a Rhino 9 display mode ("Freppucino") whose viewport content comes from runtime-generated shaders, drawn on Rhino's own GPU device/encoder. Mac (Metal) first; Windows (D3D11) is next, same shader source.
+Goal: a Rhino 9 display mode ("Freppuccino") whose viewport content comes from runtime-generated shaders, drawn on Rhino's own GPU device/encoder. Mac (Metal) first; Windows (D3D11) is next, same shader source.
 
 ## 1. Shader definition
 
@@ -43,12 +43,12 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ## 2. Plugin wiring
 
 ```
-FreppucinoPlugin (AtStartup)
-  OnLoad: NativeLibs.Install(); FreppucinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppucinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept)
+FreppuccinoPlugin (AtStartup)
+  OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept)
 ShaderConduit.PostDrawObjects(e) if mode active: GpuBackends.For(e.Display)?.Draw(...) → RhinoStateReset.Apply(dp)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
-Command "Freppucino"             set active viewport to the mode
+Command "Freppuccino"             set active viewport to the mode
 ```
 
 Files: `Display/` (mode, conduit, state reset), `Shaders/` (source, compiler, native resolver), `Gpu/` (interface, `Metal/`, `D3D11/`). `Hack/` is excluded from the build, kept for reference.

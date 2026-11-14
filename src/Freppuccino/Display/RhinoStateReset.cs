@@ -1,6 +1,6 @@
 using Rhino.Display;
 
-namespace Freppucino.Display;
+namespace Freppuccino.Display;
 
 /// Rhino caches bound GPU state and skips rebinding if unchanged; after our draw that cache is stale.
 /// One clipped Rhino line (just behind the camera) forces Rhino to rebind its own state. Validated on Metal; assumed on D3D11.

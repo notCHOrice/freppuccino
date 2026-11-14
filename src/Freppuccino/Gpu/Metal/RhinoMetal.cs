@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using Rhino.Display;
 
-namespace Freppucino.Gpu.Metal;
+namespace Freppuccino.Gpu.Metal;
 
 /// Rhino's Metal objects via undocumented RhCore exports (CRhinoDisplayPipeline members, called with the native pipeline as `this`).
 /// RhCore is located among the images already loaded in the process (no hardcoded app path).

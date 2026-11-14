@@ -1,11 +1,11 @@
 using Rhino.Display;
 
-namespace Freppucino.Display;
+namespace Freppuccino.Display;
 
-/// "Freppucino" = copy of Wireframe. Created once per machine if missing; persisted via UpdateDisplayMode.
-public static class FreppucinoDisplayMode
+/// "Freppuccino" = copy of Wireframe. Created once per machine if missing; persisted via UpdateDisplayMode.
+public static class FreppuccinoDisplayMode
 {
-    public const string Name = "Freppucino";
+    public const string Name = "Freppuccino";
     public static Guid Id { get; private set; }
 
     public static void Ensure()

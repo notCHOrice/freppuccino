@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace Freppucino.Shaders;
+namespace Freppuccino.Shaders;
 
 public enum ShaderStage { Vertex = 0, Fragment = 1 } // == shaderc_shader_kind
 

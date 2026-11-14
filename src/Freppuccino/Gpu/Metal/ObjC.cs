@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace Freppucino.Gpu.Metal;
+namespace Freppuccino.Gpu.Metal;
 
 /// Minimal ObjC runtime interop. objc_msgSend is called through typed unmanaged function pointers (one per signature).
 /// BOOL is passed as byte (arm64 BOOL == bool, 1 byte).

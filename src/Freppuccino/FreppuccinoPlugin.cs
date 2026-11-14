@@ -1,15 +1,15 @@
-using Freppucino.Display;
-using Freppucino.Gpu;
-using Freppucino.Shaders;
+using Freppuccino.Display;
+using Freppuccino.Gpu;
+using Freppuccino.Shaders;
 using Rhino.PlugIns;
 
-namespace Freppucino;
+namespace Freppuccino;
 
-public class FreppucinoPlugin : PlugIn
+public class FreppuccinoPlugin : PlugIn
 {
-    public FreppucinoPlugin() => Instance = this;
+    public FreppuccinoPlugin() => Instance = this;
 
-    public static FreppucinoPlugin? Instance { get; private set; }
+    public static FreppuccinoPlugin? Instance { get; private set; }
     public static ShaderConduit? Conduit { get; private set; }
 
     public override PlugInLoadTime LoadTime => PlugInLoadTime.AtStartup;
@@ -17,7 +17,8 @@ public class FreppucinoPlugin : PlugIn
     protected override LoadReturnCode OnLoad(ref string errorMessage)
     {
         NativeLibs.Install();
-        FreppucinoDisplayMode.Ensure();
+        FreppuccinoDisplayMode.Ensure();
+        DevAutostart.Install();
         Conduit = new ShaderConduit { Enabled = true };
         return LoadReturnCode.Success;
     }

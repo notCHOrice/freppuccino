@@ -1,9 +1,9 @@
-using Freppucino.Shaders;
+using Freppuccino.Shaders;
 using Rhino;
 using Rhino.Display;
-using static Freppucino.Gpu.Metal.ObjC;
+using static Freppuccino.Gpu.Metal.ObjC;
 
-namespace Freppucino.Gpu.Metal;
+namespace Freppuccino.Gpu.Metal;
 
 /// Render pass attachment formats; not queryable from an encoder, so assumed (see docs/viewport-shaders.md §3).
 public readonly record struct MetalPassFormat(nuint Color, nuint DepthStencil, nuint Samples)
@@ -155,6 +155,6 @@ public sealed unsafe class MetalBackend : IGpuBackend
 
     public void Dispose() => ReleaseAll();
 
-    static void Log(string msg) => RhinoApp.WriteLine("Freppucino Metal: " + msg);
+    static void Log(string msg) => RhinoApp.WriteLine("Freppuccino Metal: " + msg);
     static void LogOnce(ref bool flag, string msg) { if (!flag) Log(msg); flag = true; }
 }

@@ -1,7 +1,7 @@
-using Freppucino.Shaders;
+using Freppuccino.Shaders;
 using Rhino.Display;
 
-namespace Freppucino.Gpu;
+namespace Freppuccino.Gpu;
 
 /// Draws a program on Rhino's own device, inside Rhino's current pass. Must not end/flush Rhino's pass or leak state Rhino relies on.
 public interface IGpuBackend : IDisposable

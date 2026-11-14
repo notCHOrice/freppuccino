@@ -425,6 +425,6 @@ FodyWeavers.xsd
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
 
-# Freppucino graphics
+# Freppuccino graphics
 .idea/
 .DS_Store
