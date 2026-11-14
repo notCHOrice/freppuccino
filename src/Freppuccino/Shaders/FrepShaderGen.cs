@@ -195,11 +195,12 @@ public static class FrepShaderGen
             float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
             return s * sqrt(min(dot2(ca), dot2(cb)));
         }
-        float sdEllipsoid(vec3 p, vec3 r) // bound, not exact
+        // Not IQ's sdEllipsoid: its value at the centre depends on the direction of approach, which breaks
+        // smooth CSG and meshing. This has the exact surface and changes by at most 1 per unit distance,
+        // but it underestimates distance. Keep in sync with Meshing/FrepField.cs.
+        float sdEllipsoid(vec3 p, vec3 r) // unit sphere scaled by r, times the smallest semi-axis
         {
-            float k0 = length(p / r);
-            float k1 = length(p / (r * r));
-            return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, min(r.y, r.z));
+            return (length(p / r) - 1.0) * min(r.x, min(r.y, r.z));
         }
         // Unit square base centered at the origin, apex at (0, h, 0).
         // IQ's version measures distance to the four slanted faces only; the base enters just through the sign.
@@ -342,9 +343,19 @@ public static class FrepShaderGen
         double radius = 0;
         foreach (var p in prims) radius = Math.Max(radius, c.DistanceTo(p.Frame.Origin) + PrimRadius(p));
 
-        double pad = 0;
-        foreach (var k in scene.Ks) if (k > 0) pad += 0.25 * k;
-        radius += pad;
+        // A smooth union lowers the field by up to k/4 for two operands, and by up to k for more (it
+        // compounds), so pad by k per node. The ellipsoid's field underestimates distance by up to the
+        // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
+        double pad = 0, stretch = 1;
+        foreach (var k in scene.Ks) if (k > 0) pad += k;
+        foreach (var p in prims)
+            if (p.Kind == SdKind.Ellipsoid)
+            {
+                double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                if (lo > 0) stretch = Math.Max(stretch, hi / lo);
+            }
+        radius += pad * stretch;
         return (c, radius * 1.01 + 1e-6); // margin for float32 rounding
     }
 }
