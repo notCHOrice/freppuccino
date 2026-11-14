@@ -6,8 +6,9 @@ namespace Freppuccino.Gpu;
 /// Draws a program on Rhino's own device, inside Rhino's current pass. Must not end/flush Rhino's pass or leak state Rhino relies on.
 public interface IGpuBackend : IDisposable
 {
+    /// Draws program.VertexCount vertices (triangle list). `uniforms` (std140, <= Uniforms.MaxBytes) bound to both stages; may be empty.
     /// False if nothing was drawn (unsupported pass, compile failure already logged, etc.). Never throws.
-    bool Draw(DisplayPipeline pipeline, ShaderSource program);
+    bool Draw(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms);
 }
 
 public static class GpuBackends
