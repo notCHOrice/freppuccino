@@ -25,16 +25,16 @@ public sealed class ShaderConduit : DisplayConduit
             if (gpu == null) return;
             bool drew = false;
 
-            var spheres = SphereScene.Get(e.RhinoDoc);
-            if (spheres.Count > 0)
+            var scene = FrepScene.Get(e.RhinoDoc);
+            if (scene.Count > 0)
             {
-                if (spheres.Count > FrepShaderGen.MaxSpheres && !loggedCap)
+                var fit = FrepShaderGen.Fit(scene.Spheres.Count, scene.Boxes.Count);
+                if ((fit.Spheres < scene.Spheres.Count || fit.Boxes < scene.Boxes.Count) && !loggedCap)
                 {
-                    RhinoApp.WriteLine($"Freppuccino: {spheres.Count} spheres, drawing first {FrepShaderGen.MaxSpheres}");
+                    RhinoApp.WriteLine($"Freppuccino: {scene.Spheres.Count} spheres + {scene.Boxes.Count} boxes, drawing {fit.Spheres} + {fit.Boxes}");
                     loggedCap = true;
                 }
-                int n = Math.Min(spheres.Count, FrepShaderGen.MaxSpheres);
-                drew |= gpu.Draw(dp, FrepShaderGen.Scene(n), FrepShaderGen.SceneUniforms(dp.Viewport, spheres, FrepSettings.Blend));
+                drew |= gpu.Draw(dp, FrepShaderGen.Scene(fit.Spheres, fit.Boxes), FrepShaderGen.SceneUniforms(dp.Viewport, scene, fit, FrepSettings.Blend));
             }
 
             var (r, size) = BadgeRect(dp);

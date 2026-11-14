@@ -22,7 +22,7 @@ public class FreppuccinoPlugin : PlugIn
         FreppuccinoDisplayMode.Ensure();
         DevAutostart.Install();
         SdfTransformWatcher.Install();
-        SphereScene.Install();
+        FrepScene.Install();
         Conduit = new ShaderConduit { Enabled = true };
         return LoadReturnCode.Success;
     }
