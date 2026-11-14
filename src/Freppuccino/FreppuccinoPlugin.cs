@@ -31,7 +31,7 @@ public class FreppuccinoPlugin : PlugIn
         FrepTrees.Install();
         Conduit = new ShaderConduit { Enabled = true };
         Panels.RegisterPanel(this, typeof(FrepPanel), FrepPanel.Caption, GetType().Assembly,
-            "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.System);
+            "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.PerDoc);
         return LoadReturnCode.Success;
     }
 

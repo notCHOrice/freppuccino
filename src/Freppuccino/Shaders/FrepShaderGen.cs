@@ -1,5 +1,6 @@
 using System.Text;
 using Freppuccino.Csg;
+using Freppuccino.Meshing;
 using Freppuccino.Scene;
 using Rhino.Display;
 using Rhino.Geometry;
@@ -16,8 +17,8 @@ namespace Freppuccino.Shaders;
 /// becomes empty. A warp whose line/box is gone passes its child through unwarped.
 public static class FrepShaderGen
 {
-    /// Uniform header = 6 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, warp rows, then blend k's packed 4 per row.
-    const int HeaderRows = 6;
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, warp rows, then blend k's packed 4 per row.
+    const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
@@ -28,6 +29,10 @@ public static class FrepShaderGen
     /// Rows left for prims once every node's k / warp rows have a slot.
     public static int PrimRowBudget(FrepTree tree) =>
         MaxDataRows - KRows(tree.Nodes.Count(n => !n.Op.IsWarp())) - tree.Nodes.Sum(n => n.Hidden ? 0 : WarpRows(n.Op));
+
+    /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
+    /// A uniform, so changing it never recompiles.
+    public const double SilhouetteInsetPx = 1.0;
 
     static readonly Dictionary<string, ShaderSource> cache = [];
 
@@ -190,7 +195,8 @@ public static class FrepShaderGen
             vec4 camY;       // xyz unit up
             vec4 camZ;       // xyz unit view direction; w = near
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
-            vec4 params;     // x unused, y = eps per unit t, z = eps const, w = far
+            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
+            vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
             // prims, then warp rows (see opTwist/opBend/opRepeat), then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
@@ -242,13 +248,18 @@ public static class FrepShaderGen
             float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
             return s * sqrt(min(dot2(ca), dot2(cb)));
         }
-        float sdEllipsoid(vec3 p, vec3 r) // bound, not exact
+        // Not IQ's sdEllipsoid: its value at the centre depends on the direction of approach, which breaks
+        // smooth CSG and meshing. This has the exact surface and changes by at most 1 per unit distance,
+        // but it underestimates distance. Keep in sync with Meshing/FrepField.cs.
+        float sdEllipsoid(vec3 p, vec3 r) // unit sphere scaled by r, times the smallest semi-axis
         {
-            float k0 = length(p / r);
-            float k1 = length(p / (r * r));
-            return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, min(r.y, r.z));
+            return (length(p / r) - 1.0) * min(r.x, min(r.y, r.z));
         }
-        float sdPyramid(vec3 p, float h) // unit square base centered at the origin, apex at (0, h, 0)
+        // Unit square base centered at the origin, apex at (0, h, 0).
+        // IQ's version measures distance to the four slanted faces only; the base enters just through the sign.
+        // Below the base that overestimates (the ray steps through the floor and stops inside), and just above it
+        // the interior distance ignores the floor (normals there point at the side faces). Both patched at the end.
+        float sdPyramid(vec3 p, float h)
         {
             float m2 = h * h + 0.25;
             p.xz = abs(p.xz);
@@ -260,7 +271,11 @@ public static class FrepShaderGen
             float a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
             float b = m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) + (q.y - m2 * t) * (q.y - m2 * t);
             float d2 = min(q.y, -q.x * m2 - q.y * 0.5) > 0.0 ? 0.0 : min(a, b);
-            return sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            float d = sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            // Below the base every point of the solid sits above the base square, so the base is nearest (exact).
+            // p.xz here is already abs()'d and shifted by -0.5, so max(p.xz, 0) is the overhang past the square.
+            if (p.y < 0.0) return length(vec3(max(p.x, 0.0), p.y, max(p.z, 0.0)));
+            return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
         float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
 
@@ -324,27 +339,37 @@ public static class FrepShaderGen
             vec2 f = vNdc * 0.5 + 0.5;
             vec2 xy = mix(u.frustum.xz, u.frustum.yw, f);
             bool persp = u.camPos.w > 0.5;
-            float near = u.camZ.w, far = u.params.w;
-            vec3 ro, rd; float t, tMax;
+            float near = u.camZ.w;
+            vec3 ro, rd;
             if (persp)
             {
                 ro = u.camPos.xyz;
                 rd = normalize(u.camX.xyz * xy.x + u.camY.xyz * xy.y + u.camZ.xyz * near);
-                float c = dot(rd, u.camZ.xyz); // depth per unit t
-                t = near / c; tMax = far / c;
             }
             else
             {
                 ro = u.camPos.xyz + u.camX.xyz * xy.x + u.camY.xyz * xy.y;
                 rd = u.camZ.xyz;
-                t = near; tMax = far;
             }
+            // March only through the scene's bounding sphere, not Rhino's near/far: Rhino moves its clip planes
+            // around while zooming, and starting a ray past the front of a surface lands inside the SDF (instant
+            // hit, interior-gradient normals, i.e. the shape looks sliced).
+            vec3 oc = ro - u.bound.xyz;
+            float bb = dot(oc, rd);
+            vec3 perp = oc - bb * rd; // closest approach; avoids |oc|^2 - r^2 cancellation when zoomed far out
+            float disc = u.bound.w * u.bound.w - dot(perp, perp);
+            if (u.bound.w <= 0.0 || disc < 0.0) discard;
+            float h = sqrt(disc);
+            float t = -bb - h, tMax = -bb + h;
+            if (persp) t = max(t, 0.0); // nothing behind the eye
+            if (tMax < t) discard;
             float eps = 0.0;
             bool hit = false;
             for (int i = 0; i < 256; i++)
             {
-                eps = u.params.z + u.params.y * t;
-                float d = map(ro + rd * t);
+                eps = u.params.z + u.params.y * t; // half-pixel footprint at t
+                // Shrink the surface by params.x pixels so Rhino's wires stay visible around the shading.
+                float d = map(ro + rd * t) + u.params.x * 2.0 * eps;
                 if (d < eps) { hit = true; break; }
                 t += d;
                 if (t > tMax) break;
@@ -371,7 +396,9 @@ public static class FrepShaderGen
             .Vec4(vp.CameraY.X, vp.CameraY.Y, vp.CameraY.Z)
             .Vec4(dir.X, dir.Y, dir.Z, near)
             .Vec4(l, r, b, t)
-            .Vec4(0, persp ? slope / near : 0, persp ? 0 : slope, far);
+            .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
+        var (center, radius) = Bound(scene);
+        u.Vec4(center.X, center.Y, center.Z, radius);
         // Same order as Compile(): prim rows, warp rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
@@ -389,56 +416,88 @@ public static class FrepShaderGen
 
     static void WarpUniforms(Uniforms u, SdWarp w)
     {
-        var a = w.Axis.From;
-        var d = w.Axis.Direction;
-        double len = d.Length;
-        d.Unitize();
-        switch (w.Op)
-        {
-            case FrepOp.Twist:
-                u.Vec4(a.X, a.Y, a.Z, Rhino.RhinoMath.ToRadians(w.P.X) / len)
-                 .Vec4(d.X, d.Y, d.Z, w.Extent);
-                break;
-            case FrepOp.Bend:
-            {
-                double beta = Rhino.RhinoMath.ToRadians(w.P.X), phi = Rhino.RhinoMath.ToRadians(w.P.Y);
-                var n0 = BendReference(d);
-                var n = n0 * Math.Cos(phi) + Vector3d.CrossProduct(d, n0) * Math.Sin(phi);
-                if (beta < 0) (n, beta) = (-n, -beta);
-                double radius = beta > 1e-9 ? len / beta : double.MaxValue / 4;
-                u.Vec4(a.X, a.Y, a.Z, len)
-                 .Vec4(d.X, d.Y, d.Z, beta)
-                 .Vec4(n.X, n.Y, n.Z, Math.Max(radius - w.Extent, 0.05 * radius));
-                break;
-            }
-            case FrepOp.Repeat:
-            {
-                var f = w.Region.Plane;
-                var c = w.Anchor;
-                f.RemapToPlaneSpace(c, out var cl);
-                var s = w.P;
-                (double lo, double hi) Range(double sp, Interval iv, double at) => sp <= 0 ? (0, 0)
-                    : (Math.Min(0, Math.Ceiling((iv.Min - at) / sp - 1e-9)), Math.Max(0, Math.Floor((iv.Max - at) / sp + 1e-9)));
-                var (x0, x1) = Range(s.X, w.Region.X, cl.X);
-                var (y0, y1) = Range(s.Y, w.Region.Y, cl.Y);
-                var (z0, z1) = Range(s.Z, w.Region.Z, cl.Z);
-                u.Vec4(c.X, c.Y, c.Z, s.X)
-                 .Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, s.Y)
-                 .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, s.Z)
-                 .Vec4(x0, y0, z0)
-                 .Vec4(x1, y1, z1);
-                break;
-            }
-        }
+        foreach (var r in FrepWarpMath.Rows(w)) u.Vec4(r.X, r.Y, r.Z, r.W);
     }
 
-    /// Bend direction 0°: world +Z projected perpendicular to the axis (world +X for a vertical axis).
-    static Vector3d BendReference(Vector3d d)
+    static double PrimRadius(SdPrimitive p)
     {
-        var r = Math.Abs(d.Z) > 0.99 ? Vector3d.XAxis : Vector3d.ZAxis;
-        r -= d * (r * d);
-        r.Unitize();
-        return r;
+        var v = p.P;
+        return p.Kind switch
+        {
+            SdKind.Sphere => Math.Abs(v.X),
+            SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
+            SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
+            SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
+            SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),
+            SdKind.Ellipsoid => Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))),
+            SdKind.Pyramid => Math.Sqrt(v.X * v.X + 0.5 * v.Y * v.Y), // origin at base center, apex at +h
+            _ => 0,
+        };
+    }
+
+    /// Conservative world-space bounding sphere of the drawn scene, from the in-memory prims/warps (follows gumball drags).
+    /// Walks the tree like Compile(): prims → spheres, nodes union their operands, live warps grow their child's box.
+    static (Point3d Center, double Radius) Bound(FrepSceneData scene)
+    {
+        var tree = scene.Tree;
+        var prim = new Dictionary<Guid, int>();
+        for (int i = 0; i < scene.Ids.Count; i++) prim[scene.Ids[i]] = i;
+        var warp = new Dictionary<int, SdWarp>();
+        for (int i = 0; i < scene.WarpIds.Count; i++) warp[scene.WarpIds[i]] = scene.Warps[i];
+        var memo = new Dictionary<FrepOperand, BoundingBox>();
+
+        BoundingBox Of(FrepOperand o)
+        {
+            if (memo.TryGetValue(o, out var b)) return b;
+            b = BoundingBox.Empty;
+            if (!o.IsNode)
+            {
+                if (prim.TryGetValue(o.ObjectId, out var i))
+                {
+                    var p = scene.Primitives[i];
+                    var r = new Vector3d(1, 1, 1) * PrimRadius(p);
+                    b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
+                }
+            }
+            else if (tree.Find(o.NodeId) is { Hidden: false } n)
+            {
+                if (n.Op == FrepOp.Difference) { if (n.Operands.Length > 0) b = Of(n.Operands[0]); }
+                else foreach (var c in n.Operands) b.Union(Of(c));
+                if (b.IsValid && warp.TryGetValue(n.Id, out var w)) b = Warped(b, w);
+            }
+            return memo[o] = b;
+        }
+
+        var box = BoundingBox.Empty;
+        var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
+        foreach (var id in scene.Ids)
+            if (!referenced.Contains(FrepOperand.Object(id))) box.Union(Of(FrepOperand.Object(id)));
+        foreach (var n in tree.Nodes)
+            if (!referenced.Contains(FrepOperand.Node(n.Id))) box.Union(Of(FrepOperand.Node(n.Id)));
+        if (!box.IsValid) return (Point3d.Origin, 0);
+
+        // A smooth union lowers the field by up to k/4 for two operands, and by up to k for more (it
+        // compounds), so pad by k per node. The ellipsoid's field underestimates distance by up to the
+        // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
+        double pad = 0, stretch = 1;
+        foreach (var k in scene.Ks) if (k > 0) pad += k;
+        foreach (var p in scene.Primitives)
+            if (p.Kind == SdKind.Ellipsoid)
+            {
+                double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                if (lo > 0) stretch = Math.Max(stretch, hi / lo);
+            }
+        double radius = 0.5 * box.Diagonal.Length + pad * stretch;
+        return (box.Center, radius * 1.01 + 1e-6); // margin for float32 rounding
+    }
+
+    /// Box of a warp's output given its child's box; same as the mesher's (FrepField.WarpBox).
+    internal static BoundingBox Warped(BoundingBox child, SdWarp w)
+    {
+        var op = w.Op switch { FrepOp.Twist => FieldOp.Twist, FrepOp.Bend => FieldOp.Bend, _ => FieldOp.Repeat };
+        var (lo, hi) = FrepField.WarpBox(op, FrepWarpMath.Rows(w), (new(child.Min.X, child.Min.Y, child.Min.Z), new(child.Max.X, child.Max.Y, child.Max.Z)));
+        return new BoundingBox(lo.X, lo.Y, lo.Z, hi.X, hi.Y, hi.Z);
     }
 }
 
