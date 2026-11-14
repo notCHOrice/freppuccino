@@ -34,6 +34,41 @@ public static class DualContour
     /// Eigenvalues of the fit below this fraction of the largest are treated as zero (see Qef.Solve).
     public static double Cutoff = 0.1;
 
+    /// Counts topology defects in a result: edges not shared by exactly two triangles, and vertices whose
+    /// surrounding triangles do not form a single closed fan (a pinched vertex passes the edge count).
+    public static (int Edges, int Vertices) Defects(Result mesh)
+    {
+        var t = mesh.Triangles;
+        var edges = new Dictionary<(int, int), int>();
+        // For each vertex, the two neighbours of every triangle around it: next[v][a] = b.
+        var fans = new Dictionary<int, int>[mesh.Vertices.Count];
+        int badVertices = 0;
+        var broken = new bool[mesh.Vertices.Count];
+        for (int i = 0; i < t.Count; i += 3)
+            for (int c = 0; c < 3; c++)
+            {
+                int v = t[i + c], a = t[i + (c + 1) % 3], b = t[i + (c + 2) % 3];
+                var key = v < a ? (v, a) : (a, v);
+                edges[key] = edges.GetValueOrDefault(key) + 1;
+                // A consistently wound closed fan gives each neighbour exactly one successor.
+                if (!(fans[v] ??= []).TryAdd(a, b)) broken[v] = true;
+            }
+        for (int v = 0; v < fans.Length; v++)
+        {
+            var fan = fans[v];
+            if (fan == null) continue;
+            bool ok = !broken[v];
+            if (ok)
+            {
+                int start = fan.Keys.First(), at = start, steps = 0;
+                do { ok = fan.TryGetValue(at, out at); steps++; } while (ok && at != start && steps <= fan.Count);
+                ok = ok && at == start && steps == fan.Count;
+            }
+            if (!ok) badVertices++;
+        }
+        return (edges.Values.Count(n => n != 2), badVertices);
+    }
+
     /// Sampled field on the uniform grid. Coordinates handed to <see cref="Qef"/> are relative to Origin.
     sealed class Grid(FrepField field, V3 origin, double h, int nx, int ny, int nz)
     {

@@ -62,7 +62,9 @@ public class FrepMeshCommand : Command
         mesh.Faces.CullDegenerateFaces();
         mesh.Compact();
         bool closed = mesh.IsClosed;
-        bool manifold = mesh.IsManifold(true, out _, out _);
+        // Our own check, on the mesh as generated: it also catches pinched vertices, which an
+        // edge-based test such as Mesh.IsManifold passes.
+        var (badEdges, badVertices) = DualContour.Defects(result);
         mesh.Normals.ComputeNormals();
         // Split vertex normals across sharp edges so creases shade crisp, as Rhino's own meshes do.
         mesh.Unweld(RhinoMath.ToRadians(30), true);
@@ -82,7 +84,9 @@ public class FrepMeshCommand : Command
         doc.Views.Redraw();
         RhinoApp.WriteLine(
             $"FrepMesh: {scene.Count} F-rep(s) -> {mesh.Faces.Count} triangles, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
-            $"{(closed ? "closed" : "OPEN")}, {(manifold ? "manifold" : "NON-MANIFOLD")}, {watch.ElapsedMilliseconds} ms.");
+            $"{(closed ? "closed" : "OPEN")}, " +
+            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)") +
+            $", {watch.ElapsedMilliseconds} ms.");
         return Result.Success;
     }
 
