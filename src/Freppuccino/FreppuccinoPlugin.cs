@@ -1,9 +1,13 @@
+using Freppuccino.Csg;
 using Freppuccino.Display;
 using Freppuccino.Gpu;
 using Freppuccino.Sdf;
 using Freppuccino.Scene;
 using Freppuccino.Shaders;
 using Freppuccino.Ui;
+using Freppuccino.UI;
+using Rhino;
+using Rhino.FileIO;
 using Rhino.PlugIns;
 using Rhino.UI;
 
@@ -25,10 +29,29 @@ public class FreppuccinoPlugin : PlugIn
         DevAutostart.Install();
         SdfTransformWatcher.Install();
         FrepScene.Install();
+        FrepTrees.Install();
+        Panels.RegisterPanel(this, typeof(FrepTreePanel), FrepTreePanel.Caption, GetType().Assembly, "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.PerDoc);
         Conduit = new ShaderConduit { Enabled = true };
         Panels.RegisterPanel(this, typeof(FrepPanel), FrepPanel.Caption, GetType().Assembly,
             "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.System);
         return LoadReturnCode.Success;
+    }
+
+    // CSG tree persisted in the .3dm as plugin data. Skipped for export-selected (leaf ids would dangle) and import/merge (node ids would collide).
+    protected override bool ShouldCallWriteDocument(FileWriteOptions options) =>
+        !options.WriteSelectedObjectsOnly && !options.WriteGeometryOnly && FrepTrees.Get(options.RhinoDoc).Nodes.Count > 0;
+
+    protected override void WriteDocument(RhinoDoc doc, BinaryArchiveWriter archive, FileWriteOptions options) =>
+        FrepTrees.Get(doc).Write(archive);
+
+    protected override void ReadDocument(RhinoDoc doc, BinaryArchiveReader archive, FileReadOptions options)
+    {
+        if (options.ImportMode || options.ImportReferenceMode)
+        {
+            RhinoApp.WriteLine("Freppuccino: F-rep tree not imported (import/merge unsupported).");
+            return;
+        }
+        FrepTrees.Apply(doc, FrepTree.Read(archive));
     }
 
     protected override void OnShutdown()
