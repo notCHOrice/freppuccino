@@ -49,7 +49,7 @@ public class FrepMeshCommand : Command
         if (rc != Result.Success) return rc;
         rc = RhinoGet.GetNumber("Simplification tolerance in cells (0 = uniform density)", true, ref simplify, 0, 1);
         if (rc != Result.Success) return rc;
-        rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower)", true, "No", "Yes", ref quads);
+        rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower, and it reshapes the surface slightly)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
 
         var watch = Stopwatch.StartNew();
@@ -67,20 +67,14 @@ public class FrepMeshCommand : Command
         for (int i = 0; i < t.Count; i += 3) mesh.Faces.AddFace(t[i], t[i + 1], t[i + 2]);
         mesh.Faces.CullDegenerateFaces();
         mesh.Compact();
-        bool closed = mesh.IsClosed;
-        // Our own check, on the mesh as generated: it also catches pinched vertices, which an
-        // edge-based test such as Mesh.IsManifold passes.
-        var (badEdges, badVertices) = DualContour.Defects(result);
         mesh.Normals.ComputeNormals();
         // Split vertex normals across sharp edges so creases shade crisp, as Rhino's own meshes do.
         mesh.Unweld(RhinoMath.ToRadians(30), true);
 
         // Optional second pass: Rhino's QuadRemesh lays out even quads over the triangles, keeping the
         // creases we just unwelded as hard edges. It works from the triangle mesh, so it cannot be more
-        // accurate than it, and it decides its own topology, so report what Rhino says about the result.
-        string faces = $"{mesh.Faces.Count} triangles", quality =
-            $"{(closed ? "closed" : "OPEN")}, " +
-            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
+        // accurate than it (volumes moved by up to 1.3% in testing), and it decides its own topology.
+        string faces = $"{mesh.Faces.Count} triangles";
         if (quads)
         {
             var parameters = new QuadRemeshParameters
@@ -95,10 +89,16 @@ public class FrepMeshCommand : Command
             {
                 faces += $" -> {remeshed.Faces.Count} faces ({remeshed.Faces.QuadCount} quads) after QuadRemesh";
                 mesh = remeshed;
-                quality = $"{(mesh.IsClosed ? "closed" : "OPEN")}, {(mesh.IsManifold(true, out _, out _) ? "manifold" : "NON-MANIFOLD")} per Rhino";
             }
             else RhinoApp.WriteLine("FrepMesh: QuadRemesh produced nothing; keeping the triangle mesh.");
         }
+
+        // Our own check on the mesh being added, whichever pass produced it: it also catches pinched
+        // vertices, which an edge-based test such as Mesh.IsManifold passes.
+        bool closed = mesh.IsClosed;
+        var (badEdges, badVertices) = Defects(mesh);
+        string quality = $"{(closed ? "closed" : "OPEN")}, " +
+            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
 
         var attributes = doc.CreateDefaultAttributes();
         attributes.Name = "FrepMesh";
@@ -117,6 +117,24 @@ public class FrepMeshCommand : Command
             $"FrepMesh: {scene.Count} F-rep(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
             $"{quality}, {watch.ElapsedMilliseconds} ms.");
         return Result.Success;
+    }
+
+    /// <see cref="DualContour.Defects"/> for a Rhino mesh: faces are read through the mesh's topology, so
+    /// vertices that were unwelded for shading count as one, and quads are split in two.
+    static (int Edges, int Vertices) Defects(Mesh mesh)
+    {
+        var topology = mesh.TopologyVertices;
+        var vertices = new List<V3>(topology.Count);
+        for (int i = 0; i < topology.Count; i++) vertices.Add(new V3(topology[i].X, topology[i].Y, topology[i].Z));
+        var triangles = new List<int>(mesh.Faces.Count * 3);
+        foreach (var face in mesh.Faces)
+        {
+            int a = topology.TopologyVertexIndex(face.A), b = topology.TopologyVertexIndex(face.B), c = topology.TopologyVertexIndex(face.C);
+            triangles.Add(a); triangles.Add(b); triangles.Add(c);
+            if (!face.IsQuad) continue;
+            triangles.Add(a); triangles.Add(c); triangles.Add(topology.TopologyVertexIndex(face.D));
+        }
+        return DualContour.Defects(new DualContour.Result(vertices, triangles, 0, 0, 0, 0));
     }
 
     /// The scene as a CPU field, following FrepShaderGen.Compile: nodes in creation order, missing
