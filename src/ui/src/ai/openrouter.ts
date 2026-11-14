@@ -1,4 +1,4 @@
-import { API_KEY, OPENROUTER_BASE_URL } from './config'
+import { getApiKey, OPENROUTER_BASE_URL } from './config'
 
 // Minimal OpenAI-compatible chat completions client (OpenRouter by default). Plain fetch on purpose: the official SDK
 // is ~1.3 MB and, inlined into the panel's single IIFE bundle, made the bundler duplicate React.
@@ -65,7 +65,7 @@ export async function chatCompletion(request: CompletionRequest, signal: AbortSi
       method: 'POST',
       signal,
       headers: {
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${getApiKey()}`,
         'Content-Type': 'application/json',
         'X-Title': 'Freppuccino',
       },

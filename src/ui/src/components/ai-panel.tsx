@@ -1,9 +1,9 @@
-import { ArrowUp, BookOpen, Camera, CircleAlert, Loader2, Plus, Square, Wrench, X } from 'lucide-react'
+import { ArrowUp, BookOpen, Camera, CircleAlert, KeyRound, Loader2, Plus, Square, Wrench, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { newChat, sendPrompt, setModel, stop, useChat, type ChatItem } from '@/ai/agent'
-import { API_KEY, MODEL_PRESETS } from '@/ai/config'
+import { newChat, sendPrompt, setApiKey, setModel, stop, useChat, type ChatItem } from '@/ai/agent'
+import { MODEL_PRESETS } from '@/ai/config'
 import { useHost } from '@/bridge/host'
 import { cn } from '@/lib/utils'
 
@@ -14,6 +14,8 @@ export function AiPanel() {
   const items = useChat((s) => s.items)
   const running = useChat((s) => s.running)
   const host = useHost((s) => s.host)
+  const keySource = useChat((s) => s.keySource)
+  const [keyOpen, setKeyOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [zoomed, setZoomed] = useState<{ view: string; dataUrl: string } | null>(null)
   const scroller = useRef<HTMLDivElement>(null)
@@ -34,7 +36,8 @@ export function AiPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Toolbar />
+      <Toolbar keyOpen={keyOpen} onToggleKey={() => setKeyOpen((o) => !o)} />
+      {(keyOpen || keySource === 'none') && <KeyForm onSaved={() => setKeyOpen(false)} />}
       <div
         ref={scroller}
         onScroll={(e) => {
@@ -105,7 +108,8 @@ export function AiPanel() {
   )
 }
 
-function Toolbar() {
+function Toolbar(props: { keyOpen: boolean; onToggleKey: () => void }) {
+  const keySource = useChat((s) => s.keySource)
   const model = useChat((s) => s.model)
   const usage = useChat((s) => s.usage)
   const running = useChat((s) => s.running)
@@ -118,10 +122,79 @@ function Toolbar() {
           {usage.cost > 0 ? `$${usage.cost.toFixed(2)}` : `${Math.round((usage.prompt + usage.completion) / 1000)}k tok`}
         </span>
       )}
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="OpenRouter key"
+        aria-expanded={props.keyOpen}
+        title={keySource === 'none' ? 'Add your OpenRouter key' : 'OpenRouter key'}
+        className={cn(keySource === 'none' && 'text-destructive')}
+        onClick={props.onToggleKey}
+      >
+        <KeyRound />
+      </Button>
       <Button variant="ghost" size="icon-sm" aria-label="New chat" title="New chat" disabled={running} onClick={newChat}>
         <Plus />
       </Button>
     </div>
+  )
+}
+
+/** Bring your own key: pasted into a password field, kept in the panel's localStorage (see ai/config.ts). */
+function KeyForm(props: { onSaved: () => void }) {
+  const source = useChat((s) => s.keySource)
+  const [value, setValue] = useState('')
+  return (
+    <form
+      className="grid shrink-0 gap-2 border-b bg-card px-3 py-3"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (!value.trim()) return
+        setApiKey(value)
+        setValue('')
+        props.onSaved()
+      }}
+    >
+      <label htmlFor="ai-key" className="type-label text-muted-foreground">
+        OpenRouter API key
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id="ai-key"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          autoFocus={source === 'none'}
+          placeholder={source === 'pasted' ? 'Paste a new key to replace the saved one' : 'sk-or-v1-…'}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="h-7 flex-1 text-xs"
+        />
+        <Button type="submit" size="sm" disabled={!value.trim()}>
+          Save
+        </Button>
+      </div>
+      <p className="type-small text-muted-foreground">
+        {source === 'pasted' && (
+          <>
+            A key is saved in this panel.{' '}
+            <button type="button" className="text-caramel-ink underline-offset-4 hover:underline" onClick={() => setApiKey('')}>
+              Remove it
+            </button>
+          </>
+        )}
+        {source === 'env' && <>Using the key from src/ui/.env.local. A pasted key overrides it.</>}
+        {source === 'none' && (
+          <>
+            Get one at{' '}
+            <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" className="text-caramel-ink underline-offset-4 hover:underline">
+              openrouter.ai/keys
+            </a>
+            . It is stored only in this panel on this computer.
+          </>
+        )}
+      </p>
+    </form>
   )
 }
 
@@ -160,12 +233,6 @@ function Empty(props: { onPick: (text: string) => void; mock: boolean }) {
         Describe an object and the assistant builds it from F-rep primitives and CSG, then checks screenshots and fixes what looks
         wrong. Each step is undoable in Rhino.
       </p>
-      {!API_KEY && (
-        <p className="type-small rounded-md border border-destructive p-2 text-destructive">
-          No OpenRouter key: add <span className="type-command">VITE_OPENROUTER_API_KEY</span> to{' '}
-          <span className="type-command">src/ui/.env.local</span> and rebuild the UI.
-        </p>
-      )}
       {props.mock && (
         <p className="type-small text-muted-foreground">Mock host: no geometry or screenshots, but the tool loop runs.</p>
       )}

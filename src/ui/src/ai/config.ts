@@ -1,9 +1,43 @@
-// AI settings. The key comes from src/ui/.env.local (gitignored), baked in at build time by Vite. See docs/ai.md.
+// AI settings. See docs/ai.md.
+// API key, in order: one pasted in the AI tab (kept in the panel's localStorage), else VITE_OPENROUTER_API_KEY from
+// src/ui/.env.local, baked in at build time by Vite.
 
 /** Any OpenAI-compatible chat completions endpoint works (a proxy, a local test server); OpenRouter by default. */
 export const OPENROUTER_BASE_URL: string = import.meta.env.VITE_OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
 
-export const API_KEY: string = import.meta.env.VITE_OPENROUTER_API_KEY ?? ''
+const ENV_KEY: string = import.meta.env.VITE_OPENROUTER_API_KEY ?? ''
+const API_KEY_STORAGE = 'freppuccino.ai.apiKey'
+/** Fallback when localStorage is unavailable: the pasted key lasts for this session. */
+let sessionKey = ''
+
+export type KeySource = 'pasted' | 'env' | 'none'
+
+function storedKey(): string {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE) ?? sessionKey
+  } catch {
+    return sessionKey
+  }
+}
+
+export function getApiKey(): string {
+  return storedKey() || ENV_KEY
+}
+
+export function keySource(): KeySource {
+  return storedKey() ? 'pasted' : ENV_KEY ? 'env' : 'none'
+}
+
+/** Empty string removes the pasted key (falls back to the env key, if any). */
+export function storeApiKey(key: string) {
+  sessionKey = key
+  try {
+    if (key) localStorage.setItem(API_KEY_STORAGE, key)
+    else localStorage.removeItem(API_KEY_STORAGE)
+  } catch {
+    // storage unavailable: sessionKey covers this session
+  }
+}
 
 /** Needs vision (screenshots) + tool calling. */
 export const DEFAULT_MODEL: string = import.meta.env.VITE_OPENROUTER_MODEL || 'anthropic/claude-sonnet-5.5'

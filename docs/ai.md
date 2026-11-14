@@ -5,16 +5,18 @@ shader result, looks at them, and fixes what's wrong. Every edit is a normal Rhi
 
 ## Setup
 
-1. Create `src/ui/.env.local` (gitignored; template: `src/ui/.env.example`):
-   ```
-   VITE_OPENROUTER_API_KEY=sk-or-v1-...
-   VITE_OPENROUTER_MODEL=anthropic/claude-sonnet-5.5   # optional default; switchable in the AI tab
-   ```
-2. Rebuild the UI: `cd src/ui && npm run build`, then `dotnet build` (it also rebuilds the UI when `.env*` or UI sources change).
-3. In Rhino: `FrepPanel` → **AI** tab.
+In Rhino: `FrepPanel` → **AI** tab → paste your OpenRouter key (from https://openrouter.ai/keys) into the key field → **Save**.
+The field is a password field. The key is kept in the panel's web view storage (localStorage) on this computer, and the key
+button in the AI toolbar opens the field again to replace or remove it. It is sent only to OpenRouter, straight from the panel.
 
-The key is baked into the built bundle (`src/ui/dist`, copied to the plugin's `ui/` folder) and sent straight from the panel to
-OpenRouter. Fine for local use; don't distribute a build made with your key. Any model with image input + tool calling works.
+Optional, for developers: a build-time key in `src/ui/.env.local` (gitignored; template: `src/ui/.env.example`) is used when no
+key has been pasted. Rebuild after changing it (`dotnet build` rebuilds the UI when `.env*` changes). That key is baked into the
+built bundle in plain text, so don't distribute a build made with one.
+```
+VITE_OPENROUTER_API_KEY=sk-or-v1-...
+VITE_OPENROUTER_MODEL=anthropic/claude-sonnet-5.5   # optional default; switchable in the AI tab
+```
+Any model with image input + tool calling works.
 
 ## How it works
 

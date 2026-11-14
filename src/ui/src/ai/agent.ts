@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { getHostState, send as sendToHost } from '@/bridge/host'
-import { API_KEY, KEEP_SCREENSHOT_SETS, loadModel, MAX_STEPS, saveModel } from './config'
+import { getApiKey, KEEP_SCREENSHOT_SETS, keySource, loadModel, MAX_STEPS, saveModel, storeApiKey, type KeySource } from './config'
 import { ApiError, chatCompletion, type ContentPart, type Message } from './openrouter'
 import { systemPrompt } from './prompt'
 import { runTool, TOOLS } from './tools'
@@ -28,9 +28,11 @@ export interface ChatState {
   running: boolean
   model: string
   usage: Usage
+  /** where the OpenRouter key comes from */
+  keySource: KeySource
 }
 
-let state: ChatState = { items: [], running: false, model: loadModel(), usage: { prompt: 0, completion: 0, cost: 0 } }
+let state: ChatState = { items: [], running: false, model: loadModel(), usage: { prompt: 0, completion: 0, cost: 0 }, keySource: keySource() }
 const listeners = new Set<() => void>()
 let nextId = 0
 
@@ -67,6 +69,12 @@ export function setModel(model: string) {
   set({ model })
 }
 
+/** Saves a pasted OpenRouter key in the panel (localStorage); empty removes it. */
+export function setApiKey(key: string) {
+  storeApiKey(key.trim())
+  set({ keySource: keySource() })
+}
+
 // ── Conversation ──
 
 /** Everything after the system prompt, in OpenAI chat format. */
@@ -86,8 +94,8 @@ export function stop() {
 export async function sendPrompt(prompt: string) {
   prompt = prompt.trim()
   if (!prompt || state.running) return
-  if (!API_KEY) {
-    push({ kind: 'info', text: 'No OpenRouter key. Add VITE_OPENROUTER_API_KEY to src/ui/.env.local and rebuild the UI (docs/ai.md).', error: true })
+  if (!getApiKey()) {
+    push({ kind: 'info', text: 'No OpenRouter key. Paste one with the key button above.', error: true })
     return
   }
 
@@ -205,7 +213,7 @@ function closeOpenToolCalls() {
 
 function describeError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 401) return 'OpenRouter rejected the key (401). Check VITE_OPENROUTER_API_KEY in src/ui/.env.local.'
+    if (e.status === 401) return state.keySource === 'env' ? 'OpenRouter rejected the key (401). Check VITE_OPENROUTER_API_KEY in src/ui/.env.local, or paste a key with the key button above.' : 'OpenRouter rejected the key (401). Paste a valid one with the key button above.'
     if (e.status === 402) return 'OpenRouter: out of credits (402).'
     return `OpenRouter error ${e.status ?? ''}: ${e.message}`
   }
