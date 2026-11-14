@@ -34,37 +34,35 @@ public class FDifferenceCommand : FCsgCommand
 
 /// Creates a CSG node. Operands: SDF objects (pick) or existing nodes (type "N3", or click it in the Freppuccino panel).
 /// Union/Intersect also take preselection: selected objects + nodes selected in the panel.
-public abstract class FCsgCommand : Command
+public abstract class FCsgCommand : FrepNodeCommand
 {
     protected abstract FrepOp Op { get; }
     double lastK; // per command, remembered between runs
-
-    /// True while one of these commands waits for operands; the panel only sends row clicks then.
-    public static bool Picking { get; private set; }
 
     protected override Result RunCommand(RhinoDoc doc, RunMode mode)
     {
         var k = new OptionDouble(lastK, 0, double.MaxValue);
         var operands = new List<FrepOperand>();
         Result rc;
-        Picking = true;
+        BeginPicking();
         try
         {
             if (Op == FrepOp.Difference)
             {
-                rc = Pick(doc, "Base object or node", false, false, ref k, operands);
+                rc = Pick(doc, "Base object or node", false, false, go => go.AddOptionDouble("Blend", ref k), operands);
                 if (rc == Result.Success)
-                    rc = Pick(doc, "Objects or nodes to subtract", true, false, ref k, operands);
+                    rc = Pick(doc, "Objects or nodes to subtract", true, false, go => go.AddOptionDouble("Blend", ref k), operands);
             }
             else
             {
                 operands.AddRange(UiController.TakeSelectedNodes(doc).Select(FrepOperand.Node));
                 rc = operands.Count >= 2 && doc.Objects.GetSelectedObjects(false, false).All(o => !IsSdf(o))
                     ? Result.Success
-                    : Pick(doc, "Objects or nodes to " + (Op == FrepOp.Union ? "union" : "intersect"), true, true, ref k, operands);
+                    : Pick(doc, "Objects or nodes to " + (Op == FrepOp.Union ? "union" : "intersect"), true, true,
+                        go => go.AddOptionDouble("Blend", ref k), operands);
             }
         }
-        finally { Picking = false; }
+        finally { EndPicking(); }
         if (rc != Result.Success) return rc;
 
         if (operands.Count < 2)
@@ -80,11 +78,20 @@ public abstract class FCsgCommand : Command
         RhinoApp.WriteLine($"{EnglishName}: created {node.Name}.");
         return Result.Success;
     }
+}
 
-    static bool IsSdf(RhinoObject? o) => o != null && SdfUserText.ReadType(o.Attributes) != null;
+/// Shared operand picking for commands that create tree nodes.
+public abstract class FrepNodeCommand : Command
+{
+    /// True while one of these commands waits for operands; the panel only sends row clicks then.
+    public static bool Picking { get; private set; }
+    protected static void BeginPicking() => Picking = true;
+    protected static void EndPicking() => Picking = false;
+
+    protected static bool IsSdf(RhinoObject? o) => o != null && SdfUserText.ReadType(o.Attributes) != null;
 
     /// Appends picks to <paramref name="into"/> (deduped). Node names may be typed/clicked repeatedly; picking objects or Enter ends.
-    static Result Pick(RhinoDoc doc, string prompt, bool many, bool preselect, ref OptionDouble k, List<FrepOperand> into)
+    protected static Result Pick(RhinoDoc doc, string prompt, bool many, bool preselect, Action<GetObject> options, List<FrepOperand> into)
     {
         var tree = FrepTrees.Get(doc);
         var go = new GetObject();
@@ -96,7 +103,7 @@ public abstract class FCsgCommand : Command
         go.EnableClearObjectsOnEntry(false);
         go.EnableUnselectObjectsOnExit(false);
         go.DeselectAllBeforePostSelect = false;
-        go.AddOptionDouble("Blend", ref k);
+        options(go);
 
         void Add(FrepOperand o)
         {

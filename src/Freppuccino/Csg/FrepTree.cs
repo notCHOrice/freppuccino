@@ -6,7 +6,26 @@ using Rhino.FileIO;
 
 namespace Freppuccino.Csg;
 
-public enum FrepOp { Union = 0, Intersect = 1, Difference = 2 }
+/// Union/Intersect/Difference: CSG over ≥ 2 operands, blend K. Twist/Bend/Repeat: domain warps of one operand,
+/// shaped by a referenced Rhino object (<see cref="FrepNode.Ref"/>: line for Twist/Bend, box for Repeat) + <see cref="FrepNode.Params"/>.
+public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5 }
+
+public static class FrepOps
+{
+    public static bool IsWarp(this FrepOp op) => op >= FrepOp.Twist;
+
+    /// Param names per warp op (index = slot in FrepNode.Params). Angles in degrees.
+    ///   Twist  angle: total twist from line start to end (linear, continues past the ends)
+    ///   Bend   angle: total bend over the line's length (straight past the ends); direction: bend direction around the line
+    ///   Repeat x/y/z: spacing along the box axes (≤ 0 = no repetition on that axis)
+    public static IReadOnlyList<string> ParamNames(this FrepOp op) => op switch
+    {
+        FrepOp.Twist => ["angle"],
+        FrepOp.Bend => ["angle", "direction"],
+        FrepOp.Repeat => ["x", "y", "z"],
+        _ => [],
+    };
+}
 
 /// Leaf (Rhino object id of an SDF primitive) or a reference to another node.
 public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
@@ -18,9 +37,12 @@ public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
 
 /// Difference: Operands[0] − Operands[1..]. K = smooth blend distance (model units, 0 = hard).
 /// Hidden: dropped like a hidden primitive (a missing leaf for its parents; not drawn as a root).
-public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false)
+/// Warps: Operands = [child], Ref = line/box object, Params per <see cref="FrepOps.ParamNames"/>; K unused.
+public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false,
+    Guid Ref = default, ImmutableArray<double> Params = default)
 {
     public string Name => FrepTree.NodeName(Id);
+    public double Param(int i) => !Params.IsDefault && i < Params.Length ? Params[i] : 0;
 }
 
 /// Immutable CSG DAG. Nodes in creation order, which is topological: operands always predate their node, and
@@ -50,6 +72,20 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         return (new FrepTree(Nodes.Add(node), NextId + 1), node);
     }
 
+    public (FrepTree Tree, FrepNode Node) AddWarp(FrepOp op, FrepOperand child, Guid reference, IEnumerable<double> parameters)
+    {
+        var node = new FrepNode(NextId, op, 0, [child], Ref: reference, Params: [.. parameters]);
+        return (new FrepTree(Nodes.Add(node), NextId + 1), node);
+    }
+
+    public FrepTree WithParam(int id, int index, double value) => Edit(id, n =>
+    {
+        var p = (n.Params.IsDefault ? [] : n.Params).ToBuilder();
+        while (p.Count <= index) p.Add(0);
+        p[index] = value;
+        return n with { Params = p.ToImmutable() };
+    });
+
     public FrepTree WithK(int id, double k) => Edit(id, n => n with { K = k });
 
     public FrepTree WithOp(int id, FrepOp op, double k) => Edit(id, n => n with { Op = op, K = k });
@@ -65,7 +101,7 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
     /// Caller ensures nothing references it.
     public FrepTree Remove(int id) => this with { Nodes = Nodes.RemoveAll(n => n.Id == id) };
 
-    const int Major = 1, Minor = 1; // 1.1: per-node Hidden
+    const int Major = 1, Minor = 2; // 1.1: per-node Hidden; 1.2: Ref + Params
 
     public void Write(BinaryArchiveWriter w)
     {
@@ -85,6 +121,13 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
             }
         }
         foreach (var n in Nodes) w.WriteBool(n.Hidden);
+        foreach (var n in Nodes)
+        {
+            w.WriteGuid(n.Ref);
+            var p = n.Params.IsDefault ? [] : n.Params;
+            w.WriteInt(p.Length);
+            foreach (var v in p) w.WriteDouble(v);
+        }
     }
 
     public static FrepTree Read(BinaryArchiveReader r)
@@ -108,6 +151,14 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         if (minor >= 1)
             for (int i = 0; i < count; i++)
                 nodes[i] = nodes[i] with { Hidden = r.ReadBool() };
+        if (minor >= 2)
+            for (int i = 0; i < count; i++)
+            {
+                var reference = r.ReadGuid();
+                var p = new double[r.ReadInt()];
+                for (int j = 0; j < p.Length; j++) p[j] = r.ReadDouble();
+                nodes[i] = nodes[i] with { Ref = reference, Params = [.. p] };
+            }
         return new FrepTree(nodes.ToImmutable(), nextId);
     }
 }

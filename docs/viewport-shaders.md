@@ -23,7 +23,7 @@ Conventions every generated shader follows:
 - Fragment output: `layout(location=0) out vec4`.
 
 Programs:
-- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/k's are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. 4 KB uniform cap (prims past it dropped).
+- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. FTwist/FBend/FRepeat nodes warp the point for their subtree (`opTwist`/`opBend`/`opRepeat`; each warp = new point context, subtree re-emitted per context), driven by a live Rhino line/box (`Csg/FrepRefs.cs`); twist/bend divide the child distance by a local Lipschitz bound. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/warp frames/k's are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. 4 KB uniform cap (prims past it dropped).
 - `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground.
 
 Original slice program (removed):
@@ -53,7 +53,7 @@ FreppuccinoPlugin (AtStartup)
 FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept; recreated if a shaded copy exists)
 ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
-Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FrepPanel lists the tree (edit op/k, delete, click node = pick it)
+Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FTwist/FBend/FRepeat wrap one operand, pick axis line / box; FrepPanel lists the tree (edit op/k, delete, click node = pick it)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

@@ -5,6 +5,8 @@
 export type Id = string
 
 export type OperationKind = 'union' | 'subtract' | 'intersect'
+/** Domain warps of one child (children[0]), shaped by a Rhino line (twist, bend) or box (repeat). */
+export type DeformKind = 'twist' | 'bend' | 'repeat'
 
 /**
  * One row in the browser tree. Primitives (Rhino objects with SDF.* user text) are leaves;
@@ -22,12 +24,16 @@ export interface SceneNode {
   /** primitive: SDF.<param> values without the prefix, e.g. { s: 1 } or { "b.x": 1, "b.y": 2, "b.z": 3 } */
   params?: Record<string, number>
   /** operation */
-  op?: OperationKind
+  op?: OperationKind | DeformKind
   /** operation: blend distance in model units, 0 = sharp */
   k?: number
   children?: SceneNode[]
   /** operand whose object / node was deleted */
   missing?: boolean
+  /** deform: Rhino id of its axis line / box (deform params are in `params`: twist angle; bend angle, direction; repeat x, y, z) */
+  ref?: Id
+  /** deform: ref deleted or no longer a line / box (node renders as missing) */
+  refMissing?: boolean
 }
 
 export interface UiSettings {
@@ -49,6 +55,7 @@ export type SelectMode = 'replace' | 'add' | 'toggle'
 /** Must match UiController.AllowedCommands */
 export type AllowedCommand =
   | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FPyramid' | 'FEllipsoid' | 'FTorus'
+  | 'FTwist' | 'FBend' | 'FRepeat'
   | 'Freppuccino'
 
 export type UiMessage =
@@ -64,5 +71,7 @@ export type UiMessage =
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
   /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step. */
   | { type: 'setOperation'; id: Id; op: OperationKind; k: number; preview?: boolean }
+  /** One deform param; preview as setOperation. */
+  | { type: 'setNodeParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Nodes still used by other nodes are kept (host sends a notice). */
   | { type: 'deleteNodes'; ids: Id[] }
