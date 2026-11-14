@@ -46,7 +46,8 @@ export type HostMessage =
 
 // ── UI → Host ──
 export type SelectMode = 'replace' | 'add' | 'toggle'
-export type AllowedCommand = 'FBox' | 'FSphere' | 'Freppuccino'
+export type AllowedCommand =
+  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FTorus' | 'FEllipsoid' | 'FPyramid' | 'Freppuccino'
 
 export type UiMessage =
   | { type: 'ready' }

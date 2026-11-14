@@ -55,7 +55,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `ready` | ✅ |
 | `select {ids, mode: replace\|add\|toggle}` | ✅ primitives → Rhino selection; nodes → panel node selection. While FUnion/FIntersect/FDifference wait for operands, a node click is sent to the command line instead |
 | `setVisible {id, visible}` | ✅ primitive: Rhino show/hide; node: `FrepNode.Hidden`, dropped from the shader like a hidden primitive (undoable) |
-| `runCommand {command}` | ✅ whitelist only: `FBox`, `FSphere`, `Freppuccino` |
+| `runCommand {command}` | ✅ whitelist only: `Freppuccino` + primitive commands (`FBox`, `FSphere`, `FCylinder`, `FCone`, `FTorus`, `FEllipsoid`, `FPyramid`) |
 | `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |

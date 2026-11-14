@@ -1,3 +1,4 @@
+import { PRIMITIVES } from '@/lib/scene'
 import type { Transport } from './host'
 import type { HostMessage, SceneNode, UiMessage } from './protocol'
 
@@ -51,8 +52,14 @@ export function createMockHost(): Transport {
         emit({ type: 'scene', scene })
         break
       case 'runCommand':
-        if (m.command === 'FSphere') scene = [...scene, sphere(1)]
-        else if (m.command === 'FBox') scene = [...scene, box(1, 1, 1)]
+        {
+          const entry = Object.entries(PRIMITIVES).find(([, p]) => p.command === m.command)
+          if (entry) {
+            const [sdfType, p] = entry
+            const params = Object.fromEntries(Object.keys(p.params).map((k) => [k, 1]))
+            scene = [...scene, { id: id(), kind: 'primitive', sdfType, visible: true, locked: false, params }]
+          }
+        }
         emit({ type: 'scene', scene })
         emit({ type: 'notice', level: 'info', text: `Ran ${m.command} (mock).` })
         break

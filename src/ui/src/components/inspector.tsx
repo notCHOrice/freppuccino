@@ -1,4 +1,4 @@
-import { ArrowUpDown, Box, Circle, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowUpDown, Sparkles, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,7 @@ import { NodeIcon } from '@/components/node-icon'
 import { ParamSlider } from '@/components/param-slider'
 import { send, useHost } from '@/bridge/host'
 import type { OperationKind, SceneNode } from '@/bridge/protocol'
-import { OPERATIONS, paramLabel, typeLabel } from '@/lib/scene'
+import { OPERATIONS, PRIMITIVES, paramLabel, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
 export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string> }) {
@@ -39,12 +39,11 @@ function CreateSection() {
     <>
       <Section title="Create">
         <div className="grid grid-cols-2 gap-2">
-          <Button variant="outline" onClick={() => send({ type: 'runCommand', command: 'FBox' })}>
-            <Box /> Box
-          </Button>
-          <Button variant="outline" onClick={() => send({ type: 'runCommand', command: 'FSphere' })}>
-            <Circle /> Sphere
-          </Button>
+          {Object.values(PRIMITIVES).map(({ label, icon: Icon, command }) => (
+            <Button key={command} variant="outline" onClick={() => send({ type: 'runCommand', command })}>
+              <Icon /> {label}
+            </Button>
+          ))}
         </div>
       </Section>
       <Section title="Scene">
@@ -62,7 +61,7 @@ function CreateSection() {
 function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> }) {
   const { node } = props
   const units = useHost((s) => s.settings.units)
-  const params = Object.entries(node.params ?? {})
+  const params = sortParams(node.sdfType, node.params ?? {})
   // Slider range is fixed per object (the section is keyed by id) so it doesn't move while dragging.
   const [max] = useState(() => Math.max(1, ...params.map(([, v]) => v * 3)))
 
@@ -228,4 +227,11 @@ function Operand(props: { node: SceneNode; label?: string; role: string }) {
       </div>
     </div>
   )
+}
+
+/** Known params in PRIMITIVES order, then unknown ones by key. */
+function sortParams(sdfType: string | undefined, params: Record<string, number>): [string, number][] {
+  const known = Object.keys((sdfType && PRIMITIVES[sdfType]?.params) || {})
+  const rank = (k: string) => (known.includes(k) ? known.indexOf(k) : known.length)
+  return Object.entries(params).sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
 }
