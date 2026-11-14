@@ -21,10 +21,12 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
 
-/// Program == null: nothing to draw. Primitives/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
-public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<double> Ks, int Dropped)
+/// Program == null: nothing to draw. Primitives/Colors/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
+/// Colors parallel to Primitives: each owner's Rhino display color (object/layer/material/parent source resolved).
+public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<System.Drawing.Color> Colors,
+    IReadOnlyList<double> Ks, int Dropped)
 {
-    public static readonly FrepSceneData Empty = new(null, [], [], 0);
+    public static readonly FrepSceneData Empty = new(null, [], [], [], 0);
     public int Count => Primitives.Count;
 }
 
@@ -123,6 +125,7 @@ public static class FrepScene
         // Prims first, so uniform rows for blend values are reserved up front; prims past the budget are dropped (= missing leaves).
         int budget = FrepShaderGen.PrimRowBudget(tree.Nodes.Count), rows = 0, dropped = 0;
         var prims = new List<SdPrimitive>();
+        var colors = new List<System.Drawing.Color>();
         var newOwners = new List<RhinoObject>();
         var ids = new List<Guid>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
@@ -130,15 +133,17 @@ public static class FrepScene
         {
             if (!TryRead(obj.Attributes, out var prim)) continue;
             int r = FrepShaderGen.Rows(prim.Kind);
-            if (rows + r > budget) { dropped++; continue; }
+            // Each prim also takes a color slot (4 per row).
+            if (rows + r + FrepShaderGen.ColorRows(prims.Count + 1) > budget) { dropped++; continue; }
             rows += r;
             ids.Add(obj.Id);
             prims.Add(prim);
+            colors.Add(obj.Attributes.DrawColor(doc));
             newOwners.Add(obj);
         }
 
         var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
-        scene = new FrepSceneData(program, prims, ks, dropped);
+        scene = new FrepSceneData(program, prims, colors, ks, dropped);
         owners = newOwners;
     }
 

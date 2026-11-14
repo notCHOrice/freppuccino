@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Text;
 using Freppuccino.Csg;
 using Freppuccino.Scene;
@@ -12,17 +13,25 @@ namespace Freppuccino.Shaders;
 /// map(): one local per prim, one per node (creation order = topological, so shared DAG nodes evaluate once),
 /// then hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at codegen:
 /// union skips them, intersect becomes empty, difference with missing base becomes empty.
+/// sceneColor(): the same DAG over vec4(rgb, d), evaluated once at the hit point. Union/intersect blend operand colors with
+/// the smin/smax weight (a smooth union's fillet fades between them); difference keeps the base's color.
 public static class FrepShaderGen
 {
-    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then prim colors packed 4 per row,
+    /// then blend k's packed 4 per row.
     const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
     public static int Rows(SdKind kind) => kind == SdKind.Sphere ? 1 : 3;
     static int KRows(int nodes) => (nodes + 3) / 4;
-    /// Rows left for prims once every node's k has a slot.
+    /// Rows holding the colors of <paramref name="prims"/> primitives (one packed 0xRRGGBB float each, 4 per row).
+    public static int ColorRows(int prims) => (prims + 3) / 4;
+    /// Rows left for prims (geometry + color rows) once every node's k has a slot.
     public static int PrimRowBudget(int nodes) => MaxDataRows - KRows(nodes);
+
+    /// 0xRRGGBB as a float: exact, since float32 holds every integer below 2^24. Unpacked by unpackColor() in the shader.
+    static double PackColor(Color c) => (c.R << 16) | (c.G << 8) | c.B;
 
     /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
     /// A uniform, so changing it never recompiles.
@@ -63,17 +72,25 @@ public static class FrepShaderGen
     /// Returns Program = null if the root is empty. Ks indexed by k slot, for <see cref="SceneUniforms"/>.
     public static (ShaderSource? Program, List<double> Ks) Compile(IReadOnlyList<SdPrimitive> prims, IReadOnlyList<Guid> ids, FrepTree tree)
     {
+        // map: float distances. color: the same DAG over vec4(rgb, d), so the shaded color follows the blend.
         var map = new StringBuilder();
+        var color = new StringBuilder();
         var index = new Dictionary<Guid, int>();
         int row = 0;
         for (int i = 0; i < prims.Count; i++)
+            row += Rows(prims[i].Kind);
+        int cBase = row;
+        row = 0;
+        for (int i = 0; i < prims.Count; i++)
         {
             index[ids[i]] = i;
-            map.Append($"    float p{i} = {Term(prims[i].Kind, row)};\n");
+            var term = Term(prims[i].Kind, row);
+            map.Append($"    float p{i} = {term};\n");
+            color.Append($"    vec4 p{i} = vec4(unpackColor(u.data[{cBase + i / 4}].{"xyzw"[i % 4]}), {term});\n");
             row += Rows(prims[i].Kind);
         }
 
-        int kBase = row;
+        int kBase = cBase + ColorRows(prims.Count);
         var ks = new List<double>();
         var nodeVar = new Dictionary<int, string?>();
         string? Var(FrepOperand o) => o.IsNode
@@ -102,13 +119,22 @@ public static class FrepShaderGen
                 var k = $"u.data[{kBase + slot / 4}].{"xyzw"[slot % 4]}";
                 v = $"n{n.Id}";
                 map.Append($"    float {v} = {live[0]};\n");
+                color.Append($"    vec4 {v} = {live[0]};\n");
                 foreach (var t in live.Skip(1))
+                {
                     map.Append(n.Op switch
                     {
                         FrepOp.Union => $"    {v} = smin({v}, {t}, {k});\n",
                         FrepOp.Intersect => $"    {v} = smax({v}, {t}, {k});\n",
                         _ => $"    {v} = smax({v}, -{t}, {k});\n",
                     });
+                    color.Append(n.Op switch
+                    {
+                        FrepOp.Union => $"    {v} = cmin({v}, {t}, {k});\n",
+                        FrepOp.Intersect => $"    {v} = cmax({v}, {t}, {k});\n",
+                        _ => $"    {v} = csub({v}, {t}, {k});\n",
+                    });
+                }
             }
             nodeVar[n.Id] = v;
         }
@@ -122,16 +148,21 @@ public static class FrepShaderGen
         if (roots.Count == 0) return (null, ks);
 
         map.Append($"    float d = {roots[0]};\n");
-        foreach (var r in roots.Skip(1)) map.Append($"    d = min(d, {r});\n");
+        color.Append($"    vec4 c = {roots[0]};\n");
+        foreach (var r in roots.Skip(1))
+        {
+            map.Append($"    d = min(d, {r});\n");
+            color.Append($"    c = cmin(c, {r}, 0.0);\n");
+        }
 
         int dataRows = kBase + KRows(ks.Count);
-        var key = dataRows + "\n" + map;
+        var key = dataRows + "\n" + map + "\n" + color;
         if (!cache.TryGetValue(key, out var src))
-            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString()));
+            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString(), color.ToString()));
         return (src, ks);
     }
 
-    static string Fragment(int dataRows, string map) => $$"""
+    static string Fragment(int dataRows, string map, string color) => $$"""
         #version 450
         layout(location = 0) in vec2 vNdc;
         layout(location = 0) out vec4 outColor;
@@ -144,7 +175,7 @@ public static class FrepShaderGen
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
             vec4 bound;      // xyz center, w radius: sphere enclosing every prim (+ smooth-union growth); w <= 0 = empty
-            // prims, then node blend k's (4 per row)
+            // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
             //   box b = P; torus t = P.xy; cylinder h, r; cone h, r1, r2; ellipsoid r = P; pyramid h, s
@@ -161,6 +192,27 @@ public static class FrepShaderGen
             return min(a, b) - h * h * k * 0.25;
         }
         float smax(float a, float b, float k) { return -smin(-a, -b, k); }
+
+        vec3 unpackColor(float packed)
+        {
+            uint c = uint(packed + 0.5);
+            return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
+        }
+        // Same ops over vec4(rgb, d). Colors mix with IQ's smin weight, so they fade across the blend region
+        // (|a - b| < k) and are pure away from it; k = 0 picks the nearer operand's color.
+        vec4 cmin(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w < b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (b.w - a.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smin(a.w, b.w, k));
+        }
+        vec4 cmax(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w > b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (a.w - b.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smax(a.w, b.w, k));
+        }
+        vec4 csub(vec4 a, vec4 b, float k) { return vec4(a.rgb, smax(a.w, -b.w, k)); } // cut faces keep the base's color
         float dot2(vec2 v) { return dot(v, v); }
         vec3 toLocal(vec3 p, vec4 o, vec4 x, vec4 y)
         {
@@ -220,7 +272,11 @@ public static class FrepShaderGen
         {
         {{map}}    return d;
         }
-
+        // Only evaluated once per hit pixel, so the hot march loop stays float-only.
+        vec3 sceneColor(vec3 p)
+        {
+        {{color}}    return c.rgb;
+        }
 
         void main()
         {
@@ -267,7 +323,8 @@ public static class FrepShaderGen
             const vec2 k = vec2(1.0, -1.0);
             vec3 n = normalize(k.xyy * map(p + k.xyy * eps) + k.yyx * map(p + k.yyx * eps) +
                                k.yxy * map(p + k.yxy * eps) + k.xxx * map(p + k.xxx * eps));
-            outColor = vec4(mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0); // world +Z up: white, -Z down: light grey
+            // Object display color, lit as before: world +Z up = full color, -Z down = GREY x color.
+            outColor = vec4(sceneColor(p) * mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0);
         }
         """;
 
@@ -287,7 +344,7 @@ public static class FrepShaderGen
             .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
-        // Same order as Compile(): prim rows, then k's.
+        // Same order as Compile(): prim rows, then colors, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
             u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, v.X);
@@ -295,6 +352,10 @@ public static class FrepShaderGen
             u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
              .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, v.Z);
         }
+        var cs = scene.Colors;
+        double C(int i) => i < cs.Count ? PackColor(cs[i]) : 0;
+        for (int i = 0; i < scene.Primitives.Count; i += 4)
+            u.Vec4(C(i), C(i + 1), C(i + 2), C(i + 3));
         var ks = scene.Ks;
         for (int i = 0; i < ks.Count; i += 4)
             u.Vec4(ks[i], i + 1 < ks.Count ? ks[i + 1] : 0, i + 2 < ks.Count ? ks[i + 2] : 0, i + 3 < ks.Count ? ks[i + 3] : 0);
