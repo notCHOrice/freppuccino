@@ -1,31 +1,32 @@
 using Freppuccino.Commands;
+using Freppuccino.Csg;
 using Freppuccino.Sdf;
+using Freppuccino.Shaders;
 using Rhino;
 using Rhino.DocObjects;
 using Rhino.Geometry;
 
 namespace Freppuccino.Scene;
 
-/// sdSphere: center/frame + radius s.
-public readonly record struct SdSphere(Plane Frame, double S);
+public enum PrimKind { Sphere, Box }
 
-/// sdBox: frame (origin = box center) + half-extents b along the frame axes.
-public readonly record struct SdBox(Plane Frame, Vector3d B);
+/// Sphere: frame origin = center, P.X = radius s. Box: frame origin = center, P = half-extents b.
+public readonly record struct SdPrim(PrimKind Kind, Plane Frame, Vector3d P);
 
-public sealed record FrepSceneData(IReadOnlyList<SdSphere> Spheres, IReadOnlyList<SdBox> Boxes)
+/// Program == null: nothing to draw. Prims/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
+public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrim> Prims, IReadOnlyList<double> Ks, int Dropped)
 {
-    public static readonly FrepSceneData Empty = new([], []);
-    public int Count => Spheres.Count + Boxes.Count;
+    public static readonly FrepSceneData Empty = new(null, [], [], 0);
 }
 
-/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text, written by FSphere / FBox).
-/// The SDF values are the source of truth, not the Rhino geometry. Rebuilt lazily after any doc/object/layer change.
+/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text) + the doc's CSG tree, compiled to a shader.
+/// The SDF values are the source of truth, not the Rhino geometry. Rebuilt lazily after any doc/object/layer/tree change;
+/// blend edits rebuild too but hit the shader cache (k is a uniform).
 /// Objects under a dynamic transform (gumball/Move drag) are reported at their in-progress position.
 public static class FrepScene
 {
     static FrepSceneData scene = FrepSceneData.Empty;
-    // Parallel to scene.Spheres / scene.Boxes; safe since any delete/replace sets dirty.
-    static List<RhinoObject> sphereOwners = [], boxOwners = [];
+    static List<RhinoObject> owners = []; // parallel to scene.Prims; safe since any delete/replace sets dirty
     static uint docSerial;
     static bool dirty = true;
 
@@ -41,62 +42,82 @@ public static class FrepScene
         RhinoDoc.NewDocument += (_, _) => dirty = true;
     }
 
+    public static void MarkDirty() => dirty = true;
     static void Dirty(object? sender, RhinoObjectEventArgs e) => dirty = true;
 
     public static FrepSceneData Get(RhinoDoc doc)
     {
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
-        List<SdSphere>? spheres = null;
-        for (int i = 0; i < sphereOwners.Count; i++)
+        List<SdPrim>? prims = null;
+        for (int i = 0; i < owners.Count; i++)
         {
-            if (!sphereOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            var s = scene.Spheres[i];
-            // A transform sdSphere can't represent (non-uniform scale) previews at the original position.
-            if (!FSphereCommand.TryTransform(s.Frame, s.S, xf, out var frame, out var r, out _)) continue;
-            spheres ??= [.. scene.Spheres];
-            spheres[i] = new SdSphere(frame, r);
+            if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            // A transform the SDF type can't represent previews at the original position.
+            if (!TryTransform(scene.Prims[i], xf, out var moved)) continue;
+            prims ??= [.. scene.Prims];
+            prims[i] = moved;
         }
+        return prims == null ? scene : scene with { Prims = prims };
+    }
 
-        List<SdBox>? boxes = null;
-        for (int i = 0; i < boxOwners.Count; i++)
+    static bool TryTransform(SdPrim p, Transform xf, out SdPrim result)
+    {
+        result = p;
+        switch (p.Kind)
         {
-            if (!boxOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            var b = scene.Boxes[i];
-            if (!FBoxCommand.TryTransform(b.Frame, b.B, xf, out var frame, out var half, out _)) continue;
-            boxes ??= [.. scene.Boxes];
-            boxes[i] = new SdBox(frame, half);
+            case PrimKind.Sphere when FSphereCommand.TryTransform(p.Frame, p.P.X, xf, out var f, out var s, out _):
+                result = p with { Frame = f, P = new Vector3d(s, 0, 0) };
+                return true;
+            case PrimKind.Box when FBoxCommand.TryTransform(p.Frame, p.P, xf, out var f, out var b, out _):
+                result = p with { Frame = f, P = b };
+                return true;
+            default:
+                return false;
         }
-
-        return spheres == null && boxes == null ? scene : new FrepSceneData(spheres ?? scene.Spheres, boxes ?? scene.Boxes);
     }
 
     static void Rebuild(RhinoDoc doc)
     {
         dirty = false;
         docSerial = doc.RuntimeSerialNumber;
-        var spheres = new List<SdSphere>();
-        var boxes = new List<SdBox>();
-        var sOwners = new List<RhinoObject>();
-        var bOwners = new List<RhinoObject>();
+        var tree = FrepTrees.Get(doc);
+
+        // Prims first, so uniform rows for blend values are reserved up front; prims past the budget are dropped (= missing leaves).
+        int budget = FrepShaderGen.PrimRowBudget(tree.Nodes.Count), rows = 0, dropped = 0;
+        var prims = new List<SdPrim>();
+        var newOwners = new List<RhinoObject>();
+        var ids = new List<Guid>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
-            var attributes = obj.Attributes;
-            switch (SdfUserText.ReadType(attributes))
-            {
-                case FSphereCommand.SdfType when FSphereCommand.TryRead(attributes, out var frame, out var s) && s > 0:
-                    spheres.Add(new SdSphere(frame, s));
-                    sOwners.Add(obj);
-                    break;
-                case FBoxCommand.SdfType when FBoxCommand.TryRead(attributes, out var frame, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
-                    boxes.Add(new SdBox(frame, b));
-                    bOwners.Add(obj);
-                    break;
-            }
+            if (!TryRead(obj.Attributes, out var prim)) continue;
+            int r = FrepShaderGen.Rows(prim.Kind);
+            if (rows + r > budget) { dropped++; continue; }
+            rows += r;
+            ids.Add(obj.Id);
+            prims.Add(prim);
+            newOwners.Add(obj);
         }
-        scene = new FrepSceneData(spheres, boxes);
-        sphereOwners = sOwners;
-        boxOwners = bOwners;
+
+        var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
+        scene = new FrepSceneData(program, prims, ks, dropped);
+        owners = newOwners;
+    }
+
+    static bool TryRead(ObjectAttributes a, out SdPrim prim)
+    {
+        prim = default;
+        switch (SdfUserText.ReadType(a))
+        {
+            case FSphereCommand.SdfType when FSphereCommand.TryRead(a, out var frame, out var s) && s > 0:
+                prim = new SdPrim(PrimKind.Sphere, frame, new Vector3d(s, 0, 0));
+                return true;
+            case FBoxCommand.SdfType when FBoxCommand.TryRead(a, out var frame, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
+                prim = new SdPrim(PrimKind.Box, frame, b);
+                return true;
+            default:
+                return false;
+        }
     }
 }
