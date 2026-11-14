@@ -36,6 +36,8 @@ export interface SceneNode {
   refMissing?: boolean
   /** primitive: SDF.Color "#RRGGBB" used by the viewport shader (white if the object has none) */
   color?: string
+  /** primitive: a gumball scale or shear the parameters cannot express (SDF.Linear.*). Sliders are hidden. */
+  custom?: boolean
 }
 
 export interface UiSettings {
@@ -51,6 +53,8 @@ export type HostMessage =
   /** selected primitives (Rhino selection) + operation nodes (kept by the host) */
   | { type: 'selection'; ids: Id[] }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; text: string }
+  /** Reply to an aiTool request (same callId). error is meant for the model. */
+  | { type: 'aiToolResult'; callId: string; ok: boolean; result?: unknown; error?: string }
 
 // ── UI → Host ──
 export type SelectMode = 'replace' | 'add' | 'toggle'
@@ -67,8 +71,8 @@ export type UiMessage =
   /** primitive: Rhino show/hide; operation: hides the node's result (undoable) */
   | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
-  /** STUB on the host */
-  | { type: 'setParam'; id: Id; name: string; value: number }
+  /** preview: live drag tick, no undo; the next non-preview setParam ends the gesture as one undo step. */
+  | { type: 'setParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Writes SDF.Color ("#RRGGBB") on a primitive; preview as setOperation (one undo step per gesture). */
   | { type: 'setColor'; id: Id; color: string; preview?: boolean }
   /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
@@ -79,3 +83,7 @@ export type UiMessage =
   | { type: 'setNodeParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Nodes still used by other nodes are kept (host sends a notice). */
   | { type: 'deleteNodes'; ids: Id[] }
+  /** AI agent tool call (src/ui/src/ai/tools.ts → Ai/AiTools.cs); answered by aiToolResult. */
+  | { type: 'aiTool'; callId: string; tool: string; args: Record<string, unknown> }
+  /** Save a finished AI run to disk for review (Ai/AiRunLog.cs). Images become PNG files next to transcript.json. */
+  | { type: 'aiSaveRun'; title: string; transcript: unknown; images: { name: string; dataUrl: string }[] }

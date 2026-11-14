@@ -1,9 +1,13 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Freppuccino.Ai;
 using Freppuccino.Commands;
 using Freppuccino.Csg;
 using Freppuccino.Sdf;
 using Rhino;
+using Rhino.Commands;
 using Rhino.DocObjects;
+using Rhino.Geometry;
 
 namespace Freppuccino.Ui;
 
@@ -13,14 +17,14 @@ namespace Freppuccino.Ui;
 ///
 /// Scene = SDF primitives (Rhino objects) + the doc's CSG tree (<see cref="FrepTrees"/>). Operation nodes aren't
 /// Rhino objects, so their selection lives here (<see cref="TakeSelectedNodes"/>).
-/// Stubbed: <see cref="SetParamRequest"/>.
 /// </summary>
 public sealed class UiController : IDisposable
 {
     /// Commands the page may run. Keep this a whitelist: the page must not be able to run arbitrary scripts.
     static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase)
     {
-        "FBox", "FSphere", "FCylinder", "FCone", "FPyramid", "FEllipsoid", "FTorus", "Freppuccino",
+        "FBox", "FSphere", "FCylinder", "FCone", "FPyramid", "FEllipsoid", "FTorus",
+        "FTwist", "FBend", "FRepeat", "Freppuccino",
     };
 
     /// Selected operation nodes per doc (runtime serial), in pick order.
@@ -42,6 +46,8 @@ public sealed class UiController : IDisposable
     readonly WebViewHost web;
     bool sceneDirty, selectionDirty;
     uint sentDocSerial;
+    /// Open slider drag: the primitive as it was before the first preview tick. One undo step on release.
+    ParamEdit? paramEdit;
 
     public UiController(WebViewHost web)
     {
@@ -60,11 +66,8 @@ public sealed class UiController : IDisposable
         NodeSelectionChanged += OnNodeSelectionChanged;
         RhinoApp.Idle += OnIdle;
         RhinoApp.EscapeKeyPressed += OnEscape;
-        Rhino.Commands.Command.BeginCommand += OnBeginCommand;
+        Command.BeginCommand += OnBeginCommand;
     }
-
-    // Any command (incl. Undo) ends a color gesture whose final message never came, like FrepTrees does for nodes.
-    void OnBeginCommand(object? sender, Rhino.Commands.CommandEventArgs e) => CommitColor();
 
     public void Dispose()
     {
@@ -81,9 +84,10 @@ public sealed class UiController : IDisposable
         NodeSelectionChanged -= OnNodeSelectionChanged;
         RhinoApp.Idle -= OnIdle;
         RhinoApp.EscapeKeyPressed -= OnEscape;
-        Rhino.Commands.Command.BeginCommand -= OnBeginCommand;
+        Command.BeginCommand -= OnBeginCommand;
         CommitColor();
         FrepTrees.CommitAll();
+        if (RhinoDoc.ActiveDoc is { } doc) EndParamGesture(doc);
     }
 
     // ─────────────── Rhino → page ───────────────
@@ -146,6 +150,7 @@ public sealed class UiController : IDisposable
     {
         FrepTrees.CommitAll(); // page reload / doc switch mid-drag
         CommitColor();
+        EndParamGesture(doc);
         sentDocSerial = doc.RuntimeSerialNumber;
         sceneDirty = selectionDirty = false;
         var theme = Rhino.Runtime.HostUtils.RunningInDarkMode ? "dark" : "light";
@@ -252,13 +257,15 @@ public sealed class UiController : IDisposable
             Locked: obj.IsLocked,
             SdfType: SdfUserText.ReadType(attributes),
             Params: ReadParams(attributes),
-            Color: SdfUserText.FormatColor(SdfUserText.ReadColorOrDefault(attributes)));
+            Color: SdfUserText.FormatColor(SdfUserText.ReadColorOrDefault(attributes)),
+            Custom: SdfUserText.TryReadLinear(attributes, out _, out _, out _) ? true : null);
     }
 
     static readonly HashSet<string> HeaderKeys = new(StringComparer.Ordinal)
     {
         SdfUserText.VersionKey, SdfUserText.TypeKey, SdfUserText.UnitsKey,
         SdfUserText.OriginKey, SdfUserText.XAxisKey, SdfUserText.YAxisKey, SdfUserText.ColorKey,
+        SdfUserText.LinearXKey, SdfUserText.LinearYKey, SdfUserText.LinearZKey,
     };
 
     /// Every numeric SDF.&lt;param&gt; (SDF.s, SDF.b.x, ...), keyed without the prefix. Generic, so new primitives just show up.
@@ -275,12 +282,36 @@ public sealed class UiController : IDisposable
         return result;
     }
 
-    static List<string> SelectedIds(RhinoDoc doc) =>
-        doc.Objects.GetSelectedObjects(false, false)
-            .Where(o => SdfUserText.ReadType(o.Attributes) != null)
+    static List<string> SelectedIds(RhinoDoc doc)
+    {
+        // Leaves selected only so the gumball can sit on a node's geometry stay out of the panel selection.
+        var gumball = NodeLeaves(doc);
+        return doc.Objects.GetSelectedObjects(false, false)
+            .Where(o => SdfUserText.ReadType(o.Attributes) != null && !gumball.Contains(o.Id))
             .Select(o => ObjectKey(o.Id))
             .Concat(selectedNodes.GetValueOrDefault(doc.RuntimeSerialNumber, []).Select(NodeKey))
             .ToList();
+    }
+
+    /// Object ids under the selected operation nodes (the geometry the gumball transforms).
+    static HashSet<Guid> NodeLeaves(RhinoDoc doc)
+    {
+        var leaves = new HashSet<Guid>();
+        if (!selectedNodes.TryGetValue(doc.RuntimeSerialNumber, out var ids)) return leaves;
+        var tree = FrepTrees.Get(doc);
+        foreach (var id in ids)
+            if (tree.Find(id) is { } node) CollectObjects(tree, node, leaves);
+        return leaves;
+    }
+
+    static void CollectObjects(FrepTree tree, FrepNode node, HashSet<Guid> into)
+    {
+        foreach (var o in node.Operands)
+        {
+            if (!o.IsNode) into.Add(o.ObjectId);
+            else if (tree.Find(o.NodeId) is { } child) CollectObjects(tree, child, into);
+        }
+    }
 
     // ─────────────── page → Rhino ───────────────
 
@@ -288,9 +319,11 @@ public sealed class UiController : IDisposable
     {
         var doc = RhinoDoc.ActiveDoc;
         if (doc == null) return;
-        // Anything but a live edit ends a live edit whose commit never came.
+        // Anything but a live blend or warp edit ends that gesture.
         if (type is not ("setOperation" or "setNodeParam")) FrepTrees.Commit(doc);
         if (type is not "setColor") CommitColor();
+        // A preview setParam continues the open size drag; every other message closes it as one undo step.
+        if (type != "setParam") EndParamGesture(doc);
         try
         {
             switch (type)
@@ -308,9 +341,7 @@ public sealed class UiController : IDisposable
                     RunCommand(Parse<RunCommandRequest>(message));
                     break;
                 case "setParam":
-                    // TODO: write SDF.<name> (SdfUserText.WriteFloat) on a copy of the attributes and
-                    // doc.Objects.ModifyAttributes(...) inside an undo record; regenerate the Rhino proxy geometry.
-                    NotImplemented("Editing primitive parameters");
+                    SetParam(doc, Parse<SetParamRequest>(message));
                     break;
                 case "setColor":
                     SetColor(doc, Parse<SetColorRequest>(message));
@@ -326,6 +357,12 @@ public sealed class UiController : IDisposable
                     break;
                 case "deleteNodes":
                     DeleteNodes(doc, Parse<DeleteNodesRequest>(message));
+                    break;
+                case "aiTool":
+                    RunAiTool(doc, Parse<AiToolRequest>(message));
+                    break;
+                case "aiSaveRun":
+                    SaveAiRun(Parse<AiSaveRunRequest>(message));
                     break;
                 default:
                     RhinoApp.WriteLine($"Freppuccino UI: unknown message '{type}'");
@@ -364,6 +401,8 @@ public sealed class UiController : IDisposable
             bool select = request.Mode != "toggle" || !nodes.Contains(n);
             nodes.Remove(n);
             if (select) nodes.Add(n);
+            // Select the node's primitives so Rhino draws the gumball on that geometry.
+            SelectLeaves(doc, tree, n, select);
         }
         foreach (var key in request.Ids)
         {
@@ -372,8 +411,34 @@ public sealed class UiController : IDisposable
             bool select = request.Mode != "toggle" || obj.IsSelected(false) == 0;
             obj.Select(select);
         }
+        ShowGumball();
         NodeSelectionChanged?.Invoke();
         doc.Views.Redraw();
+    }
+
+    static void SelectLeaves(RhinoDoc doc, FrepTree tree, int nodeId, bool on)
+    {
+        if (tree.Find(nodeId) is not { } node) return;
+        var leaves = new HashSet<Guid>();
+        CollectObjects(tree, node, leaves);
+        if (!on)
+        {
+            var keep = new HashSet<Guid>();
+            foreach (var other in NodesOf(doc))
+                if (tree.Find(other) is { } n) CollectObjects(tree, n, keep);
+            foreach (var id in leaves)
+                if (!keep.Contains(id)) doc.Objects.FindId(id)?.Select(false);
+            return;
+        }
+        foreach (var id in leaves)
+            doc.Objects.FindId(id)?.Select(true);
+    }
+
+    /// Panel selection is a pre-pick; the gumball only appears for pre-picked objects when it is enabled.
+    static void ShowGumball()
+    {
+        Rhino.ApplicationSettings.ModelAidSettings.AutoGumballEnabled = true;
+        Rhino.ApplicationSettings.GumballSettings.EnableGumball = true;
     }
 
     static void SetVisible(RhinoDoc doc, SetVisibleRequest request)
@@ -391,14 +456,129 @@ public sealed class UiController : IDisposable
         doc.Views.Redraw();
     }
 
+    // Any command (incl. Undo) ends an open size drag or color gesture whose final message never came,
+    // like FrepTrees does for nodes.
+    void OnBeginCommand(object? sender, CommandEventArgs e)
+    {
+        CommitColor();
+        EndParamGesture(e.Document);
+    }
+
+    void SetParam(RhinoDoc doc, SetParamRequest request)
+    {
+        if (!Guid.TryParse(request.Id, out var id) || doc.Objects.FindId(id) is not { IsDeleted: false } obj) return;
+        if (SdfUserText.ReadType(obj.Attributes) is not { } type) return;
+
+        bool sameGesture = paramEdit != null && paramEdit.Id == id && paramEdit.Name == request.Name;
+        if (paramEdit != null && !sameGesture) EndParamGesture(doc);
+
+        bool edited = PrimitiveProxy.TryEdit(type, obj.Attributes, request.Name, request.Value, doc.ModelAbsoluteTolerance, out var attrs, out var brep, out var reason);
+        if (!edited || attrs == null || brep == null)
+        {
+            if (!request.Preview && reason != null) web.Send(new NoticeMessage("warning", reason));
+            if (!request.Preview) EndParamGesture(doc);
+            brep?.Dispose();
+            return;
+        }
+
+        if (request.Preview)
+        {
+            if (paramEdit == null)
+            {
+                if (obj.Geometry is not Brep geometry)
+                {
+                    brep.Dispose();
+                    return;
+                }
+                SdfUserText.TryReadFloat(obj.Attributes, request.Name, out var original);
+                paramEdit = new ParamEdit(id, request.Name, original, geometry.DuplicateBrep(), obj.Attributes.Duplicate());
+            }
+            // Live ticks stay out of the undo stack; release records the whole drag.
+            ApplyParam(doc, obj, attrs, brep, undo: false);
+            return;
+        }
+
+        if (paramEdit != null) ApplyParam(doc, obj, attrs, brep, undo: false);
+        else RecordParam(doc, obj, attrs, brep);
+        EndParamGesture(doc);
+    }
+
+    /// A typed value (no drag) is one ordinary undo record.
+    static void RecordParam(RhinoDoc doc, RhinoObject obj, ObjectAttributes attrs, Brep brep)
+    {
+        uint record = doc.UndoRecordingIsActive ? 0 : doc.BeginUndoRecord("Edit F-rep parameter");
+        ApplyParam(doc, obj, attrs, brep, undo: true);
+        if (record != 0) doc.EndUndoRecord(record);
+    }
+
+    /// Attributes first: Replace keeps them, so the SDF values and the proxy land together.
+    /// <paramref name="undo"/> false for live ticks, which must not push an undo step each move.
+    static void ApplyParam(RhinoDoc doc, RhinoObject obj, ObjectAttributes attrs, Brep brep, bool undo)
+    {
+        bool enabled = doc.UndoRecordingEnabled;
+        if (!undo) doc.UndoRecordingEnabled = false;
+        try
+        {
+            bool selected = obj.IsSelected(false) != 0;
+            bool ok = doc.Objects.ModifyAttributes(obj, attrs, true) && doc.Objects.Replace(obj.Id, brep);
+            if (!ok) brep.Dispose();
+            else if (selected) doc.Objects.Select(obj.Id);
+        }
+        finally
+        {
+            if (!undo) doc.UndoRecordingEnabled = enabled;
+        }
+        doc.Views.Redraw();
+    }
+
+    /// Closes the open size drag. No undo step if the value ended where it started.
+    void EndParamGesture(RhinoDoc doc)
+    {
+        if (paramEdit == null) return;
+        var edit = paramEdit;
+        paramEdit = null;
+        if (doc.Objects.FindId(edit.Id) is not { IsDeleted: false } obj)
+        {
+            edit.Brep.Dispose();
+            return;
+        }
+        if (!SdfUserText.TryReadFloat(obj.Attributes, edit.Name, out var now) || Math.Abs(now - edit.Value) < 1e-9)
+        {
+            ApplyParam(doc, obj, edit.Attributes, edit.Brep, undo: false);
+            return;
+        }
+        uint record = doc.UndoRecordingIsActive ? 0 : doc.BeginUndoRecord("Edit F-rep parameter");
+        doc.AddCustomUndoEvent("Edit F-rep parameter", OnParamUndo, edit);
+        if (record != 0) doc.EndUndoRecord(record);
+    }
+
+    static void OnParamUndo(object? sender, CustomUndoEventArgs e)
+    {
+        if (e.Tag is not ParamEdit prior) return;
+        var doc = e.Document;
+        if (doc.Objects.FindId(prior.Id) is not { IsDeleted: false, Geometry: Brep current } obj) return;
+        var redo = new ParamEdit(prior.Id, prior.Name, prior.Value, current.DuplicateBrep(), obj.Attributes.Duplicate());
+        doc.AddCustomUndoEvent(e.ActionDescription, OnParamUndo, redo);
+        ApplyParam(doc, obj, prior.Attributes, prior.Brep, undo: false);
+    }
+
+    sealed class ParamEdit(Guid id, string name, double value, Brep brep, ObjectAttributes attributes)
+    {
+        public Guid Id { get; } = id;
+        public string Name { get; } = name;
+        public double Value { get; } = value;
+        public Brep Brep { get; } = brep;
+        public ObjectAttributes Attributes { get; } = attributes;
+    }
+
     void ApplyOperation(RhinoDoc doc, ApplyOperationRequest request)
     {
         if (ParseKind(request.Op) is not { } op) throw new JsonException($"unknown op '{request.Op}'");
         var tree0 = FrepTrees.Get(doc);
         var operands = request.Operands.Select(k => ParseOperand(tree0, k)).OfType<FrepOperand>().Distinct().ToList();
-        if (operands.Count < 2)
+        if (operands.Count != 2 || operands.Any(tree0.IsReferenced))
         {
-            web.Send(new NoticeMessage("warning", "Need at least 2 operands."));
+            web.Send(new NoticeMessage("warning", "Select two top-level nodes."));
             return;
         }
         var (tree, node) = tree0.Add(op, Math.Max(0, request.K), operands);
@@ -524,6 +704,41 @@ public sealed class UiController : IDisposable
         // Fails (returns false) if another command is already running.
         if (!RhinoApp.RunScript("_" + request.Command, false))
             web.Send(new NoticeMessage("warning", $"Couldn't start {request.Command}; finish the current command first."));
+    }
+
+    // ─────────────── AI agent (src/ui/src/ai, docs/ai.md) ───────────────
+
+    void RunAiTool(RhinoDoc doc, AiToolRequest request)
+    {
+        AiToolResultMessage reply;
+        try
+        {
+            reply = new(request.CallId, true, AiTools.Run(doc, request.Tool, AiTools.ParseArgs(request.Args)));
+        }
+        catch (AiToolException ex)
+        {
+            reply = new(request.CallId, false, Error: ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Wrong argument types (a number where a string goes, ...) land here too; the model can fix those.
+            RhinoApp.WriteLine($"Freppuccino AI: {request.Tool} failed: {ex}");
+            reply = new(request.CallId, false, Error: $"{ex.GetType().Name}: {ex.Message}");
+        }
+        web.Send(reply);
+    }
+
+    static void SaveAiRun(AiSaveRunRequest request)
+    {
+        try
+        {
+            var transcript = JsonNode.Parse(request.Transcript.GetRawText())!;
+            AiRunLog.Save(request.Title, transcript, [.. (request.Images ?? []).Select(i => (i.Name, i.DataUrl))]);
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"Freppuccino AI: couldn't save run: {ex.Message}");
+        }
     }
 
     void NotImplemented(string what)

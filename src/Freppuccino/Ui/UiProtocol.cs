@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Freppuccino.Ui;
@@ -58,7 +59,9 @@ public sealed record SceneNode(
     string? Ref = null,
     bool? RefMissing = null,
     // Primitive: SDF.Color "#RRGGBB" (white if the object has none).
-    string? Color = null);
+    string? Color = null,
+    /// <summary>Primitive carries SDF.Linear.*: a scale or shear the parameters cannot express.</summary>
+    bool? Custom = null);
 
 public sealed record UiSettings(string Units);
 
@@ -92,6 +95,12 @@ public sealed record NoticeMessage(string Level, string Text) : HostMessage
     public override string Type => "notice";
 }
 
+/// Reply to an AiToolRequest with the same CallId: Result on success, Error (for the model) on failure.
+public sealed record AiToolResultMessage(string CallId, bool Ok, JsonNode? Result = null, string? Error = null) : HostMessage
+{
+    public override string Type => "aiToolResult";
+}
+
 // ───────────────────────────── UI → Host ─────────────────────────────
 // Incoming messages are dispatched on "type" in UiController.Handle.
 
@@ -104,8 +113,9 @@ public sealed record SetVisibleRequest(string Id, bool Visible);
 /// Only commands in UiController.AllowedCommands run.
 public sealed record RunCommandRequest(string Command);
 
-/// STUB: edit one SDF parameter of a primitive, e.g. { id, name: "s", value: 2 }.
-public sealed record SetParamRequest(string Id, string Name, double Value);
+/// Edit one SDF parameter of a primitive and rebuild its proxy, e.g. { id, name: "s", value: 2 }.
+/// Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
+public sealed record SetParamRequest(string Id, string Name, double Value, bool Preview = false);
 
 /// Set a primitive's SDF.Color ("#RRGGBB"). Preview = live picker tick (no undo); the next non-preview one ends the gesture as one undo step.
 public sealed record SetColorRequest(string Id, string Color, bool Preview = false);
@@ -121,3 +131,11 @@ public sealed record SetNodeParamRequest(string Id, string Name, double Value, b
 
 /// Delete operation nodes nothing else uses.
 public sealed record DeleteNodesRequest(string[] Ids);
+
+/// AI agent tool call (Ai/AiTools.cs); answered with an AiToolResultMessage carrying the same CallId.
+public sealed record AiToolRequest(string CallId, string Tool, JsonElement? Args = null);
+
+/// Saves a finished AI run for review (Ai/AiRunLog.cs). Images: { name: "01-perspective.png", dataUrl }.
+public sealed record AiSaveRunRequest(string Title, JsonElement Transcript, AiImage[]? Images = null);
+
+public sealed record AiImage(string Name, string DataUrl);

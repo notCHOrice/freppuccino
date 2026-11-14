@@ -428,3 +428,6 @@ FodyWeavers.xsd
 # Freppuccino graphics
 .idea/
 .DS_Store
+
+# AI panel run logs (transcripts + screenshots, see docs/ai.md)
+ai-runs/

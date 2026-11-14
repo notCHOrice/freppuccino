@@ -70,10 +70,8 @@ public class FBoxCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame and rescales b. Works for any transform that keeps the box axes perpendicular:
-    /// move, rotate, mirror, uniform scale, and non-uniform scale along the box's own axes.
-    /// Shear, or non-uniform scale along other directions, turns the box into a parallelepiped,
-    /// which sdBox can't represent, so it is rejected.
+    /// Moves the frame and rescales b when the axes stay perpendicular (move, rotate, mirror, scale along the box).
+    /// Shear, or scale off those axes, is stored as SDF.Linear.* and b stays in the original frame.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -82,13 +80,19 @@ public class FBoxCommand : Command
             reason = "missing or unreadable SDF.Frame.* / SDF.b.*";
             return false;
         }
+        return SdfTransforms.CommitAffine(attributes, frame, xform, scale =>
+        {
+            if (!TryAbsorbScale(b, scale, out var next)) return false;
+            SdfUserText.WriteVec3(attributes, "b", next.X, next.Y, next.Z);
+            return true;
+        }, out reason);
+    }
 
-        if (!TryTransform(frame, b, xform, out frame, out b, out reason))
-            return false;
-
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteVec3(attributes, "b", b.X, b.Y, b.Z);
-        return true;
+    /// <summary>Per-axis scale of the half-extents. A box can take any positive scale along its own axes.</summary>
+    public static bool TryAbsorbScale(Vector3d b, Vector3d scale, out Vector3d result)
+    {
+        result = new Vector3d(b.X * scale.X, b.Y * scale.Y, b.Z * scale.Z);
+        return result.X > 0 && result.Y > 0 && result.Z > 0;
     }
 
     /// <summary>Reads the frame (origin = box center) and half-extents b.</summary>
