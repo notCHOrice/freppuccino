@@ -96,8 +96,9 @@ public sealed record SetVisibleRequest(string Id, bool Visible);
 /// Only commands in UiController.AllowedCommands run.
 public sealed record RunCommandRequest(string Command);
 
-/// STUB: edit one SDF parameter of a primitive, e.g. { id, name: "s", value: 2 }.
-public sealed record SetParamRequest(string Id, string Name, double Value);
+/// Edit one SDF parameter of a primitive and rebuild its proxy, e.g. { id, name: "s", value: 2 }.
+/// Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
+public sealed record SetParamRequest(string Id, string Name, double Value, bool Preview = false);
 
 /// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);
