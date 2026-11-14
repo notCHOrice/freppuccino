@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <TargetExt>.rhp</TargetExt>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Version>0.1.0</Version>
+    <Title>Freppucino</Title>
+    <Description>Freppucino Rhino plugin</Description>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="9.0.26300.9401" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- `dotnet run` launches Rhino 9 w/ RHINO_PACKAGE_DIRS pointing at the build output, so the .rhp auto-loads. -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <RunCommand>/usr/bin/env</RunCommand>
+    <RunArguments>RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <RunCommand>cmd.exe</RunCommand>
+    <RunArguments>/c "set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
+  </PropertyGroup>
+
+</Project>
