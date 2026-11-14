@@ -253,7 +253,8 @@ public static class FrepShaderGen
 
         vec3 unpackColor(float packed)
         {
-            uint c = uint(packed + 0.5);
+            // round, not +0.5: above 2^23 floats step by 1, so 0xFFFFFF + 0.5 rounds up to 0x1000000 (white came out black).
+            uint c = uint(round(packed));
             return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
         }
         // Same ops over vec4(rgb, d). Colors mix with IQ's smin weight, so they fade across the blend region

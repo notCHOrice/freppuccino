@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Freppuccino.Ui;
@@ -90,6 +91,12 @@ public sealed record NoticeMessage(string Level, string Text) : HostMessage
     public override string Type => "notice";
 }
 
+/// Reply to an AiToolRequest with the same CallId: Result on success, Error (for the model) on failure.
+public sealed record AiToolResultMessage(string CallId, bool Ok, JsonNode? Result = null, string? Error = null) : HostMessage
+{
+    public override string Type => "aiToolResult";
+}
+
 // ───────────────────────────── UI → Host ─────────────────────────────
 // Incoming messages are dispatched on "type" in UiController.Handle.
 
@@ -117,3 +124,11 @@ public sealed record SetNodeParamRequest(string Id, string Name, double Value, b
 
 /// Delete operation nodes nothing else uses.
 public sealed record DeleteNodesRequest(string[] Ids);
+
+/// AI agent tool call (Ai/AiTools.cs); answered with an AiToolResultMessage carrying the same CallId.
+public sealed record AiToolRequest(string CallId, string Tool, JsonElement? Args = null);
+
+/// Saves a finished AI run for review (Ai/AiRunLog.cs). Images: { name: "01-perspective.png", dataUrl }.
+public sealed record AiSaveRunRequest(string Title, JsonElement Transcript, AiImage[]? Images = null);
+
+public sealed record AiImage(string Name, string DataUrl);

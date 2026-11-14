@@ -17,7 +17,8 @@
       },
       "env": {
         "RHINO_PACKAGE_DIRS": "${workspaceFolder}/src/Freppuccino/bin/Debug/net10.0/",
-        "FREPPUCCINO_AUTOSTART": "1"
+        "FREPPUCCINO_AUTOSTART": "1",
+        "FREPPUCCINO_AI_RUNS_DIR": "${workspaceFolder}/ai-runs"
       },
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
@@ -41,7 +42,8 @@
       "env": {
         "RHINO_PACKAGE_DIRS": "${workspaceFolder}/src/Freppuccino/bin/Debug/net10.0/",
         "FREPPUCCINO_AUTOSTART": "1",
-        "FREPPUCCINO_UI_DEV_URL": "http://localhost:5173"
+        "FREPPUCCINO_UI_DEV_URL": "http://localhost:5173",
+        "FREPPUCCINO_AI_RUNS_DIR": "${workspaceFolder}/ai-runs"
       },
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,

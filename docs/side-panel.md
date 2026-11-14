@@ -15,6 +15,7 @@ src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radi
   src/bridge/        host.ts (transport + store + useHost), mock-host.ts (fake Rhino for the browser)
   src/components/    scene-tree.tsx (browser), inspector.tsx (create / primitive / combine), param-slider.tsx
   src/lib/scene.ts   display names, icons, labels per SDF type / operation
+  src/ai/            AI assistant (AI tab): agent loop, tools, skills; see docs/ai.md
 ```
 
 ## Why Eto's WebView and not a raw WebView2 control
@@ -60,6 +61,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `scene {scene}` | object added/deleted/replaced/attributes changed, CSG tree changed (coalesced on Idle) |
 | `selection {ids}` | Rhino selection or panel node selection changed |
 | `notice {level, text}` | feedback, including "not implemented yet" from stubs |
+| `aiToolResult {callId, ok, result?, error?}` | reply to `aiTool` ([ai.md](ai.md)) |
 
 | Page → host | Status |
 |---|---|
@@ -72,6 +74,8 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
+| `aiTool {callId, tool, args}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md) |
+| `aiSaveRun {title, transcript, images}` | ✅ writes an AI run log (`Ai/AiRunLog.cs`) |
 
 Live edits: the inspector has no Update button. An op click sends one `setOperation`; a Blend drag sends `preview` ticks (≤ ~30 Hz, trailing) then a final one on release. The host (`FrepTrees.Preview`/`Commit`) remembers the tree from before the gesture and records one undo step back to it. A gesture whose final message never arrives is committed by any other page message, any Rhino command (incl. Undo), a page reload / doc switch, or panel close. The page ignores host snapshots for the node while dragging and until the host echoes its last sent value, so stale snapshots can't yank the slider.
 

@@ -108,6 +108,14 @@ transport.listen((m) => {
     case 'notice':
       set({ notice: { id: ++noticeId, level: m.level, text: m.text } })
       break
+    case 'aiToolResult': {
+      const pending = toolCalls.get(m.callId)
+      if (!pending) break
+      toolCalls.delete(m.callId)
+      if (m.ok) pending.resolve(m.result)
+      else pending.reject(new ToolError(m.error ?? 'tool failed'))
+      break
+    }
   }
 })
 
@@ -115,8 +123,37 @@ export function send(message: UiMessage) {
   transport.post(message)
 }
 
+// ── AI tool calls (request / response over the same transport) ──
+
+/** A tool failure reported by the host; the message is meant for the model. */
+export class ToolError extends Error {}
+
+const toolCalls = new Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void }>()
+let toolCallId = 0
+
+/** Runs an AI tool on the host (Ai/AiTools.cs). Rejects with ToolError on failure, or after timeoutMs. */
+export function callTool(tool: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<unknown> {
+  const callId = `c${++toolCallId}`
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      toolCalls.delete(callId)
+      reject(new ToolError(`${tool}: no reply from Rhino within ${timeoutMs / 1000}s (is a command running?)`))
+    }, timeoutMs)
+    toolCalls.set(callId, {
+      resolve: (r) => (clearTimeout(timer), resolve(r)),
+      reject: (e) => (clearTimeout(timer), reject(e)),
+    })
+    transport.post({ type: 'aiTool', callId, tool, args })
+  })
+}
+
 export function dismissNotice(id: number) {
   if (state.notice?.id === id) set({ notice: null })
+}
+
+/** Current snapshot, for non-React code (the AI agent). */
+export function getHostState(): HostState {
+  return state
 }
 
 export function useHost<T>(selector: (s: HostState) => T): T {

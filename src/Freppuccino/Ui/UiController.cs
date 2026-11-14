@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Freppuccino.Ai;
 using Freppuccino.Commands;
 using Freppuccino.Csg;
 using Freppuccino.Sdf;
@@ -347,6 +349,12 @@ public sealed class UiController : IDisposable
                 case "deleteNodes":
                     DeleteNodes(doc, Parse<DeleteNodesRequest>(message));
                     break;
+                case "aiTool":
+                    RunAiTool(doc, Parse<AiToolRequest>(message));
+                    break;
+                case "aiSaveRun":
+                    SaveAiRun(Parse<AiSaveRunRequest>(message));
+                    break;
                 default:
                     RhinoApp.WriteLine($"Freppuccino UI: unknown message '{type}'");
                     break;
@@ -621,6 +629,41 @@ public sealed class UiController : IDisposable
         // Fails (returns false) if another command is already running.
         if (!RhinoApp.RunScript("_" + request.Command, false))
             web.Send(new NoticeMessage("warning", $"Couldn't start {request.Command}; finish the current command first."));
+    }
+
+    // ─────────────── AI agent (src/ui/src/ai, docs/ai.md) ───────────────
+
+    void RunAiTool(RhinoDoc doc, AiToolRequest request)
+    {
+        AiToolResultMessage reply;
+        try
+        {
+            reply = new(request.CallId, true, AiTools.Run(doc, request.Tool, AiTools.ParseArgs(request.Args)));
+        }
+        catch (AiToolException ex)
+        {
+            reply = new(request.CallId, false, Error: ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Wrong argument types (a number where a string goes, ...) land here too; the model can fix those.
+            RhinoApp.WriteLine($"Freppuccino AI: {request.Tool} failed: {ex}");
+            reply = new(request.CallId, false, Error: $"{ex.GetType().Name}: {ex.Message}");
+        }
+        web.Send(reply);
+    }
+
+    static void SaveAiRun(AiSaveRunRequest request)
+    {
+        try
+        {
+            var transcript = JsonNode.Parse(request.Transcript.GetRawText())!;
+            AiRunLog.Save(request.Title, transcript, [.. (request.Images ?? []).Select(i => (i.Name, i.DataUrl))]);
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"Freppuccino AI: couldn't save run: {ex.Message}");
+        }
     }
 
     void NotImplemented(string what)

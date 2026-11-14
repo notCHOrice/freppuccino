@@ -1,3 +1,4 @@
+using Freppuccino.Ai;
 using Freppuccino.Gpu;
 using Freppuccino.Scene;
 using Freppuccino.Shaders;
@@ -37,8 +38,11 @@ public sealed class ShaderConduit : DisplayConduit
             if (scene.Program != null)
                 drew |= gpu.Draw(dp, scene.Program, FrepShaderGen.SceneUniforms(dp.Viewport, scene));
 
-            var (r, size) = BadgeRect(dp);
-            drew |= gpu.Draw(dp, PillShader.Source, PillShader.Uniforms(r.Left, r.Top, r.Right, r.Bottom, size.Width, size.Height));
+            if (!AiCapture.Active) // AI screenshots: just the model
+            {
+                var (r, size) = BadgeRect(dp);
+                drew |= gpu.Draw(dp, PillShader.Source, PillShader.Uniforms(r.Left, r.Top, r.Right, r.Bottom, size.Width, size.Height));
+            }
 
             if (drew) RhinoStateReset.Apply(dp);
         }
@@ -52,7 +56,7 @@ public sealed class ShaderConduit : DisplayConduit
     protected override void DrawForeground(DrawEventArgs e)
     {
         var dp = e.Display;
-        if (dp == null || !FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
+        if (dp == null || AiCapture.Active || !FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
         try
         {
             var (r, _) = BadgeRect(dp);

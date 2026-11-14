@@ -105,6 +105,97 @@ export function createMockHost(): Transport {
         emit({ type: 'selection', ids: selection })
         break
       }
+      case 'aiTool': {
+        let reply: HostMessage
+        try {
+          reply = { type: 'aiToolResult', callId: m.callId, ok: true, result: aiTool(m.tool, m.args) }
+        } catch (e) {
+          reply = { type: 'aiToolResult', callId: m.callId, ok: false, error: (e as Error).message }
+        }
+        emit(reply)
+        emit({ type: 'scene', scene })
+        break
+      }
+      case 'aiSaveRun':
+        console.info('[mock] AI run (not saved in the browser):', m.title, m.transcript)
+        break
+    }
+  }
+
+  // ── AI tools: just enough of Ai/AiTools.cs to exercise the agent loop in a browser (no geometry, no screenshots) ──
+  const specs = new Map<string, Record<string, unknown>>() // primitive id → spec
+  const SDF: Record<string, string> = {
+    sphere: 'sdSphere', box: 'sdBox', cylinder: 'sdCappedCylinder', cone: 'sdCappedCone',
+    pyramid: 'sdPyramid', ellipsoid: 'sdEllipsoid', torus: 'sdTorus',
+  }
+  const find = (ref: string) => {
+    const node = flat(scene).find((x) => x.id === ref || x.name === ref)
+    if (!node) throw new Error(`no object or node '${ref}'; call get_scene for current refs`)
+    return node
+  }
+  function aiTool(tool: string, args: Record<string, unknown>): unknown {
+    switch (tool) {
+      case 'get_scene': {
+        const all = flat(scene)
+        return {
+          units: 'Millimeters',
+          primitives: all.filter((x) => x.kind === 'primitive').map((x) => ({ ref: x.name ?? x.id, ...specs.get(x.id) })),
+          operations: all.filter((x) => x.kind === 'operation').map((x) => ({
+            ref: x.id, op: x.op, k: x.k, operands: x.children?.map((c) => c.name ?? c.id),
+          })),
+          roots: scene.map((x) => x.name ?? x.id),
+        }
+      }
+      case 'create_primitive': {
+        const type = String(args.type)
+        if (!SDF[type]) throw new Error(`unknown type '${type}'`)
+        let name = String(args.name ?? type).replace(/\s+/g, '_')
+        while (flat(scene).some((x) => x.name === name)) name += '_2'
+        const p = prim(SDF[type], {}, name)
+        const { name: _, ...spec } = args
+        specs.set(p.id, spec)
+        scene = [...scene, p]
+        return { ref: name, guid: p.id }
+      }
+      case 'update_primitive': {
+        const p = find(String(args.ref))
+        const { ref: _, ...patch } = args
+        specs.set(p.id, { ...specs.get(p.id), ...patch })
+        return { ref: p.name, ...specs.get(p.id) }
+      }
+      case 'combine': {
+        const operands = (args.operands as string[]).map(find)
+        const node = opNode(args.op as SceneNode['op'], Number(args.k ?? 0), operands)
+        scene = [...scene.filter((x) => !operands.includes(x)), node]
+        return { ref: node.id }
+      }
+      case 'deform': {
+        const target = find(String(args.target))
+        const node = { ...opNode(args.op as SceneNode['op'], 0, [target]), params: {} }
+        scene = [...scene.filter((x) => x !== target), node]
+        const { op, target: _, ...fields } = args
+        return { ref: node.id, op, target: target.name ?? target.id, ...fields }
+      }
+      case 'edit_operation': {
+        const n = find(String(args.ref))
+        scene = map(scene, (x) => (x.id === n.id ? { ...x, op: (args.op as SceneNode['op']) ?? x.op, k: (args.k as number) ?? x.k } : x))
+        return { ref: n.id }
+      }
+      case 'delete': {
+        const ids = new Set((args.refs as string[]).map((r) => find(r).id))
+        scene = scene.filter((x) => !ids.has(x.id))
+        return { deleted: [...ids] }
+      }
+      case 'clear_scene':
+        scene = []
+        return { ok: true }
+      case 'transform':
+      case 'set_visible':
+        return { ok: true, note: 'mock host: no geometry' }
+      case 'capture_views':
+        throw new Error('Screenshots need Rhino (the mock host has no viewport). Skip visual checks.')
+      default:
+        throw new Error(`unknown tool '${tool}'`)
     }
   }
 
