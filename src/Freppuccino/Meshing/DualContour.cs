@@ -9,6 +9,12 @@ namespace Freppuccino.Meshing;
 ///
 /// First cut, to be refined: no octree yet, features thinner than a cell can be missed, and triangles
 /// can still self-intersect near sharp features.
+///
+/// Known topology defect: when both cells sharing a four-crossing face route all four crossings through
+/// one sheet (a tunnel on each side), the four quads around that face share one mesh edge, which is then
+/// non-manifold. It shows up where features are about a cell wide (under 1% of random 4-primitive scenes
+/// at resolutions 12-40). Re-pairing the face in one cell alone is not a fix: both cells must agree.
+/// FrepMesh reports NON-MANIFOLD when it happens; raising the resolution usually clears it.
 public static class DualContour
 {
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize);
