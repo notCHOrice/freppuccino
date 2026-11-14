@@ -105,7 +105,9 @@ public sealed class FrepField
         return outside + inside;
     }
 
-    /// World-axis bounds of the zero set. The smooth union bulges at most k/4 beyond the primitives.
+    /// World-axis bounds of the zero set. One smooth union bulges at most k/4 beyond its two operands.
+    /// Folding more primitives in sequence compounds: the deficit x below the plain minimum grows as
+    /// x' = x + (k - x)²/4k, which approaches but never exceeds k.
     public (V3 Min, V3 Max) Bounds()
     {
         double inf = double.PositiveInfinity;
@@ -121,7 +123,7 @@ public sealed class FrepField
                 Math.Abs(b.X.X) * b.B.X + Math.Abs(b.Y.X) * b.B.Y + Math.Abs(b.Z.X) * b.B.Z,
                 Math.Abs(b.X.Y) * b.B.X + Math.Abs(b.Y.Y) * b.B.Y + Math.Abs(b.Z.Y) * b.B.Z,
                 Math.Abs(b.X.Z) * b.B.X + Math.Abs(b.Y.Z) * b.B.Y + Math.Abs(b.Z.Z) * b.B.Z));
-        double bulge = Math.Max(Blend, 0) * 0.25;
+        double bulge = Math.Max(Blend, 0) * (Count > 2 ? 1.0 : 0.25);
         var pad = new V3(bulge, bulge, bulge);
         return (min - pad, max + pad);
     }
