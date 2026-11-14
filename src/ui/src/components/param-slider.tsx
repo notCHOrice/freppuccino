@@ -15,7 +15,8 @@ export function ParamSlider(props: {
   min?: number
   max: number
   step?: number
-  hint?: string
+  /** Rhino unit system name ("Millimeters") or a word like "sharp"; shown after the number */
+  units?: string
   disabled?: boolean
   onChange?: (value: number) => void
   onCommit?: (value: number) => void
@@ -24,7 +25,7 @@ export function ParamSlider(props: {
   const id = useId()
   const [value, setValue] = useState(props.value)
   const [text, setText] = useState(format(props.value))
-  // Follow the prop when the host changes it (e.g. FrepBlend on the command line).
+  // Follow the prop when the host changes it (undo, command line edits).
   const [prop, setProp] = useState(props.value)
   if (props.value !== prop) {
     setProp(props.value)
@@ -51,22 +52,24 @@ export function ParamSlider(props: {
   }
 
   return (
-    <div className="grid gap-1.5">
+    <div className="grid gap-2">
       <div className="flex items-center justify-between gap-2">
-        <Label htmlFor={id} className="text-muted-foreground">
+        <Label htmlFor={id} className="type-label min-w-0 truncate text-muted-foreground">
           {props.label}
-          {props.hint && <span className="font-normal opacity-70"> · {props.hint}</span>}
         </Label>
-        <Input
-          id={id}
-          inputMode="decimal"
-          value={text}
-          disabled={props.disabled}
-          onChange={(e) => setText(e.target.value)}
-          onBlur={commitText}
-          onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
-          className="h-6 w-16 px-1.5 text-right tabular-nums"
-        />
+        <div className="flex items-center gap-1.5">
+          <Input
+            id={id}
+            inputMode="decimal"
+            value={text}
+            disabled={props.disabled}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={commitText}
+            onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+            className="type-numeric h-7 w-16 px-1.5 text-right"
+          />
+          {props.units && <span className="type-numeric w-8 text-muted-foreground">{abbreviate(props.units)}</span>}
+        </div>
       </div>
       <Slider
         min={min}
@@ -93,3 +96,9 @@ export function ParamSlider(props: {
 }
 
 const format = (v: number) => String(Math.round(v * 1000) / 1000)
+
+const UNIT_ABBREVIATIONS: Record<string, string> = {
+  Millimeters: 'mm', Centimeters: 'cm', Meters: 'm', Kilometers: 'km', Microns: 'µm',
+  Inches: 'in', Feet: 'ft', Yards: 'yd', Miles: 'mi',
+}
+const abbreviate = (units: string) => UNIT_ABBREVIATIONS[units] ?? units

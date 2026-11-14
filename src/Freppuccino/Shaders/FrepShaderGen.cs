@@ -2,6 +2,7 @@ using System.Text;
 using Freppuccino.Csg;
 using Freppuccino.Scene;
 using Rhino.Display;
+using Rhino.Geometry;
 
 namespace Freppuccino.Shaders;
 
@@ -13,8 +14,8 @@ namespace Freppuccino.Shaders;
 /// union skips them, intersect becomes empty, difference with missing base becomes empty.
 public static class FrepShaderGen
 {
-    /// Uniform header = 6 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
-    const int HeaderRows = 6;
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
+    const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
@@ -141,7 +142,8 @@ public static class FrepShaderGen
             vec4 camY;       // xyz unit up
             vec4 camZ;       // xyz unit view direction; w = near
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
-            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w = far
+            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
+            vec4 bound;      // xyz center, w radius: sphere enclosing every prim (+ smooth-union growth); w <= 0 = empty
             // prims, then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
@@ -225,21 +227,30 @@ public static class FrepShaderGen
             vec2 f = vNdc * 0.5 + 0.5;
             vec2 xy = mix(u.frustum.xz, u.frustum.yw, f);
             bool persp = u.camPos.w > 0.5;
-            float near = u.camZ.w, far = u.params.w;
-            vec3 ro, rd; float t, tMax;
+            float near = u.camZ.w;
+            vec3 ro, rd;
             if (persp)
             {
                 ro = u.camPos.xyz;
                 rd = normalize(u.camX.xyz * xy.x + u.camY.xyz * xy.y + u.camZ.xyz * near);
-                float c = dot(rd, u.camZ.xyz); // depth per unit t
-                t = near / c; tMax = far / c;
             }
             else
             {
                 ro = u.camPos.xyz + u.camX.xyz * xy.x + u.camY.xyz * xy.y;
                 rd = u.camZ.xyz;
-                t = near; tMax = far;
             }
+            // March only through the scene's bounding sphere, not Rhino's near/far: Rhino moves its clip planes
+            // around while zooming, and starting a ray past the front of a surface lands inside the SDF (instant
+            // hit, interior-gradient normals, i.e. the shape looks sliced).
+            vec3 oc = ro - u.bound.xyz;
+            float bb = dot(oc, rd);
+            vec3 perp = oc - bb * rd; // closest approach; avoids |oc|^2 - r^2 cancellation when zoomed far out
+            float disc = u.bound.w * u.bound.w - dot(perp, perp);
+            if (u.bound.w <= 0.0 || disc < 0.0) discard;
+            float h = sqrt(disc);
+            float t = -bb - h, tMax = -bb + h;
+            if (persp) t = max(t, 0.0); // nothing behind the eye
+            if (tMax < t) discard;
             float eps = 0.0;
             bool hit = false;
             for (int i = 0; i < 256; i++)
@@ -273,7 +284,9 @@ public static class FrepShaderGen
             .Vec4(vp.CameraY.X, vp.CameraY.Y, vp.CameraY.Z)
             .Vec4(dir.X, dir.Y, dir.Z, near)
             .Vec4(l, r, b, t)
-            .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, far);
+            .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
+        var (center, radius) = Bound(scene);
+        u.Vec4(center.X, center.Y, center.Z, radius);
         // Same order as Compile(): prim rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
@@ -286,6 +299,45 @@ public static class FrepShaderGen
         for (int i = 0; i < ks.Count; i += 4)
             u.Vec4(ks[i], i + 1 < ks.Count ? ks[i + 1] : 0, i + 2 < ks.Count ? ks[i + 2] : 0, i + 3 < ks.Count ? ks[i + 3] : 0);
         return u.ToBytes();
+    }
+
+    /// Conservative world-space bounding sphere of the drawn scene. Each prim gets a sphere around its frame origin;
+    /// smooth unions can grow the surface by up to k/4 per blend, so pad by the sum of those (intersect/difference only shrink).
+    static (Point3d Center, double Radius) Bound(FrepSceneData scene)
+    {
+        var prims = scene.Primitives;
+        if (prims.Count == 0) return (Point3d.Origin, 0);
+
+        static double PrimRadius(SdPrimitive p)
+        {
+            var v = p.P;
+            return p.Kind switch
+            {
+                SdKind.Sphere => Math.Abs(v.X),
+                SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
+                SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
+                SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
+                SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),
+                SdKind.Ellipsoid => Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))),
+                SdKind.Pyramid => Math.Sqrt(v.X * v.X + 0.5 * v.Y * v.Y), // origin at base center, apex at +h
+                _ => 0,
+            };
+        }
+
+        var box = BoundingBox.Empty;
+        foreach (var p in prims)
+        {
+            double r = PrimRadius(p);
+            box.Union(new BoundingBox(p.Frame.Origin - new Vector3d(r, r, r), p.Frame.Origin + new Vector3d(r, r, r)));
+        }
+        var c = box.Center;
+        double radius = 0;
+        foreach (var p in prims) radius = Math.Max(radius, c.DistanceTo(p.Frame.Origin) + PrimRadius(p));
+
+        double pad = 0;
+        foreach (var k in scene.Ks) if (k > 0) pad += 0.25 * k;
+        radius += pad;
+        return (c, radius * 1.01 + 1e-6); // margin for float32 rounding
     }
 }
 

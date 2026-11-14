@@ -18,7 +18,10 @@ namespace Freppuccino.Ui;
 public sealed class UiController : IDisposable
 {
     /// Commands the page may run. Keep this a whitelist: the page must not be able to run arbitrary scripts.
-    static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase) { "FBox", "FSphere", "FCylinder", "FCone", "FTorus", "FEllipsoid", "FPyramid", "Freppuccino" };
+    static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "FBox", "FSphere", "FCylinder", "FCone", "FPyramid", "FEllipsoid", "FTorus", "Freppuccino",
+    };
 
     /// Selected operation nodes per doc (runtime serial), in pick order.
     static readonly Dictionary<uint, List<int>> selectedNodes = [];
