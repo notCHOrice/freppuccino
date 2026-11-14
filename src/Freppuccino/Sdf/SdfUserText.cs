@@ -17,6 +17,8 @@ namespace Freppuccino.Sdf;
 ///   SDF.Frame.Origin  "x,y,z"  world position of the primitive's local origin
 ///   SDF.Frame.XAxis   "x,y,z"  local X axis (unit vector, world space)
 ///   SDF.Frame.YAxis   "x,y,z"  local Y axis (unit vector, world space); Z = X × Y
+///   SDF.Color         "#RRGGBB"  viewport shader color, per object. New primitives start white (#FCFCFC);
+///                     edited from the Freppuccino panel. Missing = white. Independent of the layer color.
 ///   SDF.&lt;param&gt;       IQ parameters, vectors split per component (SDF.b.x, SDF.b.y, ...)
 ///
 /// IQ functions are defined in local space with the primitive centered at the origin,
@@ -33,6 +35,42 @@ public static class SdfUserText
     public const string OriginKey = Prefix + "Frame.Origin";
     public const string XAxisKey = Prefix + "Frame.XAxis";
     public const string YAxisKey = Prefix + "Frame.YAxis";
+    /// <summary>Per-object display color "#RRGGBB" the viewport shader uses. Set from the Freppuccino panel.</summary>
+    public const string ColorKey = Prefix + "Color";
+
+    /// <summary>White: the color every new primitive starts with, and the color of objects without SDF.Color.</summary>
+    public static readonly System.Drawing.Color DefaultColor = System.Drawing.Color.FromArgb(0xFC, 0xFC, 0xFC);
+
+    /// <summary>Writes SDF.Color as "#RRGGBB".</summary>
+    public static void WriteColor(ObjectAttributes attributes, System.Drawing.Color color) =>
+        attributes.SetUserString(ColorKey, FormatColor(color));
+
+    /// <summary>Writes the default (white) SDF.Color. Call when creating a primitive.</summary>
+    public static void WriteDefaultColor(ObjectAttributes attributes) => WriteColor(attributes, DefaultColor);
+
+    /// <summary>"#RRGGBB" (uppercase hex).</summary>
+    public static string FormatColor(System.Drawing.Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    /// <summary>Reads SDF.Color ("#RRGGBB", '#' optional).</summary>
+    public static bool TryReadColor(ObjectAttributes attributes, out System.Drawing.Color color) =>
+        TryParseColor(attributes.GetUserString(ColorKey), out color);
+
+    /// <summary>SDF.Color, or <see cref="DefaultColor"/> (white) if it is missing or malformed.</summary>
+    public static System.Drawing.Color ReadColorOrDefault(ObjectAttributes attributes) =>
+        TryReadColor(attributes, out var color) ? color : DefaultColor;
+
+    /// <summary>Parses "#RRGGBB" / "RRGGBB" (any case).</summary>
+    public static bool TryParseColor(string? text, out System.Drawing.Color color)
+    {
+        color = System.Drawing.Color.Empty;
+        text = text?.Trim();
+        if (string.IsNullOrEmpty(text)) return false;
+        if (text[0] == '#') text = text[1..];
+        if (text.Length != 6 || !int.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var rgb))
+            return false;
+        color = System.Drawing.Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+        return true;
+    }
 
     /// <summary>Writes the common header and local frame. Call once per primitive, then add parameters.</summary>
     public static void WriteHeader(ObjectAttributes attributes, string sdfType, Plane frame, UnitSystem units)

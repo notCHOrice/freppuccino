@@ -17,7 +17,7 @@ export function createMockHost(): Transport {
     id: `N${nextNode++}`, kind: 'operation', name: `N${nextNode - 1}`, op, k, visible: true, locked: false, children,
   })
   const prim = (sdfType: string, params: Record<string, number>, name?: string): SceneNode => ({
-    id: id(), kind: 'primitive', sdfType, name, visible: true, locked: false, params,
+    id: id(), kind: 'primitive', sdfType, name, visible: true, locked: false, params, color: '#FCFCFC',
   })
   const make: Partial<Record<AllowedCommand, () => SceneNode>> = {
     FBox: () => prim('sdBox', { 'b.x': 1, 'b.y': 1, 'b.z': 1 }),
@@ -76,6 +76,10 @@ export function createMockHost(): Transport {
       }
       case 'setParam':
         notImplemented('Editing primitive parameters')
+        break
+      case 'setColor':
+        scene = map(scene, (x) => (x.id === m.id ? { ...x, color: m.color.toUpperCase() } : x))
+        emit({ type: 'scene', scene })
         break
       case 'applyOperation': {
         const all = flat(scene)

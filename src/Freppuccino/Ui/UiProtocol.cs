@@ -56,7 +56,9 @@ public sealed record SceneNode(
     IReadOnlyList<SceneNode>? Children = null,
     bool? Missing = null,
     string? Ref = null,
-    bool? RefMissing = null);
+    bool? RefMissing = null,
+    // Primitive: SDF.Color "#RRGGBB" (white if the object has none).
+    string? Color = null);
 
 public sealed record UiSettings(string Units);
 
@@ -104,6 +106,9 @@ public sealed record RunCommandRequest(string Command);
 
 /// STUB: edit one SDF parameter of a primitive, e.g. { id, name: "s", value: 2 }.
 public sealed record SetParamRequest(string Id, string Name, double Value);
+
+/// Set a primitive's SDF.Color ("#RRGGBB"). Preview = live picker tick (no undo); the next non-preview one ends the gesture as one undo step.
+public sealed record SetColorRequest(string Id, string Color, bool Preview = false);
 
 /// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);

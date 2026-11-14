@@ -51,6 +51,7 @@ public class FSphereCommand : Command
 
         var attributes = doc.CreateDefaultAttributes();
         WriteSdf(attributes, frame, radius, doc.ModelUnitSystem);
+        SdfUserText.WriteDefaultColor(attributes);
 
         if (doc.Objects.AddBrep(brep, attributes) == Guid.Empty)
         {

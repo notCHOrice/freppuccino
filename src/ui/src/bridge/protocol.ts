@@ -34,6 +34,8 @@ export interface SceneNode {
   ref?: Id
   /** deform: ref deleted or no longer a line / box (child drawn unwarped) */
   refMissing?: boolean
+  /** primitive: SDF.Color "#RRGGBB" used by the viewport shader (white if the object has none) */
+  color?: string
 }
 
 export interface UiSettings {
@@ -67,6 +69,8 @@ export type UiMessage =
   | { type: 'runCommand'; command: AllowedCommand }
   /** STUB on the host */
   | { type: 'setParam'; id: Id; name: string; value: number }
+  /** Writes SDF.Color ("#RRGGBB") on a primitive; preview as setOperation (one undo step per gesture). */
+  | { type: 'setColor'; id: Id; color: string; preview?: boolean }
   /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
   /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step. */
