@@ -19,7 +19,31 @@
     <!-- native binaries only; P/Invokes are ours (Shaders/) -->
     <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
     <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
+    <!-- Side panel: compile against the WebView2 Core API only; Rhino 9 ships the runtime assemblies (same version). -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.1938.49" IncludeAssets="compile" PrivateAssets="all" />
   </ItemGroup>
+
+  <!--
+    Side panel UI (src/ui: React + Vite + shadcn). `npm run build` writes src/ui/dist, which is copied to $(OutDir)ui
+    and served by Ui/WebViewHost.cs. Built automatically for Release, or when dist is missing; otherwise run
+    `npm run build` yourself (or use the dev server, see docs/side-panel.md). Pass -p:SkipUiBuild=true to skip.
+  -->
+  <PropertyGroup>
+    <UiDir>$(MSBuildProjectDirectory)/../ui/</UiDir>
+    <UiDist>$(UiDir)dist/</UiDist>
+  </PropertyGroup>
+  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true' And ('$(Configuration)' == 'Release' Or !Exists('$(UiDist)index.html'))">
+    <Exec Command="npm ci" WorkingDirectory="$(UiDir)" Condition="!Exists('$(UiDir)node_modules')" ContinueOnError="WarnAndContinue" />
+    <Exec Command="npm run build" WorkingDirectory="$(UiDir)" ContinueOnError="WarnAndContinue" />
+  </Target>
+  <Target Name="CopyUi" AfterTargets="Build">
+    <Warning Condition="!Exists('$(UiDist)index.html')" Text="Side panel UI not built (src/ui/dist missing); the panel will show a placeholder. Run npm install + npm run build in src/ui." />
+    <ItemGroup>
+      <UiFiles Include="$(UiDist)**/*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(OutDir)ui" Condition="'@(UiFiles)' != ''" />
+    <Copy SourceFiles="@(UiFiles)" DestinationFiles="@(UiFiles->'$(OutDir)ui/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
 
   <ItemGroup>
     <EmbeddedResource Include="EmbeddedResources/**/*" />
