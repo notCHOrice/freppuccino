@@ -11,9 +11,9 @@ namespace Freppuccino.Shaders;
 /// so moving primitives/axes or editing blends/warp params never recompiles.
 /// map(): emitted lazily from the roots. A value = (operand, point context): context 0 is p; each warp node opens a new context
 /// (its warped point) for its subtree, so a subtree shared by different warps is emitted once per context, else once.
-/// Root = hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget/warp without its
-/// line or box) are dropped at codegen: union skips them, intersect becomes empty, difference with missing base becomes empty,
-/// warp of a missing child becomes empty.
+/// Root = hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at
+/// codegen: union skips them, intersect becomes empty, difference with missing base becomes empty, warp of a missing child
+/// becomes empty. A warp whose line/box is gone passes its child through unwarped.
 public static class FrepShaderGen
 {
     /// Uniform header = 6 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, warp rows, then blend k's packed 4 per row.
@@ -124,7 +124,8 @@ public static class FrepShaderGen
             var v = $"n{id}{Suffix(c)}";
             if (n.Op.IsWarp())
             {
-                if (!warpRow.TryGetValue(id, out var r) || n.Operands.Length == 0) return null;
+                if (n.Operands.Length == 0) return null;
+                if (!warpRow.TryGetValue(id, out var r)) return Eval(n.Operands[0], c); // line/box deleted: unwarped
                 int cc = contexts++;
                 string p = Point(c), q = Point(cc), l = $"l{cc}";
                 map.Append(n.Op switch

@@ -3,10 +3,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { BrandIcon, NodeIcon } from '@/components/brand-icon'
+import { BrandIcon, NodeIcon, type BrandIconName } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
 import { send, useHost } from '@/bridge/host'
-import type { DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
+import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
@@ -52,16 +52,7 @@ function CreateSection() {
       <Section title="Create">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
           {Object.values(PRIMITIVES).map((p) => (
-            <button
-              key={p.command}
-              type="button"
-              title={p.command}
-              onClick={() => send({ type: 'runCommand', command: p.command })}
-              className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
-            >
-              <BrandIcon name={p.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />
-              <span className="type-small">{p.label}</span>
-            </button>
+            <CommandTile key={p.command} label={p.label} icon={p.icon} command={p.command} />
           ))}
         </div>
         <p className="type-small text-muted-foreground">
@@ -276,10 +267,10 @@ function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) 
 
   const child = node.children?.[0]
   return (
-    <Section title={labels.get(node.id) ?? ''} badge={typeLabel(node)}>
+    <Section title={labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
       {child && <Operand node={child} label={labels.get(child.id)} role="Child" />}
       {node.refMissing && (
-        <p className="type-small text-destructive">{node.op === 'repeat' ? 'Box' : 'Axis line'} deleted; not drawn.</p>
+        <p className="type-small text-muted-foreground">{node.op === 'repeat' ? 'Box' : 'Axis line'} deleted; drawn unwarped.</p>
       )}
       {params.map((p) => (
         <ParamSlider
@@ -305,14 +296,27 @@ function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) 
 function DeformButtons() {
   return (
     <Section title="Deform">
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
         {(Object.keys(DEFORMS) as DeformKind[]).map((kind) => (
-          <Button key={kind} variant="outline" onClick={() => send({ type: 'runCommand', command: DEFORMS[kind].command })}>
-            {DEFORMS[kind].label}
-          </Button>
+          <CommandTile key={kind} {...DEFORMS[kind]} />
         ))}
       </div>
     </Section>
+  )
+}
+
+/** Icon + label button that runs a Rhino command (Create / Deform grids). */
+function CommandTile(props: { label: string; icon: BrandIconName; command: AllowedCommand }) {
+  return (
+    <button
+      type="button"
+      title={props.command}
+      onClick={() => send({ type: 'runCommand', command: props.command })}
+      className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
+    >
+      <BrandIcon name={props.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />
+      <span className="type-small">{props.label}</span>
+    </button>
   )
 }
 

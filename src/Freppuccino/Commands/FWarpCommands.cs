@@ -51,7 +51,7 @@ public class FRepeatCommand : FWarpCommand
 }
 
 /// Wraps one operand (SDF object or node) in a warp node driven by a picked line (Twist/Bend) or box (Repeat).
-/// The reference object stays live: moving it updates the warp; deleting it makes the node a missing leaf.
+/// The reference object stays live: moving it updates the warp; deleting it leaves the child unwarped.
 public abstract class FWarpCommand : FrepNodeCommand
 {
     protected abstract FrepOp Op { get; }

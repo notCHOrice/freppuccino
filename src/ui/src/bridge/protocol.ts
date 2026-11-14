@@ -32,7 +32,7 @@ export interface SceneNode {
   missing?: boolean
   /** deform: Rhino id of its axis line / box (deform params are in `params`: twist angle; bend angle, direction; repeat x, y, z) */
   ref?: Id
-  /** deform: ref deleted or no longer a line / box (node renders as missing) */
+  /** deform: ref deleted or no longer a line / box (child drawn unwarped) */
   refMissing?: boolean
 }
 

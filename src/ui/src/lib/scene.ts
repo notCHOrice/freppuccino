@@ -31,10 +31,10 @@ export const OPERATIONS: Record<OperationKind, { label: string; icon: BrandIconN
 }
 
 /** Commands take the selected object / node, then ask for the line / box. Angles in degrees. */
-export const DEFORMS: Record<DeformKind, { label: string; command: AllowedCommand; params: Record<string, string> }> = {
-  twist: { label: 'Twist', command: 'FTwist', params: { angle: 'Angle' } },
-  bend: { label: 'Bend', command: 'FBend', params: { angle: 'Angle', direction: 'Direction' } },
-  repeat: { label: 'Repeat', command: 'FRepeat', params: { x: 'Spacing X', y: 'Spacing Y', z: 'Spacing Z' } },
+export const DEFORMS: Record<DeformKind, { label: string; icon: BrandIconName; command: AllowedCommand; params: Record<string, string> }> = {
+  twist: { label: 'Twist', icon: 'twist', command: 'FTwist', params: { angle: 'Angle' } },
+  bend: { label: 'Bend', icon: 'bend', command: 'FBend', params: { angle: 'Angle', direction: 'Direction' } },
+  repeat: { label: 'Repeat', icon: 'repeat', command: 'FRepeat', params: { x: 'Spacing X', y: 'Spacing Y', z: 'Spacing Z' } },
 }
 
 export function isDeform(op: SceneNode['op']): op is DeformKind {
@@ -42,7 +42,7 @@ export function isDeform(op: SceneNode['op']): op is DeformKind {
 }
 
 export function nodeIconName(node: SceneNode): BrandIconName | undefined {
-  if (node.kind === 'operation') return node.op && !isDeform(node.op) ? OPERATIONS[node.op].icon : undefined
+  if (node.kind === 'operation') return !node.op ? undefined : isDeform(node.op) ? DEFORMS[node.op].icon : OPERATIONS[node.op].icon
   return node.sdfType ? PRIMITIVES[node.sdfType]?.icon : undefined
 }
 
