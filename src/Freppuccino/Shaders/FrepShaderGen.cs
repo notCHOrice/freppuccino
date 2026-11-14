@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Text;
 using Freppuccino.Csg;
 using Freppuccino.Meshing;
@@ -8,16 +9,19 @@ using Rhino.Geometry;
 namespace Freppuccino.Shaders;
 
 /// Runtime-generated SDF scene from the CSG DAG, raymarched on a fullscreen triangle.
-/// Structure (prim kinds, tree shape) is baked into the source; parameters (camera, prims, warp frames, per-node blend k) are uniforms,
-/// so moving primitives/axes or editing blends/warp params never recompiles.
+/// Structure (prim kinds, tree shape) is baked into the source; parameters (camera, prims, colors, warp frames, per-node blend k)
+/// are uniforms, so moving primitives/axes or editing blends/warp params/colors never recompiles.
 /// map(): emitted lazily from the roots. A value = (operand, point context): context 0 is p; each warp node opens a new context
 /// (its warped point) for its subtree, so a subtree shared by different warps is emitted once per context, else once.
 /// Root = hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at
 /// codegen: union skips them, intersect becomes empty, difference with missing base becomes empty, warp of a missing child
 /// becomes empty. A warp whose line/box is gone passes its child through unwarped.
+/// sceneColor(): the same DAG over vec4(rgb, d), evaluated once at the hit point. Union/intersect blend operand colors with
+/// the smin/smax weight (a smooth union's fillet fades between them); difference keeps the base's color; warps keep the child's.
 public static class FrepShaderGen
 {
-    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, warp rows, then blend k's packed 4 per row.
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, prim colors packed 4 per row,
+    /// warp rows, then blend k's packed 4 per row.
     const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
@@ -26,9 +30,14 @@ public static class FrepShaderGen
     /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
     static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
-    /// Rows left for prims once every node's k / warp rows have a slot.
+    /// Rows holding the colors of <paramref name="prims"/> primitives (one packed 0xRRGGBB float each, 4 per row).
+    public static int ColorRows(int prims) => (prims + 3) / 4;
+    /// Rows left for prims (geometry + color rows) once every node's k / warp rows have a slot.
     public static int PrimRowBudget(FrepTree tree) =>
         MaxDataRows - KRows(tree.Nodes.Count(n => !n.Op.IsWarp())) - tree.Nodes.Sum(n => n.Hidden ? 0 : WarpRows(n.Op));
+
+    /// 0xRRGGBB as a float: exact, since float32 holds every integer below 2^24. Unpacked by unpackColor() in the shader.
+    static double PackColor(Color c) => (c.R << 16) | (c.G << 8) | c.B;
 
     /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
     /// A uniform, so changing it never recompiles.
@@ -80,6 +89,9 @@ public static class FrepShaderGen
             primRow[i] = row;
             row += Rows(prims[i].Kind);
         }
+        // Prim colors right after the prim rows.
+        int cBase = row;
+        row += ColorRows(prims.Count);
 
         // Slots are assigned up front (in tree order), so rows are fixed before lazy emission.
         var warpRow = new Dictionary<int, int>();
@@ -101,7 +113,10 @@ public static class FrepShaderGen
                 ks.Add(n.K);
             }
 
+        // map: float distances. color: the same DAG over vec4(rgb, d) (same variable names), so the shaded color follows the blend.
         var map = new StringBuilder();
+        var color = new StringBuilder();
+        void Both(string line) { map.Append(line); color.Append(line); }
         var memo = new Dictionary<(FrepOperand, int), string?>();
         int contexts = 1;
         static string Suffix(int c) => c == 0 ? "" : $"_{c}";
@@ -119,7 +134,9 @@ public static class FrepShaderGen
         {
             if (!index.TryGetValue(id, out var i)) return null;
             var v = $"p{i}{Suffix(c)}";
-            map.Append($"    float {v} = {Term(prims[i].Kind, primRow[i], Point(c))};\n");
+            var term = Term(prims[i].Kind, primRow[i], Point(c));
+            map.Append($"    float {v} = {term};\n");
+            color.Append($"    vec4 {v} = vec4(unpackColor(u.data[{cBase + i / 4}].{"xyzw"[i % 4]}), {term});\n");
             return v;
         }
 
@@ -133,15 +150,16 @@ public static class FrepShaderGen
                 if (!warpRow.TryGetValue(id, out var r)) return Eval(n.Operands[0], c); // line/box deleted: unwarped
                 int cc = contexts++;
                 string p = Point(c), q = Point(cc), l = $"l{cc}";
-                map.Append(n.Op switch
+                Both(n.Op switch
                 {
                     FrepOp.Twist => $"    float {l}; vec3 {q} = opTwist({p}, {Row(r)}, {Row(r + 1)}, {l});\n",
                     FrepOp.Bend => $"    float {l}; vec3 {q} = opBend({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {l});\n",
                     _ => $"    float {l} = 1.0; vec3 {q} = opRepeat({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {Row(r + 3)}, {Row(r + 4)});\n",
                 });
                 if (Eval(n.Operands[0], cc) is not { } child) return null;
-                // Twist/bend stretch space; dividing by the local Lipschitz bound keeps steps conservative.
+                // Twist/bend stretch space; dividing by the local Lipschitz bound keeps steps conservative. Color = child's.
                 map.Append($"    float {v} = {child} / {l};\n");
+                color.Append($"    vec4 {v} = vec4({child}.rgb, {child}.w / {l});\n");
                 return v;
             }
 
@@ -156,13 +174,22 @@ public static class FrepShaderGen
             int slot = kSlot[id];
             var k = $"u.data[{kBase + slot / 4}].{"xyzw"[slot % 4]}";
             map.Append($"    float {v} = {live[0]};\n");
+            color.Append($"    vec4 {v} = {live[0]};\n");
             foreach (var t in live.Skip(1))
+            {
                 map.Append(n.Op switch
                 {
                     FrepOp.Union => $"    {v} = smin({v}, {t}, {k});\n",
                     FrepOp.Intersect => $"    {v} = smax({v}, {t}, {k});\n",
                     _ => $"    {v} = smax({v}, -{t}, {k});\n",
                 });
+                color.Append(n.Op switch
+                {
+                    FrepOp.Union => $"    {v} = cmin({v}, {t}, {k});\n",
+                    FrepOp.Intersect => $"    {v} = cmax({v}, {t}, {k});\n",
+                    _ => $"    {v} = csub({v}, {t}, {k});\n",
+                });
+            }
             return v;
         }
 
@@ -175,16 +202,21 @@ public static class FrepShaderGen
         if (roots.Count == 0) return (null, ks, warps);
 
         map.Append($"    float d = {roots[0]};\n");
-        foreach (var r in roots.Skip(1)) map.Append($"    d = min(d, {r});\n");
+        color.Append($"    vec4 c = {roots[0]};\n");
+        foreach (var r in roots.Skip(1))
+        {
+            map.Append($"    d = min(d, {r});\n");
+            color.Append($"    c = cmin(c, {r}, 0.0);\n");
+        }
 
         int dataRows = kBase + KRows(ks.Count);
-        var key = dataRows + "\n" + map;
+        var key = dataRows + "\n" + map + "\n" + color;
         if (!cache.TryGetValue(key, out var src))
-            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString()));
+            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString(), color.ToString()));
         return (src, ks, warps);
     }
 
-    static string Fragment(int dataRows, string map) => $$"""
+    static string Fragment(int dataRows, string map, string color) => $$"""
         #version 450
         layout(location = 0) in vec2 vNdc;
         layout(location = 0) out vec4 outColor;
@@ -197,7 +229,8 @@ public static class FrepShaderGen
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
             vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
-            // prims, then warp rows (see opTwist/opBend/opRepeat), then node blend k's (4 per row)
+            // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
+            // then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
             //   box b = P; torus t = P.xy; cylinder h, r; cone h, r1, r2; ellipsoid r = P; pyramid h, s
@@ -214,6 +247,27 @@ public static class FrepShaderGen
             return min(a, b) - h * h * k * 0.25;
         }
         float smax(float a, float b, float k) { return -smin(-a, -b, k); }
+
+        vec3 unpackColor(float packed)
+        {
+            uint c = uint(packed + 0.5);
+            return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
+        }
+        // Same ops over vec4(rgb, d). Colors mix with IQ's smin weight, so they fade across the blend region
+        // (|a - b| < k) and are pure away from it; k = 0 picks the nearer operand's color.
+        vec4 cmin(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w < b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (b.w - a.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smin(a.w, b.w, k));
+        }
+        vec4 cmax(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w > b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (a.w - b.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smax(a.w, b.w, k));
+        }
+        vec4 csub(vec4 a, vec4 b, float k) { return vec4(a.rgb, smax(a.w, -b.w, k)); } // cut faces keep the base's color
         float dot2(vec2 v) { return dot(v, v); }
         vec3 toLocal(vec3 p, vec4 o, vec4 x, vec4 y)
         {
@@ -332,7 +386,11 @@ public static class FrepShaderGen
         {
         {{map}}    return d;
         }
-
+        // Only evaluated once per hit pixel, so the hot march loop stays float-only.
+        vec3 sceneColor(vec3 p)
+        {
+        {{color}}    return c.rgb;
+        }
 
         void main()
         {
@@ -379,7 +437,8 @@ public static class FrepShaderGen
             const vec2 k = vec2(1.0, -1.0);
             vec3 n = normalize(k.xyy * map(p + k.xyy * eps) + k.yyx * map(p + k.yyx * eps) +
                                k.yxy * map(p + k.yxy * eps) + k.xxx * map(p + k.xxx * eps));
-            outColor = vec4(mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0); // world +Z up: white, -Z down: light grey
+            // Object display color, lit as before: world +Z up = full color, -Z down = GREY x color.
+            outColor = vec4(sceneColor(p) * mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0);
         }
         """;
 
@@ -399,7 +458,7 @@ public static class FrepShaderGen
             .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
-        // Same order as Compile(): prim rows, warp rows, then k's.
+        // Same order as Compile(): prim rows, colors, warp rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
             u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, v.X);
@@ -407,6 +466,10 @@ public static class FrepShaderGen
             u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
              .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, v.Z);
         }
+        var cs = scene.Colors;
+        double C(int i) => i < cs.Count ? PackColor(cs[i]) : 0;
+        for (int i = 0; i < scene.Primitives.Count; i += 4)
+            u.Vec4(C(i), C(i + 1), C(i + 2), C(i + 3));
         foreach (var w in scene.Warps) WarpUniforms(u, w);
         var ks = scene.Ks;
         for (int i = 0; i < ks.Count; i += 4)
