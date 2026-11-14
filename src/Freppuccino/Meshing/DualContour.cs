@@ -17,11 +17,11 @@ namespace Freppuccino.Meshing;
 /// and seams where primitives intersect are only as good as the resolution; triangles can
 /// self-intersect near sharp features.
 ///
-/// Known topology defect: when both cells sharing a four-crossing face route all four crossings through
-/// one sheet (a tunnel on each side), the four quads around that face share one mesh edge, which is then
-/// non-manifold. It shows up where features are about a cell wide (under 1% of random 4-primitive scenes
-/// at resolutions 12-40). Re-pairing the face in one cell alone is not a fix: both cells must agree.
-/// FrepMesh reports NON-MANIFOLD when it happens; raising the resolution usually clears it.
+/// Tunnel faces: when both cells sharing a four-crossing face route all four crossings through one
+/// sheet, the surface passes through that face as two strips joining the same two cell vertices, so
+/// the four polygons around the face would share one mesh edge. <see cref="RepairTunnels"/> subdivides
+/// one strip so each has its own edges. Other non-manifold cases, where features are about a cell
+/// wide, can remain; <see cref="Defects"/> counts them and FrepMesh reports them.
 public static class DualContour
 {
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize);
@@ -228,9 +228,11 @@ public static class DualContour
 
         // 3. Polygons.
         var tris = new List<int>();
-        var octree = new Octree(g, index, vertices, quadrics, tris);
+        var sources = new List<long>(); // per triangle: the finest grid edge its polygon was built around, or -1
+        var octree = new Octree(g, index, vertices, quadrics, tris, sources);
         octree.Build(simplify * h);
         octree.Contour();
+        RepairTunnels(g, vertices, tris, sources);
 
         // Merging leaves the vertices of merged cells unused.
         var remap = new int[vertices.Count];
@@ -247,7 +249,7 @@ public static class DualContour
 
     /// Octree over the grid's cells. A node at level L covers 2^L cells per side; level 0 nodes are the
     /// grid cells themselves. Only merged cells are stored: everything else is derived from the grid.
-    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, List<int> tris)
+    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, List<int> tris, List<long> sources)
     {
         readonly record struct Node(int L, int I, int J, int K)
         {
@@ -537,14 +539,126 @@ public static class DualContour
             if (count < 3) return;
             // Wind so the normal points from inside to outside.
             if (!inside) poly[..count].Reverse();
-            if (count == 3) { tris.Add(poly[0]); tris.Add(poly[1]); tris.Add(poly[2]); return; }
+            long source = length == 1 ? (((long)k * g.Sy + j) * g.Sx + i) * 3 + d : -1;
+            if (count == 3) { tris.Add(poly[0]); tris.Add(poly[1]); tris.Add(poly[2]); sources.Add(source); return; }
             // Split along the diagonal that lies closer to the surface, so a crease running through
             // the quad becomes a triangle edge rather than being cut across.
             int a = poly[0], b = poly[1], c = poly[2], e = poly[3];
             double ac = Math.Abs(g.Field.Value((vertices[a] + vertices[c]) * 0.5)), be = Math.Abs(g.Field.Value((vertices[b] + vertices[e]) * 0.5));
             if (ac <= be) { tris.Add(a); tris.Add(b); tris.Add(c); tris.Add(a); tris.Add(c); tris.Add(e); }
             else { tris.Add(a); tris.Add(b); tris.Add(e); tris.Add(b); tris.Add(c); tris.Add(e); }
+            sources.Add(source);
+            sources.Add(source);
         }
+    }
+
+    /// Fixes mesh edges shared by four triangles that come from the four sides of one grid square
+    /// with alternating corner signs (see the class remarks). The sides pair up at the square's inside
+    /// corners into two strips, and both strips run between the same two vertices u and w. The two
+    /// triangles of one strip are split at a new vertex placed on the surface between them, so that
+    /// strip uses u-m and m-w while the other keeps u-w.
+    static void RepairTunnels(Grid g, List<V3> vertices, List<int> tris, List<long> sources)
+    {
+        var byEdge = new Dictionary<(int, int), List<int>>();
+        for (int t = 0; t < sources.Count; t++)
+            for (int c = 0; c < 3; c++)
+            {
+                int a = tris[3 * t + c], b = tris[3 * t + (c + 1) % 3];
+                var key = a < b ? (a, b) : (b, a);
+                if (!byEdge.TryGetValue(key, out var list)) byEdge[key] = list = [];
+                list.Add(t);
+            }
+
+        var at = new int[3];
+        var lo = new int[3];
+        foreach (var ((u, w), around) in byEdge)
+        {
+            if (around.Count != 4) continue;
+            // The four source edges must be the sides of one grid square: two along each of two axes.
+            int axisA = -1, axisB = -1;
+            bool ok = true;
+            lo[0] = lo[1] = lo[2] = int.MaxValue;
+            foreach (int t in around)
+            {
+                long e = sources[t];
+                if (e < 0) { ok = false; break; }
+                int axis = (int)(e % 3);
+                if (axisA < 0 || axis == axisA) axisA = axis;
+                else if (axisB < 0 || axis == axisB) axisB = axis;
+                else ok = false;
+                Decode(g, e / 3, at);
+                for (int n = 0; n < 3; n++) lo[n] = Math.Min(lo[n], at[n]);
+            }
+            if (!ok || axisB < 0) continue;
+            int normal = 3 - axisA - axisB;
+
+            // Triangle built around the side along `axis` at offset `far` (0 or 1) across the other axis.
+            int Side(int axis, int far)
+            {
+                int other = axis == axisA ? axisB : axisA;
+                foreach (int t in around)
+                {
+                    if (sources[t] < 0 || sources[t] % 3 != axis) continue;
+                    Decode(g, sources[t] / 3, at);
+                    if (at[other] == lo[other] + far && at[axis] == lo[axis] && at[normal] == lo[normal]) return t;
+                }
+                return -1;
+            }
+            bool Inside(int da, int db)
+            {
+                lo.CopyTo(at, 0);
+                at[axisA] += da; at[axisB] += db;
+                return g.In(at[0], at[1], at[2]);
+            }
+            bool c00 = Inside(0, 0), c10 = Inside(1, 0), c11 = Inside(1, 1), c01 = Inside(0, 1);
+            if (c00 == c10 || c10 == c11 || c11 == c01) continue; // not an alternating square
+            // The strip at the inside corner (cornerA, 0): the side along A at B-offset 0 and the side along B at A-offset cornerA.
+            int cornerA = c00 ? 0 : 1;
+            int t1 = Side(axisA, 0), t2 = Side(axisB, cornerA);
+            if (t1 < 0 || t2 < 0 || t1 == t2) continue;
+
+            int Apex(int t)
+            {
+                for (int c = 0; c < 3; c++) { int v = tris[3 * t + c]; if (v != u && v != w) return v; }
+                return -1;
+            }
+            int x = Apex(t1), y = Apex(t2);
+            if (x < 0 || y < 0) continue;
+
+            // Place the new vertex among the strip's four vertices, then walk it onto the surface.
+            var m = (vertices[u] + vertices[w] + vertices[x] + vertices[y]) * 0.25;
+            var start = m;
+            for (int it = 0; it < 4; it++)
+            {
+                var grad = g.Field.Gradient(m, 1e-5 * g.H);
+                double g2 = V3.Dot(grad, grad);
+                if (g2 < 1e-12) break;
+                m -= grad * (g.Field.Value(m) / g2);
+            }
+            if ((m - start).Length > g.H) m = start;
+            int mi = vertices.Count;
+            vertices.Add(m);
+
+            foreach (int t in new[] { t1, t2 })
+            {
+                // (a, b, apex), with a-b the shared edge in this triangle's winding, becomes (a, m, apex) and (m, b, apex).
+                int c = 0;
+                while (tris[3 * t + c] == u || tris[3 * t + c] == w) c++;
+                int apex = tris[3 * t + c], a = tris[3 * t + (c + 1) % 3], b = tris[3 * t + (c + 2) % 3];
+                tris[3 * t] = a; tris[3 * t + 1] = mi; tris[3 * t + 2] = apex;
+                tris.Add(mi); tris.Add(b); tris.Add(apex);
+                sources.Add(-1);
+                sources[t] = -1;
+            }
+        }
+    }
+
+    /// Sample coordinates of a linear sample index.
+    static void Decode(Grid g, long sample, int[] at)
+    {
+        at[0] = (int)(sample % g.Sx);
+        at[1] = (int)(sample / g.Sx % g.Sy);
+        at[2] = (int)(sample / ((long)g.Sx * g.Sy));
     }
 
     // Corner c = (c & 1, (c >> 1) & 1, c >> 2); the 12 cell edges as corner pairs:
