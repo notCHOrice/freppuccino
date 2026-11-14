@@ -27,6 +27,8 @@ public static class FrepShaderGen
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
     public static int Rows(SdKind kind) => kind == SdKind.Sphere ? 1 : 3;
+    /// Placed prims (SdPrimitive.Place) are preceded by <see cref="Placement.ShaderRows"/> rows: P⁻¹ (3 rows) and (s(P), 0, 0, 0).
+    public static int Rows(SdPrimitive p) => Rows(p.Kind) + (p.Place != null ? Placement.ShaderRows : 0);
     /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
     static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
@@ -87,7 +89,7 @@ public static class FrepShaderGen
         {
             index[ids[i]] = i;
             primRow[i] = row;
-            row += Rows(prims[i].Kind);
+            row += Rows(prims[i]);
         }
         // Prim colors right after the prim rows.
         int cBase = row;
@@ -134,7 +136,14 @@ public static class FrepShaderGen
         {
             if (!index.TryGetValue(id, out var i)) return null;
             var v = $"p{i}{Suffix(c)}";
-            var term = Term(prims[i].Kind, primRow[i], Point(c));
+            int r = primRow[i];
+            string term;
+            if (prims[i].Place == null) term = Term(prims[i].Kind, r, Point(c));
+            else
+            {
+                // sd(P⁻¹ p) · s(P); the placement rows come first.
+                term = $"{Term(prims[i].Kind, r + Placement.ShaderRows, $"place({Point(c)}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)})")} * {Row(r + 3)}.x";
+            }
             map.Append($"    float {v} = {term};\n");
             color.Append($"    vec4 {v} = vec4(unpackColor(u.data[{cBase + i / 4}].{"xyzw"[i % 4]}), {term});\n");
             return v;
@@ -269,6 +278,8 @@ public static class FrepShaderGen
         }
         vec4 csub(vec4 a, vec4 b, float k) { return vec4(a.rgb, smax(a.w, -b.w, k)); } // cut faces keep the base's color
         float dot2(vec2 v) { return dot(v, v); }
+        // Affine map by three rows (xyz linear row, w translation): leaf placement inverse P⁻¹.
+        vec3 place(vec3 p, vec4 a, vec4 b, vec4 c) { return vec3(dot(a.xyz, p) + a.w, dot(b.xyz, p) + b.w, dot(c.xyz, p) + c.w); }
         vec3 toLocal(vec3 p, vec4 o, vec4 x, vec4 y)
         {
             vec3 d = p - o.xyz;
@@ -459,8 +470,15 @@ public static class FrepShaderGen
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
         // Same order as Compile(): prim rows, colors, warp rows, then k's.
-        foreach (var (kind, f, v) in scene.Primitives)
+        foreach (var prim in scene.Primitives)
         {
+            var (kind, f, v) = prim;
+            if (prim.Place is { } place)
+            {
+                // Same rows FrepField takes; a singular placement never reaches here (FrepScene drops it).
+                Placement.TryRows(place, out var pr);
+                foreach (var row in pr) u.Vec4(row.X, row.Y, row.Z, row.W);
+            }
             u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, v.X);
             if (kind == SdKind.Sphere) continue;
             u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
@@ -520,6 +538,7 @@ public static class FrepShaderGen
                     var p = scene.Primitives[i];
                     var r = new Vector3d(1, 1, 1) * PrimRadius(p);
                     b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
+                    if (p.Place is { } place) b.Transform(place); // box of the transformed corners
                 }
             }
             else if (tree.Find(o.NodeId) is { Hidden: false } n)
@@ -544,13 +563,19 @@ public static class FrepShaderGen
         // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
         double pad = 0, stretch = 1;
         foreach (var k in scene.Ks) if (k > 0) pad += k;
+        // A placement underestimates distance by its condition number (largest / smallest stretch), likewise.
         foreach (var p in scene.Primitives)
+        {
+            double s = 1;
             if (p.Kind == SdKind.Ellipsoid)
             {
                 double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
                 double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
-                if (lo > 0) stretch = Math.Max(stretch, hi / lo);
+                if (lo > 0) s = hi / lo;
             }
+            if (p.Place is { } place) s *= Placement.Condition(place);
+            stretch = Math.Max(stretch, s);
+        }
         double radius = 0.5 * box.Diagonal.Length + pad * stretch;
         return (box.Center, radius * 1.01 + 1e-6); // margin for float32 rounding
     }

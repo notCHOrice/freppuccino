@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Freppuccino.Commands;
 using Rhino.DocObjects;
 using Rhino.Geometry;
@@ -123,7 +124,7 @@ public static class SdfTransforms
     }
 
     /// <summary>Cyclic Jacobi on a symmetric 3×3 (destroys <paramref name="a"/>). Eigenvalues w, eigenvectors in v's columns.</summary>
-    static void SymmetricEigen(double[,] a, out double[] w, out double[,] v)
+    internal static void SymmetricEigen(double[,] a, out double[] w, out double[,] v)
     {
         v = new double[3, 3] { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
         double scale = Math.Abs(a[0, 0]) + Math.Abs(a[1, 1]) + Math.Abs(a[2, 2]);
@@ -183,6 +184,38 @@ public static class SdfTransforms
             return false;
         }
 
-        return handler(attributes, xform, out reason);
+        // Leaf placement P (Scene.Placement): once P is set, the transform composes into it and the SDF values stay put
+        // (feeding it to the handler would compose in the wrong space). Otherwise the handler first; whatever it can't
+        // represent (shear, non-uniform scale off the frame axes) becomes P instead of being rejected.
+        if (Scene.Placement.TryReadLeaf(attributes, out var place))
+            return TryPlace(attributes, xform * place, out reason);
+        var trial = attributes.Duplicate();
+        if (handler(trial, xform, out reason))
+        {
+            CopySdf(trial, attributes);
+            return true;
+        }
+        return TryPlace(attributes, xform, out reason);
+    }
+
+    static bool TryPlace(ObjectAttributes attributes, Transform place, out string? reason)
+    {
+        if (!Scene.Placement.TryRows(place, out _))
+        {
+            reason = "transform flattens the primitive";
+            return false;
+        }
+        Scene.Placement.WriteLeaf(attributes, place);
+        reason = null;
+        return true;
+    }
+
+    /// Replaces <paramref name="to"/>'s SDF.* keys with <paramref name="from"/>'s (a handler may drop or add keys).
+    static void CopySdf(ObjectAttributes from, ObjectAttributes to)
+    {
+        static IEnumerable<string> Keys(ObjectAttributes a) =>
+            a.GetUserStrings().AllKeys.Where(k => k != null && k.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal)).Select(k => k!).ToList();
+        foreach (var k in Keys(to)) to.DeleteUserString(k);
+        foreach (var k in Keys(from)) to.SetUserString(k, from.GetUserString(k));
     }
 }

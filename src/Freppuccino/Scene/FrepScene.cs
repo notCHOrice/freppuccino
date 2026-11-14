@@ -19,7 +19,11 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
 ///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
-public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
+/// Place: optional general affine placement (see <see cref="Placement"/>); world shape = Place × (Frame, P) shape. Null = identity.
+public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
+{
+    public Transform? Place { get; init; }
+}
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
 /// Extent: child's max distance from the axis (Lipschitz bound clamp). Anchor: child bbox center (Repeat lattice origin).
@@ -51,6 +55,8 @@ public static class FrepScene
     static List<RhinoObject> owners = [];
     // Parallel to scene.Warps: the referenced line/box objects.
     static List<RhinoObject> warpOwners = [];
+    // Parallel to warpOwners: each object's applied root transforms A (Placement.AppliedKey).
+    static List<Transform> warpApplied = [];
     static FrepTree tree = FrepTree.Empty; // the one scene was compiled from
     static uint docSerial;
     static bool dirty = true;
@@ -83,12 +89,15 @@ public static class FrepScene
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
-            reshaped |= moved.Kind != scene.Primitives[i].Kind;
+            reshaped |= Structure(moved) != Structure(scene.Primitives[i]);
         }
         List<SdWarp>? warps = null;
         for (int i = 0; i < warpOwners.Count; i++)
         {
-            if (!warpOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            if (!warpOwners[i].GetDynamicTransform(out var world) || world.IsIdentity) continue;
+            // The drag moves the real object (A × canonical); in canonical space that is A⁻¹ × drag × A.
+            var a = warpApplied[i];
+            var xf = a.TryGetInverse(out var ai) ? ai * world * a : world;
             var w = scene.Warps[i];
             var axis = w.Axis;
             var region = w.Region;
@@ -102,18 +111,34 @@ public static class FrepScene
 
         // A sphere stretched into an ellipsoid changes the shader's structure, so recompile (cached by source, so once
         // per gesture). If the extra rows don't fit, preview those prims unchanged; the commit still converts them.
-        if (prims.Sum(p => FrepShaderGen.Rows(p.Kind)) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
+        if (prims.Sum(FrepShaderGen.Rows) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
         {
             for (int i = 0; i < prims.Count; i++)
-                if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
+                if (Structure(prims[i]) != Structure(scene.Primitives[i])) prims[i] = scene.Primitives[i];
             return next;
         }
         var (program, ks, _) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
         return next with { Program = program, Ks = ks };
     }
 
+    /// What the shader source depends on per primitive (kind, placed or not).
+    static (SdKind, bool) Structure(SdPrimitive p) => (p.Kind, p.Place != null);
+
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
     static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
+    {
+        // Placement rules as in SdfTransforms.TryApply: compose into P once set; else handler, falling back to P.
+        if (p.Place is { } place)
+        {
+            result = p with { Place = xf * place };
+            return Placement.TryRows(xf * place, out _);
+        }
+        if (TryTransformValues(p, xf, out result)) return true;
+        result = p with { Place = xf };
+        return Placement.TryRows(xf, out _);
+    }
+
+    static bool TryTransformValues(SdPrimitive p, Transform xf, out SdPrimitive result)
     {
         result = p;
         var v = p.P;
@@ -177,7 +202,7 @@ public static class FrepScene
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
             if (!TryRead(obj.Attributes, out var prim)) continue;
-            int r = FrepShaderGen.Rows(prim.Kind);
+            int r = FrepShaderGen.Rows(prim);
             // Each prim also takes a color slot (4 per row).
             if (rows + r + FrepShaderGen.ColorRows(prims.Count + 1) > budget) { dropped++; continue; }
             rows += r;
@@ -189,24 +214,32 @@ public static class FrepScene
 
         // Warp reference objects may be hidden (axis lines usually are); deleted = missing.
         var refs = new Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)>();
+        var applied = new Dictionary<int, Transform>();
         foreach (var n in tree.Nodes)
-            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region)) refs[n.Id] = (obj!, axis, region);
+            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region, out var a))
+            {
+                refs[n.Id] = (obj!, axis, region);
+                applied[n.Id] = a;
+            }
 
         var (program, ks, warpIds) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
         var bounds = new Bounds(doc, tree, refs);
         var warps = new List<SdWarp>();
         var newWarpOwners = new List<RhinoObject>();
+        var newWarpApplied = new List<Transform>();
         foreach (var id in warpIds)
         {
             var n = tree.Find(id)!;
             var (obj, axis, region) = refs[id];
             warps.Add(FrepWarpMath.Make(n, axis, region, bounds.Of(n.Operands[0])));
             newWarpOwners.Add(obj);
+            newWarpApplied.Add(applied[id]);
         }
 
         scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree };
         owners = newOwners;
         warpOwners = newWarpOwners;
+        warpApplied = newWarpApplied;
     }
 
     /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
@@ -237,6 +270,17 @@ public static class FrepScene
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
     static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
+    {
+        if (!TryReadValues(a, out prim)) return false;
+        if (Placement.TryReadLeaf(a, out var place))
+        {
+            if (!Placement.TryRows(place, out _)) return false; // singular: degenerate like a zero radius
+            prim = prim with { Place = place };
+        }
+        return true;
+    }
+
+    static bool TryReadValues(ObjectAttributes a, out SdPrimitive prim)
     {
         prim = default;
         switch (SdfUserText.ReadType(a))

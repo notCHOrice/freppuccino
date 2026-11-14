@@ -10,13 +10,27 @@ namespace Freppuccino.Csg;
 public static class FrepWarpMath
 {
     /// Live warp: visible node whose ref is an undeleted line (Twist/Bend) / box (Repeat). Hidden refs count.
-    public static bool TryResolve(RhinoDoc doc, FrepNode n, out RhinoObject? obj, out Line axis, out Box region)
+    /// Axis/region are canonical: the object's geometry with its applied root transforms removed (A⁻¹ × geometry,
+    /// see <see cref="Placement"/>), so a root transform that also moved the real object isn't applied twice.
+    public static bool TryResolve(RhinoDoc doc, FrepNode n, out RhinoObject? obj, out Line axis, out Box region) =>
+        TryResolve(doc, n, out obj, out axis, out region, out _);
+
+    /// <paramref name="applied"/>: the object's A (identity if none).
+    public static bool TryResolve(RhinoDoc doc, FrepNode n, out RhinoObject? obj, out Line axis, out Box region, out Transform applied)
     {
         axis = default;
         region = default;
         obj = null;
+        applied = Transform.Identity;
         if (!n.Op.IsWarp() || n.Hidden || doc.Objects.FindId(n.Ref) is not { IsDeleted: false } o) return false;
-        if (!(n.Op == FrepOp.Repeat ? FrepRefs.TryBox(o.Geometry, out region) : FrepRefs.TryLine(o.Geometry, out axis))) return false;
+        var g = o.Geometry;
+        if (Placement.TryReadApplied(o.Attributes, out var a) && a.TryGetInverse(out var inv))
+        {
+            applied = a;
+            g = g.Duplicate();
+            if (!g.Transform(inv)) return false;
+        }
+        if (!(n.Op == FrepOp.Repeat ? FrepRefs.TryBox(g, out region) : FrepRefs.TryLine(g, out axis))) return false;
         obj = o;
         return true;
     }

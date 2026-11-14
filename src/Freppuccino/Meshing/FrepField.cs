@@ -45,7 +45,8 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 /// roots declared, all primitives are smooth-unioned in order with <see cref="Blend"/>.
 public sealed class FrepField
 {
-    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P);
+    // Place: leaf placement rows (P⁻¹ as three rows, then (s(P), 0, 0, 0)), as in the shader; Fwd: P itself (for bounds).
+    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, V4[]? Place = null, V4[]? Fwd = null);
     // Rows: warp params (null for CSG).
     readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null);
 
@@ -62,11 +63,35 @@ public sealed class FrepField
     public int Count => prims.Count;
 
     /// <paramref name="x"/> and <paramref name="y"/> are unit and perpendicular; Z = X × Y.
-    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p)
+    /// <paramref name="place"/>: optional general affine placement P of the whole primitive, given as the shader's rows
+    /// (Scene.Placement.TryRows: P⁻¹ as three rows, then (s(P), 0, 0, 0)). The field is then sd(P⁻¹ p) · s(P).
+    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V4[]? place = null)
     {
-        prims.Add(new Prim(kind, origin, x, y, V3.Cross(x, y), p));
+        if (place != null && place.Length != 4) throw new ArgumentException("placement needs 4 rows", nameof(place));
+        prims.Add(new Prim(kind, origin, x, y, V3.Cross(x, y), p, place, place == null ? null : Invert(place)));
         return prims.Count - 1;
     }
+
+    static V3 Apply(V4[] rows, V3 p) =>
+        new(V3.Dot(rows[0].Xyz, p) + rows[0].W, V3.Dot(rows[1].Xyz, p) + rows[1].W, V3.Dot(rows[2].Xyz, p) + rows[2].W);
+
+    /// Inverse of the affine map given by three rows (xyz linear, w translation).
+    static V4[] Invert(V4[] m)
+    {
+        V3 a = m[0].Xyz, b = m[1].Xyz, c = m[2].Xyz;
+        // Columns of the inverse linear part are the cross products of the rows over the determinant.
+        V3 i0 = V3.Cross(b, c), i1 = V3.Cross(c, a), i2 = V3.Cross(a, b);
+        double det = V3.Dot(a, i0);
+        if (det == 0) throw new ArgumentException("singular placement");
+        double s = 1 / det;
+        // inv rows: (i0.X, i1.X, i2.X), ...
+        V3 r0 = new(i0.X * s, i1.X * s, i2.X * s), r1 = new(i0.Y * s, i1.Y * s, i2.Y * s), r2 = new(i0.Z * s, i1.Z * s, i2.Z * s);
+        var t = new V3(m[0].W, m[1].W, m[2].W);
+        return [new(r0.X, r0.Y, r0.Z, -V3.Dot(r0, t)), new(r1.X, r1.Y, r1.Z, -V3.Dot(r1, t)), new(r2.X, r2.Y, r2.Z, -V3.Dot(r2, t))];
+    }
+
+    static double PlacedValue(in Prim s, V3 world) =>
+        s.Place is { } w ? PrimValue(s, Apply(w, world)) * w[3].X : PrimValue(s, world);
 
     public int AddSphere(V3 center, double radius) =>
         AddPrimitive(FieldKind.Sphere, center, new V3(1, 0, 0), new V3(0, 1, 0), new V3(radius, 0, 0));
@@ -127,7 +152,7 @@ public sealed class FrepField
     {
         int np = prims.Count, nn = nodes.Count;
         Span<double> v = np + nn <= 256 ? stackalloc double[np + nn] : new double[np + nn];
-        for (int i = 0; i < np; i++) v[i] = PrimValue(prims[i], p);
+        for (int i = 0; i < np; i++) v[i] = PlacedValue(prims[i], p);
         for (int i = 0; i < nn; i++)
         {
             var n = nodes[i];
@@ -163,7 +188,7 @@ public sealed class FrepField
         int slot = ctx + Slot(r);
         double d = memo[slot];
         if (!double.IsNaN(d)) return d;
-        if (!r.IsNode) d = PrimValue(prims[r.Index], p);
+        if (!r.IsNode) d = PlacedValue(prims[r.Index], p);
         else
         {
             var n = nodes[r.Index];
@@ -518,6 +543,20 @@ public sealed class FrepField
 
     /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
     static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
+    {
+        // Placed: {sd(P⁻¹ p) · s <= t} = P × {sd <= t / s}; map the canonical box's corners by P.
+        if (s.Place is not { } w) return CanonicalBounds(s, t);
+        var c = CanonicalBounds(s, t / w[3].X);
+        var box = Empty;
+        for (int i = 0; i < 8; i++)
+        {
+            var p = Apply(s.Fwd!, new V3((i & 1) == 0 ? c.Min.X : c.Max.X, (i & 2) == 0 ? c.Min.Y : c.Max.Y, (i & 4) == 0 ? c.Min.Z : c.Max.Z));
+            box = Join(box, (p, p));
+        }
+        return box;
+    }
+
+    static (V3 Min, V3 Max) CanonicalBounds(in Prim s, double t)
     {
         // Local box: low and high corner. Exact distance fields grow by t in every direction.
         V3 lo, hi;

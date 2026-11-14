@@ -146,7 +146,10 @@ public class FrepMeshCommand : Command
         var index = new Dictionary<Guid, int>();
         for (int i = 0; i < scene.Primitives.Count; i++)
         {
-            var (kind, frame, p) = scene.Primitives[i];
+            var prim = scene.Primitives[i];
+            var (kind, frame, p) = prim;
+            V4[]? place = null;
+            if (prim.Place is { } pl && Placement.TryRows(pl, out var rows)) place = rows;
             var fieldKind = kind switch
             {
                 SdKind.Sphere => FieldKind.Sphere,
@@ -158,7 +161,7 @@ public class FrepMeshCommand : Command
                 SdKind.Pyramid => FieldKind.Pyramid,
                 _ => throw new NotSupportedException($"FrepMesh cannot mesh {kind} yet"),
             };
-            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p));
+            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p), place);
         }
 
         var warps = new Dictionary<int, SdWarp>();
