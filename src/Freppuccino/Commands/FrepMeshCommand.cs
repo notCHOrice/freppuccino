@@ -12,7 +12,9 @@ namespace Freppuccino.Commands;
 
 /// <summary>
 /// Bakes every visible F-rep in the document into one mesh: the same smooth union the Freppuccino
-/// display mode shows (current FrepBlend distance), meshed with <see cref="DualContour"/>.
+/// display mode shows (current FrepBlend distance), meshed with <see cref="DualContour"/>. Resolution sets
+/// the finest cell size; the simplification tolerance merges cells where the surface is flat or gently
+/// curved, so triangle density adapts to the shape.
 /// The F-rep objects are left in place.
 /// </summary>
 [Guid("3f6b1c82-9a4e-4d57-b1c3-7e2a5d9f0c46")]
@@ -22,6 +24,7 @@ public class FrepMeshCommand : Command
 
     // Remembered between runs, like Rhino's own commands.
     static int resolution = 128;
+    static double simplify = 0.03;
 
     public override string EnglishName => "FrepMesh";
 
@@ -36,13 +39,15 @@ public class FrepMeshCommand : Command
 
         var rc = RhinoGet.GetInteger("Mesh resolution (cells along the longest side)", true, ref resolution, MinResolution, MaxResolution);
         if (rc != Result.Success) return rc;
+        rc = RhinoGet.GetNumber("Simplification tolerance in cells (0 = uniform density)", true, ref simplify, 0, 1);
+        if (rc != Result.Success) return rc;
 
         var field = new FrepField { Blend = FrepSettings.Blend };
         foreach (var (frame, radius) in scene.Spheres) field.AddSphere(V(frame.Origin), radius);
         foreach (var (frame, half) in scene.Boxes) field.AddBox(V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(half));
 
         var watch = Stopwatch.StartNew();
-        var result = DualContour.Mesh(field, resolution);
+        var result = DualContour.Mesh(field, resolution, simplify);
         if (result.Triangles.Count == 0)
         {
             RhinoApp.WriteLine("FrepMesh: the F-reps produced no surface at this resolution.");
