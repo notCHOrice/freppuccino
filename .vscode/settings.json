@@ -1,0 +1,8 @@
+{
+  // C# Dev Kit Hot Reload: apply code edits to the running Rhino session while debugging.
+  "csharp.experimental.debug.hotReload": true,
+  // Push changes automatically on save (otherwise use the Hot Reload button in the debug toolbar).
+  "csharp.debug.hotReloadOnSave": true,
+  // Show what was applied (or why an edit was rejected) in the "C# Hot Reload" output channel.
+  "csharp.debug.hotReloadVerbosity": "detailed"
+}

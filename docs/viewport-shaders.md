@@ -18,10 +18,15 @@ SPIR-V (per stage)
 
 Conventions every generated shader follows:
 - Clip space = **Metal/D3D convention** (y up, z ∈ [0,1]). No flips are inserted by the cross-compiler, so both targets agree.
-- Vertex stage takes **no vertex buffers** for now; geometry is derived from `gl_VertexIndex` (fullscreen triangle / hardcoded tri). Data will come in later via one uniform/storage buffer at a fixed binding.
+- Vertex stage takes **no vertex buffers**; geometry is derived from `gl_VertexIndex`. `ShaderSource.VertexCount` (default 3) = triangle-list vertex count.
+- Per-draw data: at most one `layout(std140, set=0, binding=0) uniform` block, vec4/mat4 members only, ≤ 4 KB (`Uniforms`). Bound to both stages: Metal `setVertexBytes`/`setFragmentBytes` at `[[buffer(30)]]` (remapped by SPIRV-Cross; high index so Rhino's cached low buffer slots aren't clobbered), D3D11 4 KB default-usage cbuffer at `b0` (`UpdateSubresource`; Manual mode saves/restores VS/PS CB slot 0).
 - Fragment output: `layout(location=0) out vec4`.
 
-Initial program (`Shaders/TriangleShader.cs`):
+Programs:
+- `Shaders/FrepShaderGen.cs`: scene. N spheres (doc Breps, `Scene/SphereScene.cs`) smooth-unioned (IQ quadratic smin, k = `FrepBlend` command, default 0.5 model units), raymarched on a fullscreen triangle. N is baked into the source (one cached compile per N); camera/frustum/spheres/k are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Cap 251 spheres (4 KB).
+- `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground.
+
+Original slice program (removed):
 
 ```glsl
 // vertex
@@ -45,8 +50,10 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ```
 FreppuccinoPlugin (AtStartup)
   OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept)
-ShaderConduit.PostDrawObjects(e) if mode active: GpuBackends.For(e.Display)?.Draw(...) → RhinoStateReset.Apply(dp)
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(ShadedId), HighlightSurfaces=false + UpdateDisplayMode (recreated if an old wireframe copy exists)
+ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if N>0; Draw(pill) → RhinoStateReset.Apply(dp) once
+ShaderConduit.DrawForeground(e)  badge text
+Command "FrepBlend"               set smooth-union k (session only)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

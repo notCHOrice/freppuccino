@@ -1,6 +1,7 @@
 using Freppuccino.Display;
 using Freppuccino.Gpu;
 using Freppuccino.Sdf;
+using Freppuccino.Scene;
 using Freppuccino.Shaders;
 using Rhino.PlugIns;
 
@@ -21,6 +22,7 @@ public class FreppuccinoPlugin : PlugIn
         FreppuccinoDisplayMode.Ensure();
         DevAutostart.Install();
         SdfTransformWatcher.Install();
+        SphereScene.Install();
         Conduit = new ShaderConduit { Enabled = true };
         return LoadReturnCode.Success;
     }
