@@ -20,9 +20,21 @@ public static class SdfTransforms
     {
         [FBoxCommand.SdfType] = FBoxCommand.TransformSdf,
         [FSphereCommand.SdfType] = FSphereCommand.TransformSdf,
+        [FTorusCommand.SdfType] = FTorusCommand.TransformSdf,
+        [FCylinderCommand.SdfType] = FCylinderCommand.TransformSdf,
+        [FConeCommand.SdfType] = FConeCommand.TransformSdf,
+        [FEllipsoidCommand.SdfType] = FEllipsoidCommand.TransformSdf,
+        [FPyramidCommand.SdfType] = FPyramidCommand.TransformSdf,
     };
 
     public static void Register(string sdfType, SdfTransformHandler handler) => Handlers[sdfType] = handler;
+
+    /// <summary>True if two scale factors match within a relative tolerance (e.g. a round cross-section stays round).</summary>
+    public static bool NearlyEqual(double a, double b)
+    {
+        const double uniformTolerance = 1e-6;
+        return Math.Abs(a - b) <= uniformTolerance * Math.Max(Math.Abs(a), Math.Abs(b));
+    }
 
     /// <summary>
     /// Moves a local frame by <paramref name="xform"/>. <paramref name="scale"/> is how much each local axis
