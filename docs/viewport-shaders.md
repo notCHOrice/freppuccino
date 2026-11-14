@@ -23,8 +23,8 @@ Conventions every generated shader follows:
 - Fragment output: `layout(location=0) out vec4`.
 
 Programs:
-- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/k's are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. 4 KB uniform cap (prims past it dropped).
-- `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground.
+- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/k's are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Silhouette inset by `FrepShaderGen.SilhouetteInsetPx` (1 px, `params.x`: SDF + inset × pixel footprint at t) so Rhino's wires drawn underneath stay visible around the shading. 4 KB uniform cap (prims past it dropped).
+- `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground. Placed top-left just below Rhino's viewport title (`TitleClearance`) so view names don't overlap it.
 
 Original slice program (removed):
 
@@ -50,7 +50,7 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ```
 FreppuccinoPlugin (AtStartup)
   OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept; recreated if a shaded copy exists)
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(GhostedId) + 80% transparency + UpdateDisplayMode   (Ghosted underlay; recreated if missing or not ghosted at 80%, e.g. an older Wireframe copy)
 ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
 Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FrepPanel lists the tree (edit op/k, delete, click node = pick it)

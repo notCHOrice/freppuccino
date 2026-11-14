@@ -23,6 +23,10 @@ public static class FrepShaderGen
     /// Rows left for prims once every node's k has a slot.
     public static int PrimRowBudget(int nodes) => MaxDataRows - KRows(nodes);
 
+    /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
+    /// A uniform, so changing it never recompiles.
+    public const double SilhouetteInsetPx = 1.0;
+
     static readonly Dictionary<string, ShaderSource> cache = [];
 
     /// GLSL call evaluating one primitive whose rows start at <paramref name="row"/>; q is the point in its local frame.
@@ -137,7 +141,7 @@ public static class FrepShaderGen
             vec4 camY;       // xyz unit up
             vec4 camZ;       // xyz unit view direction; w = near
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
-            vec4 params;     // x unused, y = eps per unit t, z = eps const, w = far
+            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w = far
             // prims, then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
@@ -240,8 +244,9 @@ public static class FrepShaderGen
             bool hit = false;
             for (int i = 0; i < 256; i++)
             {
-                eps = u.params.z + u.params.y * t;
-                float d = map(ro + rd * t);
+                eps = u.params.z + u.params.y * t; // half-pixel footprint at t
+                // Shrink the surface by params.x pixels so Rhino's wires stay visible around the shading.
+                float d = map(ro + rd * t) + u.params.x * 2.0 * eps;
                 if (d < eps) { hit = true; break; }
                 t += d;
                 if (t > tMax) break;
@@ -268,7 +273,7 @@ public static class FrepShaderGen
             .Vec4(vp.CameraY.X, vp.CameraY.Y, vp.CameraY.Z)
             .Vec4(dir.X, dir.Y, dir.Z, near)
             .Vec4(l, r, b, t)
-            .Vec4(0, persp ? slope / near : 0, persp ? 0 : slope, far);
+            .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, far);
         // Same order as Compile(): prim rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
