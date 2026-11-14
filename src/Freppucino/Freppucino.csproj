@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Version>0.1.0</Version>
     <Title>Freppucino</Title>
@@ -15,6 +16,14 @@
 
   <ItemGroup>
     <PackageReference Include="RhinoCommon" Version="9.0.26300.9401" ExcludeAssets="runtime" PrivateAssets="all" />
+    <!-- native binaries only; P/Invokes are ours (Shaders/) -->
+    <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
+  </ItemGroup>
+
+  <!-- THROWAWAY hack kept for reference, not compiled -->
+  <ItemGroup>
+    <Compile Remove="Hack/**" />
   </ItemGroup>
 
   <!-- `dotnet run` launches Rhino 9 w/ RHINO_PACKAGE_DIRS pointing at the build output, so the .rhp auto-loads. -->

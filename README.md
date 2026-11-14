@@ -7,4 +7,4 @@ dotnet build                               # -> src/Freppucino/bin/Debug/net10.0
 dotnet run --project src/Freppucino        # builds + launches Rhino 9 with the plugin auto-loaded
 ```
 
-Command: `Freppucino` (adds a sphere at a picked point).
+Command: `Freppucino` (switches active viewport to the Freppucino shader display mode). Design: `docs/viewport-shaders.md`; Windows validation: `docs/windows-validation.md`.

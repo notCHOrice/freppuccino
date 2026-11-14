@@ -1,8 +1,7 @@
 using System.Runtime.InteropServices;
 using Rhino;
 using Rhino.Commands;
-using Rhino.Geometry;
-using Rhino.Input;
+using Rhino.Display;
 
 namespace Freppucino.Commands;
 
@@ -13,12 +12,11 @@ public class FreppucinoCommand : Command
 
     protected override Result RunCommand(RhinoDoc doc, RunMode mode)
     {
-        var rc = RhinoGet.GetPoint("Center", false, out Point3d center);
-        if (rc != Result.Success) return rc;
-
-        doc.Objects.AddSphere(new Sphere(center, 1.0));
-        doc.Views.Redraw();
-        RhinoApp.WriteLine("Freppucino: added sphere.");
+        var view = doc.Views.ActiveView;
+        var dm = DisplayModeDescription.GetDisplayMode(Display.FreppucinoDisplayMode.Id);
+        if (view == null || dm == null) return Result.Failure;
+        view.ActiveViewport.DisplayMode = dm;
+        view.Redraw();
         return Result.Success;
     }
 }
