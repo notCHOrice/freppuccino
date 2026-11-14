@@ -128,8 +128,8 @@ public class FPyramidCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame, scales h along the axis and s across it. Works for move, rotate, mirror, uniform scale
-    /// and scale along the axis. A non-square base can't be represented by sdPyramid, so that is rejected.
+    /// Moves the frame and scales h and s when the base stays square.
+    /// A rectangular or sheared pyramid is stored as SDF.Linear.*; h and s stay in the original frame.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -138,14 +138,21 @@ public class FPyramidCommand : Command
             reason = "missing or unreadable SDF.Frame.* / SDF.h / SDF.s";
             return false;
         }
+        return SdfTransforms.CommitAffine(attributes, frame, xform, scale =>
+        {
+            if (!TryAbsorbScale(h, s, scale, out var nh, out var ns)) return false;
+            SdfUserText.WriteFloat(attributes, "h", nh);
+            SdfUserText.WriteFloat(attributes, "s", ns);
+            return true;
+        }, out reason);
+    }
 
-        if (!TryTransform(frame, h, s, xform, out frame, out h, out s, out reason))
-            return false;
-
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteFloat(attributes, "h", h);
-        SdfUserText.WriteFloat(attributes, "s", s);
-        return true;
+    /// <summary>Axis scale goes into h, the shared base scale into s. Unequal X/Z scales stay in the linear map.</summary>
+    public static bool TryAbsorbScale(double h, double s, Vector3d scale, out double newH, out double newS)
+    {
+        newH = h * scale.Y;
+        newS = s * (scale.X + scale.Z) * 0.5;
+        return SdfTransforms.NearlyEqual(scale.X, scale.Z) && newH > 0 && newS > 0;
     }
 
     /// <summary>Reads the frame (origin = base center, Y = toward apex), height h and base side s.</summary>

@@ -57,7 +57,9 @@ public sealed record SceneNode(
     IReadOnlyList<SceneNode>? Children = null,
     bool? Missing = null,
     string? Ref = null,
-    bool? RefMissing = null);
+    bool? RefMissing = null,
+    /// <summary>Primitive carries SDF.Linear.*: a scale or shear the parameters cannot express.</summary>
+    bool? Custom = null);
 
 public sealed record UiSettings(string Units);
 

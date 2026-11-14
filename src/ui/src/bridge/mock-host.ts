@@ -39,6 +39,7 @@ export function createMockHost(): Transport {
     prim('sdCappedCone', { h: 1.5, r1: 1.2, r2: 0.3 }),
     opNode('subtract', 0.25, [prim('sdBox', { 'b.x': 3, 'b.y': 3, 'b.z': 1 }), holes]),
     prim('sdPyramid', { h: 2, s: 2.5 }),
+    { ...prim('sdCappedCylinder', { h: 1, r: 0.5 }), custom: true },
   ]
   let selection: string[] = []
 

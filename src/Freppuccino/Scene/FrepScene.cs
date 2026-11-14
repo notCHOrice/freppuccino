@@ -19,7 +19,12 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
 ///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
-public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
+/// Basis, when set, is the canonical-to-world map (SDF.Linear.*). The frame axes stay the parameter frame;
+/// the parameters are not pre-scaled by that map.
+public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
+{
+    public SdfBasis? Basis { get; init; }
+}
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
 /// Extent: child's max distance from the axis (Lipschitz bound clamp). Anchor: child bbox center (Repeat lattice origin).
@@ -79,7 +84,7 @@ public static class FrepScene
         for (int i = 0; i < owners.Count; i++)
         {
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            // A transform the SDF type can't represent (e.g. shearing a box) previews at the original position.
+            // A transform that flattens the primitive previews at the original position.
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
@@ -132,26 +137,13 @@ public static class FrepScene
                 result = new SdPrimitive(SdKind.Ellipsoid, f, er);
                 return true;
             case SdKind.Box:
-                ok = FBoxCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
-                break;
             case SdKind.Torus:
-                ok = FTorusCommand.TryTransform(p.Frame, new Vector2d(v.X, v.Y), xf, out f, out var t, out _);
-                v = new Vector3d(t.X, t.Y, 0);
-                break;
             case SdKind.Cylinder:
-                ok = FCylinderCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ch, out var cr, out _);
-                v = new Vector3d(ch, cr, 0);
-                break;
             case SdKind.Cone:
-                ok = FConeCommand.TryTransform(p.Frame, v.X, v.Y, v.Z, xf, out f, out var kh, out var r1, out var r2, out _);
-                v = new Vector3d(kh, r1, r2);
-                break;
+            case SdKind.Pyramid:
+                return TryTransformAffine(p, xf, out result);
             case SdKind.Ellipsoid:
                 ok = FEllipsoidCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
-                break;
-            case SdKind.Pyramid:
-                ok = FPyramidCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ph, out var ps, out _);
-                v = new Vector3d(ph, ps, 0);
                 break;
             default:
                 return false;
@@ -159,6 +151,48 @@ public static class FrepScene
         if (!ok) return false;
         result = p with { Frame = f, P = v };
         return true;
+    }
+
+    /// Rotate/scale along the parameter axes folds into P. Anything else is carried on <see cref="SdPrimitive.Basis"/>.
+    static bool TryTransformAffine(SdPrimitive p, Transform xf, out SdPrimitive result)
+    {
+        result = p;
+        var current = p.Basis ?? SdfBasis.FromPlane(p.Frame);
+        if (!SdfTransforms.TryAdvance(p.Frame, current, xf, out var origin, out var factored, out var next, out var scale, out var rigid, out _))
+            return false;
+        if (rigid && TryAbsorb(p.Kind, p.P, scale, out var np))
+        {
+            result = new SdPrimitive(p.Kind, factored, np);
+            return true;
+        }
+        var frozen = new Plane(origin, p.Frame.XAxis, p.Frame.YAxis);
+        result = new SdPrimitive(p.Kind, frozen, p.P) { Basis = next.Matches(frozen) ? null : next };
+        return true;
+    }
+
+    static bool TryAbsorb(SdKind kind, Vector3d p, Vector3d scale, out Vector3d np)
+    {
+        np = p;
+        switch (kind)
+        {
+            case SdKind.Box when FBoxCommand.TryAbsorbScale(p, scale, out var b):
+                np = b;
+                return true;
+            case SdKind.Torus when FTorusCommand.TryAbsorbScale(new Vector2d(p.X, p.Y), scale, out var t):
+                np = new Vector3d(t.X, t.Y, 0);
+                return true;
+            case SdKind.Cylinder when FCylinderCommand.TryAbsorbScale(p.X, p.Y, scale, out var h, out var r):
+                np = new Vector3d(h, r, 0);
+                return true;
+            case SdKind.Cone when FConeCommand.TryAbsorbScale(p.X, p.Y, p.Z, scale, out var ch, out var r1, out var r2):
+                np = new Vector3d(ch, r1, r2);
+                return true;
+            case SdKind.Pyramid when FPyramidCommand.TryAbsorbScale(p.X, p.Y, scale, out var ph, out var ps):
+                np = new Vector3d(ph, ps, 0);
+                return true;
+            default:
+                return false;
+        }
     }
 
     static void Rebuild(RhinoDoc doc)
@@ -252,30 +286,38 @@ public static class FrepScene
         switch (SdfUserText.ReadType(a))
         {
             case FSphereCommand.SdfType when FSphereCommand.TryRead(a, out var f, out var s) && s > 0:
-                prim = new(SdKind.Sphere, f, new Vector3d(s, 0, 0));
+                prim = Mapped(a, SdKind.Sphere, f, new Vector3d(s, 0, 0));
                 return true;
             case FBoxCommand.SdfType when FBoxCommand.TryRead(a, out var f, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
-                prim = new(SdKind.Box, f, b);
+                prim = Mapped(a, SdKind.Box, f, b);
                 return true;
             case FTorusCommand.SdfType when FTorusCommand.TryRead(a, out var f, out var t) && t.X > 0 && t.Y > 0:
-                prim = new(SdKind.Torus, f, new Vector3d(t.X, t.Y, 0));
+                prim = Mapped(a, SdKind.Torus, f, new Vector3d(t.X, t.Y, 0));
                 return true;
             case FCylinderCommand.SdfType when FCylinderCommand.TryRead(a, out var f, out var h, out var r) && h > 0 && r > 0:
-                prim = new(SdKind.Cylinder, f, new Vector3d(h, r, 0));
+                prim = Mapped(a, SdKind.Cylinder, f, new Vector3d(h, r, 0));
                 return true;
             case FConeCommand.SdfType when FConeCommand.TryRead(a, out var f, out var h, out var r1, out var r2) &&
                                            h > 0 && r1 >= 0 && r2 >= 0 && r1 + r2 > 0:
-                prim = new(SdKind.Cone, f, new Vector3d(h, r1, r2));
+                prim = Mapped(a, SdKind.Cone, f, new Vector3d(h, r1, r2));
                 return true;
             case FEllipsoidCommand.SdfType when FEllipsoidCommand.TryRead(a, out var f, out var r) && r.X > 0 && r.Y > 0 && r.Z > 0:
-                prim = new(SdKind.Ellipsoid, f, r);
+                prim = Mapped(a, SdKind.Ellipsoid, f, r);
                 return true;
             case FPyramidCommand.SdfType when FPyramidCommand.TryRead(a, out var f, out var h, out var s) && h > 0 && s > 0:
-                prim = new(SdKind.Pyramid, f, new Vector3d(h, s, 0));
+                prim = Mapped(a, SdKind.Pyramid, f, new Vector3d(h, s, 0));
                 return true;
             default:
                 return false;
         }
+    }
+
+    static SdPrimitive Mapped(ObjectAttributes attributes, SdKind kind, Plane frame, Vector3d p)
+    {
+        var prim = new SdPrimitive(kind, frame, p);
+        if (SdfUserText.TryReadLinear(attributes, out var x, out var y, out var z))
+            prim = prim with { Basis = new SdfBasis(x, y, z) };
+        return prim;
     }
 }
 

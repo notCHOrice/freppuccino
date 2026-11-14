@@ -254,13 +254,15 @@ public sealed class UiController : IDisposable
             Visible: !obj.IsHidden,
             Locked: obj.IsLocked,
             SdfType: SdfUserText.ReadType(attributes),
-            Params: ReadParams(attributes));
+            Params: ReadParams(attributes),
+            Custom: SdfUserText.TryReadLinear(attributes, out _, out _, out _) ? true : null);
     }
 
     static readonly HashSet<string> HeaderKeys = new(StringComparer.Ordinal)
     {
         SdfUserText.VersionKey, SdfUserText.TypeKey, SdfUserText.UnitsKey,
         SdfUserText.OriginKey, SdfUserText.XAxisKey, SdfUserText.YAxisKey,
+        SdfUserText.LinearXKey, SdfUserText.LinearYKey, SdfUserText.LinearZKey,
     };
 
     /// Every numeric SDF.&lt;param&gt; (SDF.s, SDF.b.x, ...), keyed without the prefix. Generic, so new primitives just show up.
