@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using Freppuccino.Csg;
 using Freppuccino.Sdf;
-using Freppuccino.UI;
+using Freppuccino.Ui;
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
@@ -32,8 +32,8 @@ public class FDifferenceCommand : FCsgCommand
     protected override FrepOp Op => FrepOp.Difference;
 }
 
-/// Creates a CSG node. Operands: SDF objects (pick) or existing nodes (type "N3", or click the row in the F-rep Tree panel).
-/// Union/Intersect also take preselection: selected objects + rows selected in the panel.
+/// Creates a CSG node. Operands: SDF objects (pick) or existing nodes (type "N3", or click it in the Freppuccino panel).
+/// Union/Intersect also take preselection: selected objects + nodes selected in the panel.
 public abstract class FCsgCommand : Command
 {
     protected abstract FrepOp Op { get; }
@@ -58,7 +58,7 @@ public abstract class FCsgCommand : Command
             }
             else
             {
-                operands.AddRange(FrepTreePanel.TakeSelectedNodes(doc).Select(FrepOperand.Node));
+                operands.AddRange(UiController.TakeSelectedNodes(doc).Select(FrepOperand.Node));
                 rc = operands.Count >= 2 && doc.Objects.GetSelectedObjects(false, false).All(o => !IsSdf(o))
                     ? Result.Success
                     : Pick(doc, "Objects or nodes to " + (Op == FrepOp.Union ? "union" : "intersect"), true, true, ref k, operands);

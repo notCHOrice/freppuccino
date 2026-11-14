@@ -1,11 +1,12 @@
 import { useSyncExternalStore } from 'react'
 import { createMockHost } from './mock-host'
-import type { Guid, HostMessage, SceneNode, Theme, UiMessage, UiSettings } from './protocol'
+import type { HostMessage, Id, SceneNode, Theme, UiMessage, UiSettings } from './protocol'
 
 // ── Transport ──
-// Inside Rhino (Windows) the page runs in WebView2: window.chrome.webview.
-// In a plain browser (`npm run dev`) a mock host stands in so the UI can be built without Rhino.
-// TODO(macOS): Rhino's Eto WebView is WKWebView there → window.webkit.messageHandlers + evaluateJavaScript.
+// One shape for every host (post + listen); the store doesn't know which it got. C# side: Ui/WebViewHost.cs.
+//   Windows (WebView2): window.chrome.webview; host → page via PostWebMessageAsJson.
+//   macOS (WKWebView via Eto): window.eto.postMessage(JSON string); host → page calls window.__freppuccino.receive(msg).
+//   Plain browser (`npm run dev`): a mock host stands in so the UI can be built without Rhino.
 
 interface WebView2 {
   postMessage(message: unknown): void
@@ -14,6 +15,9 @@ interface WebView2 {
 declare global {
   interface Window {
     chrome?: { webview?: WebView2 }
+    /** injected by Eto's WKWebViewHandler; the body must be a string */
+    eto?: { postMessage(message: string): void }
+    __freppuccino?: { receive(message: HostMessage): void }
   }
 }
 
@@ -25,12 +29,22 @@ export interface Transport {
 
 function createTransport(): Transport {
   const webview = window.chrome?.webview
-  if (!webview) return createMockHost()
-  return {
-    kind: 'rhino',
-    post: (m) => webview.postMessage(m),
-    listen: (cb) => webview.addEventListener('message', (e) => cb(e.data as HostMessage)),
-  }
+  if (webview)
+    return {
+      kind: 'rhino',
+      post: (m) => webview.postMessage(m),
+      listen: (cb) => webview.addEventListener('message', (e) => cb(e.data as HostMessage)),
+    }
+  const eto = window.eto
+  if (eto)
+    return {
+      kind: 'rhino',
+      post: (m) => eto.postMessage(JSON.stringify(m)),
+      listen: (cb) => {
+        window.__freppuccino = { receive: cb }
+      },
+    }
+  return createMockHost()
 }
 
 // ── Store ──
@@ -47,7 +61,7 @@ export interface HostState {
   synced: boolean
   scene: SceneNode[]
   /** selected ids in pick order (oldest first); Rhino doesn't report order, so the store keeps it */
-  selection: Guid[]
+  selection: Id[]
   settings: UiSettings
   theme: Theme
   notice: Notice | null
@@ -60,7 +74,7 @@ let state: HostState = {
   synced: false,
   scene: [],
   selection: [],
-  settings: { blend: 0, units: '' },
+  settings: { units: '' },
   theme: window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
   notice: null,
 }
@@ -73,7 +87,7 @@ function set(patch: Partial<HostState>) {
 }
 
 /** Keeps ids that stay selected in their old order and appends newly selected ones. */
-function orderSelection(prev: Guid[], next: Guid[]): Guid[] {
+function orderSelection(prev: Id[], next: Id[]): Id[] {
   const nextSet = new Set(next)
   const kept = prev.filter((id) => nextSet.has(id))
   const keptSet = new Set(kept)
@@ -91,9 +105,6 @@ transport.listen((m) => {
     case 'selection':
       set({ selection: orderSelection(state.selection, m.ids) })
       break
-    case 'settings':
-      set({ settings: m.settings })
-      break
     case 'notice':
       set({ notice: { id: ++noticeId, level: m.level, text: m.text } })
       break
@@ -101,8 +112,6 @@ transport.listen((m) => {
 })
 
 export function send(message: UiMessage) {
-  // Optimistic: the host doesn't echo values the page just set.
-  if (message.type === 'setBlend') set({ settings: { ...state.settings, blend: message.k } })
   transport.post(message)
 }
 

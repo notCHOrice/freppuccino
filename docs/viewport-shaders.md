@@ -53,7 +53,7 @@ FreppuccinoPlugin (AtStartup)
 FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept; recreated if a shaded copy exists)
 ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
-Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FTree opens F-rep Tree panel (edit k, delete, click row = pick node)
+Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FrepPanel lists the tree (edit op/k, delete, click node = pick it)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

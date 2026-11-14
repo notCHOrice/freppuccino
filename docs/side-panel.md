@@ -1,11 +1,12 @@
-# Side panel (WebView2 + React)
+# Side panel (web view + React)
 
-A dockable Rhino panel (`FrepPanel`) that hosts a React app in WebView2. It has a browser tree of F-rep objects at the top and a selection-driven inspector below it.
+A dockable Rhino panel (`FrepPanel`) that hosts a React app in Eto's WebView (WebView2 on Windows, WKWebView on macOS). It has a browser tree of F-rep objects at the top and a selection-driven inspector below it.
 
 ```
 src/Freppuccino/Ui/
   FrepPanel.cs       Eto panel, registered in FreppuccinoPlugin.OnLoad; command FrepPanel opens it
-  WebViewHost.cs     WebView2 plumbing: serves src/ui/dist, JSON postMessage both ways, blocks foreign navigation
+  WebViewHost.cs     shared: start URL, origin check, JSON both ways, blocks foreign navigation
+  IWebTransport.cs   per-OS part: WebView2Transport.cs (Windows), EtoWebTransport.cs (macOS)
   UiController.cs    Rhino events → snapshots for the page; page requests → Rhino (whitelisted)
   UiProtocol.cs      message types  ◄── keep in sync ──►  src/ui/src/bridge/protocol.ts
 src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radix, "mira" preset), lucide icons
@@ -21,7 +22,9 @@ On Windows, Rhino 9's Eto `WebView` *is* WebView2 (`Eto.Wpf` `WebView2Handler`, 
 - the project stays `net10.0` with no WPF dependency, and still builds on macOS
 - the `postMessage` / `SetVirtualHostNameToFolderMapping` APIs are available, so no URL-scheme hacks and no `file://` module/CORS issues
 
-macOS: Eto's WebView is WKWebView. The panel currently shows a placeholder there. To support it: add a `WKScriptMessageHandler` bridge in C#, and a `window.webkit.messageHandlers` transport in `bridge/host.ts`.
+macOS: Eto's WebView is WKWebView, and Eto (2.13) already bridges it: a script message handler that injects `window.eto.postMessage` into every frame and raises `WebView.MessageReceived`. So the Mac side is plain Eto (`EtoWebTransport.cs`), no Microsoft.macOS / Eto.macOS reference, and builds anywhere. Page → host: `window.eto.postMessage(JSON string)`; host → page: `ExecuteScriptAsync` calling `window.__freppuccino.receive(msg)`. Eto gives no sender URL, so every frame navigation is checked in `DocumentLoading` and the main frame's URL is the origin check. The UI loads from `file://<plugin dir>/ui/index.html`; WKWebView blocks CORS-mode loads from `file://` (module scripts, `crossorigin`), so `vite.config.ts` builds one classic IIFE script loaded with `defer` (CSS inlined into it). Dev tools: Debug builds set `WKWebView.isInspectable` (macOS 13.3+); right-click → Inspect Element, or Safari → Develop.
+
+Layout: `WebViewHost.cs` is shared (start URL, missing-UI placeholder, origin check, parse/dispatch, serialization, external links); `IWebTransport` is the per-OS part: `WebView2Transport.cs` (Windows), `EtoWebTransport.cs` (macOS).
 
 ## Dev workflow
 
@@ -30,7 +33,7 @@ macOS: Eto's WebView is WKWebView. The panel currently shows a placeholder there
 | Work on the UI without Rhino | `cd src/ui && npm install && npm run dev`, then open http://localhost:5173. A **mock host** stands in for Rhino; its sample scene includes nested operations. |
 | Hot reload inside Rhino | Run `npm run dev`, then start the **"Rhino 9 + Freppuccino (UI dev server)"** launch config, which sets `FREPPUCCINO_UI_DEV_URL=http://localhost:5173`. |
 | Normal plugin build | `dotnet build` copies `src/ui/dist` to `bin/.../ui/`. It runs `npm run build` itself only for Release builds or when `dist` is missing; otherwise run `npm run build` after UI changes. Pass `-p:SkipUiBuild=true` to skip. |
-| Debug the page in Rhino | In Debug builds, F12 or right-click → Inspect opens the WebView2 DevTools. |
+| Debug the page in Rhino | Debug builds: Windows F12 / right-click → Inspect (WebView2 DevTools); macOS right-click → Inspect Element (Web Inspector, 13.3+). |
 
 In Rhino, run `FrepPanel`, or open the Freppuccino panel from the panels menu.
 
@@ -38,60 +41,40 @@ In Rhino, run `FrepPanel`, or open the Freppuccino panel from the panels menu.
 
 JSON messages, each with a `type`. Host → page messages are snapshots (simple, and fine at this scale). Page → host messages are requests. Selection order is tracked on the page, because Rhino doesn't report pick order; it matters for subtract (target vs tool).
 
+Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3`, same as typed at the F-CSG command prompts).
+
 | Host → page | When |
 |---|---|
 | `state {scene, selection, settings, theme}` | reply to `ready`; active document changed |
-| `scene {scene}` | object added/deleted/replaced/attributes changed (coalesced on Idle) |
-| `selection {ids}` | Rhino selection changed |
-| `settings {settings}` | blend changed (also from the `FrepBlend` command) |
+| `scene {scene}` | object added/deleted/replaced/attributes changed, CSG tree changed (coalesced on Idle) |
+| `selection {ids}` | Rhino selection or panel node selection changed |
 | `notice {level, text}` | feedback, including "not implemented yet" from stubs |
 
 | Page → host | Status |
 |---|---|
 | `ready` | ✅ |
-| `select {ids, mode: replace\|add\|toggle}` | ✅ tree click → Rhino selection |
-| `setVisible {id, visible}` | ✅ Show/Hide |
+| `select {ids, mode: replace\|add\|toggle}` | ✅ primitives → Rhino selection; nodes → panel node selection. While FUnion/FIntersect/FDifference wait for operands, a node click is sent to the command line instead |
+| `setVisible {id, visible}` | ✅ primitives only |
 | `runCommand {command}` | ✅ whitelist only: `FBox`, `FSphere`, `Freppuccino` |
-| `setBlend {k}` | ✅ the existing global `FrepSettings.Blend` |
+| `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
+| `setOperation {id, op, k}` | ✅ edit a node (undoable) |
+| `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
-| `applyOperation {a, b, op, k}` | **stub**: combine two selected objects |
-| `setOperation {id, op, k}` | **stub**: edit an existing operation node |
 
-`op` ∈ `union | subtract | intersect`. Every op takes a blend `k` (0 = sharp, > 0 = smooth). For subtract, A/children[0] is the target and the rest are tools.
+`op` ∈ `union | subtract | intersect` (`FrepOp.Difference` = subtract). Every op takes a blend `k` (0 = sharp, > 0 = smooth). For subtract, operands[0] / children[0] is the target and the rest are tools.
 
-## Browser tree (Fusion 360 browser / CATIA spec tree)
+## Browser tree
 
-The UI already renders a general tree; `SceneNode` is recursive:
+`SceneNode` is recursive:
 
 ```
-SceneNode { id, kind: primitive|operation, name?, visible, locked,
+SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
             sdfType?, params?,          // primitive
             op?, k?, children? }        // operation: children are operands, in order
 ```
 
-Today the host sends a flat list of primitives. Once operations exist, `UiController.BuildScene` walks the graph and nests operands under their operation; nothing else in the page needs to change. Run `npm run dev` to see the nested case with the mock data. Selecting an operation node in the tree switches the inspector to the same combine UI, which then sends `setOperation`.
+`UiController.BuildScene` walks the doc's `FrepTree` (Csg/FrepTree.cs, stored as plugin document data): roots are nodes nothing references, then primitives no node uses. The tree is a DAG, so a shared operand is listed under each parent. Deleted operands show as `missing`.
 
-Example of what the tree would show:
+Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
 
-```
-▾ ⊟ Subtract 1          ← root = a visible result
-    ▢ Box 1             ← target
-  ▾ ⊕ − Union 1         ← tool (nested operation)
-      ○ Hole A
-      ○ Sphere 2
-  ○ Sphere 1            ← un-combined primitive
-```
-
-### Open question: where operation nodes live
-
-| Option | Pros | Cons |
-|---|---|---|
-| **A. Operation = Rhino object** (a small proxy, e.g. a hidden point or result bounding box) with user text `SDF.Type=opSubtract`, `SDF.k`, `SDF.Children=<id>,<id>` | Same model as primitives (the PLAN says "F-reps are normal Rhino objects"). Undo/redo, save, layers, names, selection and gumball (move the whole result) all come from Rhino. | Child ids must be remapped on copy/paste (same problem as `SdfTransformWatcher`'s copy case). Deleting an operand needs a cleanup rule. The proxy geometry is a little artificial. |
-| **B. Document-level graph** (JSON in `doc.Strings` or plugin document user data) referencing Rhino object ids | One place to read the whole tree. No fake geometry. | A second source of truth next to user text. Undo and copy/paste between files need manual handling. Operation nodes can't be picked or gumballed in the viewport. |
-| **C. Operation = block instance** whose definition holds the operands | Rhino-native nesting and transforms. | Editing an operand means BlockEdit, which is clunky compared with Fusion/CATIA. Transform and SDF bookkeeping get harder. |
-
-Recommendation: **A**. It keeps a single source of truth (user text) and gets most behaviour for free from Rhino. Consumed operands would be hidden from the root of the tree, and from the flat shader union, because their parent draws them.
-
-### Rendering impact
-
-`FrepShaderGen` currently `smin`s every primitive with one global k. With a graph, `map()` is generated by walking the tree (`opU/opS/opI` with per-node k). The tree's *shape* becomes part of the shader cache key; per-node k values go in the uniform block next to the primitives, so dragging a blend slider never recompiles.
+Inspector: one primitive → its parameters; one node → edit op / k, delete; ≥ 2 selected → combine them (pick order; first = subtract target).

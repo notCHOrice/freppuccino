@@ -49,10 +49,14 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         return (new FrepTree(Nodes.Add(node), NextId + 1), node);
     }
 
-    public FrepTree WithK(int id, double k)
+    public FrepTree WithK(int id, double k) => Edit(id, n => n with { K = k });
+
+    public FrepTree WithOp(int id, FrepOp op, double k) => Edit(id, n => n with { Op = op, K = k });
+
+    FrepTree Edit(int id, Func<FrepNode, FrepNode> f)
     {
         var i = Nodes.FindIndex(n => n.Id == id);
-        return i < 0 ? this : this with { Nodes = Nodes.SetItem(i, Nodes[i] with { K = k }) };
+        return i < 0 ? this : this with { Nodes = Nodes.SetItem(i, f(Nodes[i])) };
     }
 
     /// Caller ensures nothing references it.

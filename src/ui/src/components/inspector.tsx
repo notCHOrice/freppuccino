@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Box, Circle, Sparkles } from 'lucide-react'
+import { ArrowUpDown, Box, Circle, Sparkles, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -9,18 +9,14 @@ import { send, useHost } from '@/bridge/host'
 import type { OperationKind, SceneNode } from '@/bridge/protocol'
 import { OPERATIONS, paramLabel, typeLabel } from '@/lib/scene'
 
-/** Bottom half of the panel; what it shows depends on the selection. */
+/** Bottom half of the panel; what it shows depends on the selection (pick order). */
 export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string> }) {
-  const { selected, labels } = props
+  const { labels } = props
+  const selected = props.selected.filter((n) => !n.missing)
   if (selected.length === 0) return <CreateSection />
   if (selected.length === 1 && selected[0].kind === 'primitive') return <PrimitiveSection key={selected[0].id} node={selected[0]} labels={labels} />
-  if (selected.length === 1 && selected[0].kind === 'operation') {
-    const op = selected[0]
-    const [a, b] = op.children ?? []
-    return a && b ? <CombineSection key={op.id} a={a} b={b} labels={labels} existing={op} /> : null
-  }
-  if (selected.length === 2) return <CombineSection key={selected.map((s) => s.id).join()} a={selected[0]} b={selected[1]} labels={labels} />
-  return <Section title={`${selected.length} selected`}><p className="text-muted-foreground">Select two objects to combine them.</p></Section>
+  if (selected.length === 1) return <CombineSection key={selected[0].id} operands={selected[0].children ?? []} labels={labels} existing={selected[0]} />
+  return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
 }
 
 function Section(props: { title: string; badge?: string; children: React.ReactNode; icon?: React.ReactNode }) {
@@ -39,7 +35,6 @@ function Section(props: { title: string; badge?: string; children: React.ReactNo
 // ── Nothing selected: create + scene settings ──
 
 function CreateSection() {
-  const settings = useHost((s) => s.settings)
   return (
     <>
       <Section title="Create">
@@ -53,13 +48,7 @@ function CreateSection() {
         </div>
       </Section>
       <Section title="Scene">
-        <ParamSlider
-          label="Global blend"
-          hint={settings.units}
-          value={settings.blend}
-          max={5}
-          onChange={(k) => send({ type: 'setBlend', k })}
-        />
+        <p className="text-muted-foreground">Select two or more objects or nodes to combine them; blend is per operation.</p>
         <Button variant="secondary" onClick={() => send({ type: 'runCommand', command: 'Freppuccino' })}>
           <Sparkles /> F-rep display mode
         </Button>
@@ -95,9 +84,9 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
   )
 }
 
-// ── Two objects (or an existing operation): combine ──
+// ── ≥ 2 objects / nodes: new operation; or one operation node: edit it ──
 
-function CombineSection(props: { a: SceneNode; b: SceneNode; labels: Map<string, string>; existing?: SceneNode }) {
+function CombineSection(props: { operands: SceneNode[]; labels: Map<string, string>; existing?: SceneNode }) {
   const { labels, existing } = props
   const units = useHost((s) => s.settings.units)
   const [swapped, setSwapped] = useState(false)
@@ -111,28 +100,31 @@ function CombineSection(props: { a: SceneNode; b: SceneNode; labels: Map<string,
     if (existing.k !== undefined) setK(existing.k)
   }
 
-  const [a, b] = swapped ? [props.b, props.a] : [props.a, props.b]
+  // Swapping only makes sense for two new operands; otherwise pick order decides the subtract target.
+  const canSwap = !existing && props.operands.length === 2
+  const operands = canSwap && swapped ? [...props.operands].reverse() : props.operands
   const ordered = op === 'subtract'
+  const role = (i: number) => (ordered ? (i === 0 ? 'Target' : 'Tool') : `#${i + 1}`)
+  const dirty = !existing || op !== existing.op || k !== existing.k
 
   const apply = () =>
     existing
       ? send({ type: 'setOperation', id: existing.id, op, k })
-      : send({ type: 'applyOperation', a: a.id, b: b.id, op, k })
+      : send({ type: 'applyOperation', operands: operands.map((o) => o.id), op, k })
 
   return (
-    <Section title={existing ? labels.get(existing.id) ?? 'Operation' : 'Combine'} badge={existing ? 'Operation' : undefined}>
+    <Section title={existing ? labels.get(existing.id) ?? 'Operation' : 'Combine'} badge={existing ? 'Operation' : `${operands.length} operands`}>
       <div className="flex items-center gap-1">
-        <Operand node={a} label={labels.get(a.id)} role={ordered ? 'Target' : 'A'} />
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label="Swap"
-          disabled={!!existing}
-          onClick={() => setSwapped((s) => !s)}
-        >
-          <ArrowLeftRight />
-        </Button>
-        <Operand node={b} label={labels.get(b.id)} role={ordered ? 'Tool' : 'B'} />
+        <div className="grid min-w-0 flex-1 gap-1">
+          {operands.map((o, i) => (
+            <Operand key={`${i}:${o.id}`} node={o} label={labels.get(o.id)} role={role(i)} />
+          ))}
+        </div>
+        {canSwap && (
+          <Button variant="ghost" size="icon-xs" aria-label="Swap" onClick={() => setSwapped((s) => !s)}>
+            <ArrowUpDown />
+          </Button>
+        )}
       </div>
 
       <ToggleGroup
@@ -155,7 +147,16 @@ function CombineSection(props: { a: SceneNode; b: SceneNode; labels: Map<string,
 
       <ParamSlider label="Blend" hint={k === 0 ? 'sharp' : units} value={k} max={5} onChange={setK} />
 
-      <Button onClick={apply}>{existing ? 'Update' : `Apply ${OPERATIONS[op].label.toLowerCase()}`}</Button>
+      <div className="flex gap-2">
+        <Button className="flex-1" disabled={!dirty} onClick={apply}>
+          {existing ? 'Update' : `Apply ${OPERATIONS[op].label.toLowerCase()}`}
+        </Button>
+        {existing && (
+          <Button variant="outline" aria-label="Delete" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
+            <Trash2 />
+          </Button>
+        )}
+      </div>
     </Section>
   )
 }

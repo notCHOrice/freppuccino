@@ -1,16 +1,18 @@
 // Messages between this page and Rhino.
 // Mirror of src/Freppuccino/Ui/UiProtocol.cs — change both together. Docs: docs/side-panel.md.
 
-export type Guid = string
+/** Primitive: Rhino object id (GUID). Operation: CSG node name, e.g. "N3". */
+export type Id = string
 
 export type OperationKind = 'union' | 'subtract' | 'intersect'
 
 /**
  * One row in the browser tree. Primitives (Rhino objects with SDF.* user text) are leaves;
- * operations nest their operands as children (children[0] is the target for subtract).
+ * operations (CSG nodes) nest their operands as children (children[0] is the target for subtract).
+ * The CSG graph is a DAG: a shared operand appears under each parent.
  */
 export interface SceneNode {
-  id: Guid
+  id: Id
   kind: 'primitive' | 'operation'
   name?: string
   visible: boolean
@@ -24,11 +26,11 @@ export interface SceneNode {
   /** operation: blend distance in model units, 0 = sharp */
   k?: number
   children?: SceneNode[]
+  /** operand whose object / node was deleted */
+  missing?: boolean
 }
 
 export interface UiSettings {
-  /** global smooth-union blend k, model units */
-  blend: number
   units: string
 }
 
@@ -36,10 +38,10 @@ export type Theme = 'light' | 'dark'
 
 // ── Host → UI ──
 export type HostMessage =
-  | { type: 'state'; scene: SceneNode[]; selection: Guid[]; settings: UiSettings; theme: Theme }
+  | { type: 'state'; scene: SceneNode[]; selection: Id[]; settings: UiSettings; theme: Theme }
   | { type: 'scene'; scene: SceneNode[] }
-  | { type: 'selection'; ids: Guid[] }
-  | { type: 'settings'; settings: UiSettings }
+  /** selected primitives (Rhino selection) + operation nodes (kept by the host) */
+  | { type: 'selection'; ids: Id[] }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; text: string }
 
 // ── UI → Host ──
@@ -48,13 +50,15 @@ export type AllowedCommand = 'FBox' | 'FSphere' | 'Freppuccino'
 
 export type UiMessage =
   | { type: 'ready' }
-  | { type: 'select'; ids: Guid[]; mode: SelectMode }
-  | { type: 'setVisible'; id: Guid; visible: boolean }
+  /** While an F-CSG command waits for operands, the host feeds clicked nodes to it instead of selecting. */
+  | { type: 'select'; ids: Id[]; mode: SelectMode }
+  /** primitives only */
+  | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
-  | { type: 'setBlend'; k: number }
   /** STUB on the host */
-  | { type: 'setParam'; id: Guid; name: string; value: number }
-  /** STUB on the host. For subtract, a is the target and b the tool. */
-  | { type: 'applyOperation'; a: Guid; b: Guid; op: OperationKind; k: number }
-  /** STUB on the host: edit an existing operation node */
-  | { type: 'setOperation'; id: Guid; op: OperationKind; k: number }
+  | { type: 'setParam'; id: Id; name: string; value: number }
+  /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
+  | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
+  | { type: 'setOperation'; id: Id; op: OperationKind; k: number }
+  /** Nodes still used by other nodes are kept (host sends a notice). */
+  | { type: 'deleteNodes'; ids: Id[] }
