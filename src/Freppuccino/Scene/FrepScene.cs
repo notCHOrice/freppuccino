@@ -25,6 +25,8 @@ public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
 public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<double> Ks, int Dropped)
 {
     public static readonly FrepSceneData Empty = new(null, [], [], 0);
+    /// Rhino object ids, parallel to Primitives (what the CSG tree's leaves refer to).
+    public IReadOnlyList<Guid> Ids { get; init; } = [];
     public int Count => Primitives.Count;
 }
 
@@ -161,7 +163,7 @@ public static class FrepScene
         }
 
         var (program, ks) = FrepShaderGen.Compile(prims, newIds, tree);
-        scene = new FrepSceneData(program, prims, ks, dropped);
+        scene = new FrepSceneData(program, prims, ks, dropped) { Ids = newIds };
         owners = newOwners;
         ids = newIds;
     }
