@@ -6,26 +6,34 @@ using Rhino.Geometry;
 
 namespace Freppuccino.Scene;
 
-/// sdSphere: center/frame + radius s.
-public readonly record struct SdSphere(Plane Frame, double S);
+/// Primitive kinds the viewport shader can draw. The order is the order primitives appear in the shader.
+public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 
-/// sdBox: frame (origin = box center) + half-extents b along the frame axes.
-public readonly record struct SdBox(Plane Frame, Vector3d B);
+/// One F-rep primitive: local frame (as written in SDF.Frame.*) + up to three IQ parameters packed in P.
+///   Sphere    P.X = s (radius)
+///   Box       P = b (half-extents along frame X/Y/Z)
+///   Torus     P.X = t.x (major radius), P.Y = t.y (minor radius); axis = frame Y
+///   Cylinder  P.X = h (half height), P.Y = r; axis = frame Y
+///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
+///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
+///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
+public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
 
-public sealed record FrepSceneData(IReadOnlyList<SdSphere> Spheres, IReadOnlyList<SdBox> Boxes)
+/// Primitives are grouped by <see cref="SdKind"/> (stable within a kind).
+public sealed record FrepSceneData(IReadOnlyList<SdPrimitive> Primitives)
 {
-    public static readonly FrepSceneData Empty = new([], []);
-    public int Count => Spheres.Count + Boxes.Count;
+    public static readonly FrepSceneData Empty = new([]);
+    public int Count => Primitives.Count;
 }
 
-/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text, written by FSphere / FBox).
+/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text, written by the F* commands).
 /// The SDF values are the source of truth, not the Rhino geometry. Rebuilt lazily after any doc/object/layer change.
 /// Objects under a dynamic transform (gumball/Move drag) are reported at their in-progress position.
 public static class FrepScene
 {
     static FrepSceneData scene = FrepSceneData.Empty;
-    // Parallel to scene.Spheres / scene.Boxes; safe since any delete/replace sets dirty.
-    static List<RhinoObject> sphereOwners = [], boxOwners = [];
+    // Parallel to scene.Primitives; safe since any delete/replace sets dirty.
+    static List<RhinoObject> owners = [];
     static uint docSerial;
     static bool dirty = true;
 
@@ -47,56 +55,108 @@ public static class FrepScene
     {
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
-        List<SdSphere>? spheres = null;
-        for (int i = 0; i < sphereOwners.Count; i++)
+        List<SdPrimitive>? prims = null;
+        for (int i = 0; i < owners.Count; i++)
         {
-            if (!sphereOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            var s = scene.Spheres[i];
-            // A transform sdSphere can't represent (non-uniform scale) previews at the original position.
-            if (!FSphereCommand.TryTransform(s.Frame, s.S, xf, out var frame, out var r, out _)) continue;
-            spheres ??= [.. scene.Spheres];
-            spheres[i] = new SdSphere(frame, r);
+            if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            // A transform the SDF type can't represent (e.g. shearing a box) previews at the original position.
+            if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
+            prims ??= [.. scene.Primitives];
+            prims[i] = moved;
         }
 
-        List<SdBox>? boxes = null;
-        for (int i = 0; i < boxOwners.Count; i++)
-        {
-            if (!boxOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            var b = scene.Boxes[i];
-            if (!FBoxCommand.TryTransform(b.Frame, b.B, xf, out var frame, out var half, out _)) continue;
-            boxes ??= [.. scene.Boxes];
-            boxes[i] = new SdBox(frame, half);
-        }
+        return prims == null ? scene : new FrepSceneData(prims);
+    }
 
-        return spheres == null && boxes == null ? scene : new FrepSceneData(spheres ?? scene.Spheres, boxes ?? scene.Boxes);
+    /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
+    static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
+    {
+        result = p;
+        var v = p.P;
+        Plane f;
+        bool ok;
+        switch (p.Kind)
+        {
+            case SdKind.Sphere:
+                ok = FSphereCommand.TryTransform(p.Frame, v.X, xf, out f, out var s, out _);
+                v = new Vector3d(s, 0, 0);
+                break;
+            case SdKind.Box:
+                ok = FBoxCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
+                break;
+            case SdKind.Torus:
+                ok = FTorusCommand.TryTransform(p.Frame, new Vector2d(v.X, v.Y), xf, out f, out var t, out _);
+                v = new Vector3d(t.X, t.Y, 0);
+                break;
+            case SdKind.Cylinder:
+                ok = FCylinderCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ch, out var cr, out _);
+                v = new Vector3d(ch, cr, 0);
+                break;
+            case SdKind.Cone:
+                ok = FConeCommand.TryTransform(p.Frame, v.X, v.Y, v.Z, xf, out f, out var kh, out var r1, out var r2, out _);
+                v = new Vector3d(kh, r1, r2);
+                break;
+            case SdKind.Ellipsoid:
+                ok = FEllipsoidCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
+                break;
+            case SdKind.Pyramid:
+                ok = FPyramidCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ph, out var ps, out _);
+                v = new Vector3d(ph, ps, 0);
+                break;
+            default:
+                return false;
+        }
+        if (!ok) return false;
+        result = p with { Frame = f, P = v };
+        return true;
     }
 
     static void Rebuild(RhinoDoc doc)
     {
         dirty = false;
         docSerial = doc.RuntimeSerialNumber;
-        var spheres = new List<SdSphere>();
-        var boxes = new List<SdBox>();
-        var sOwners = new List<RhinoObject>();
-        var bOwners = new List<RhinoObject>();
+        var found = new List<(SdPrimitive Prim, RhinoObject Owner)>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
         foreach (var obj in doc.Objects.GetObjectList(settings))
+            if (TryRead(obj.Attributes, out var prim))
+                found.Add((prim, obj));
+
+        // Group by kind (OrderBy is stable) so the shader structure only depends on per-kind counts.
+        var sorted = found.OrderBy(x => x.Prim.Kind).ToList();
+        scene = new FrepSceneData(sorted.Select(x => x.Prim).ToList());
+        owners = sorted.Select(x => x.Owner).ToList();
+    }
+
+    /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
+    static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
+    {
+        prim = default;
+        switch (SdfUserText.ReadType(a))
         {
-            var attributes = obj.Attributes;
-            switch (SdfUserText.ReadType(attributes))
-            {
-                case FSphereCommand.SdfType when FSphereCommand.TryRead(attributes, out var frame, out var s) && s > 0:
-                    spheres.Add(new SdSphere(frame, s));
-                    sOwners.Add(obj);
-                    break;
-                case FBoxCommand.SdfType when FBoxCommand.TryRead(attributes, out var frame, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
-                    boxes.Add(new SdBox(frame, b));
-                    bOwners.Add(obj);
-                    break;
-            }
+            case FSphereCommand.SdfType when FSphereCommand.TryRead(a, out var f, out var s) && s > 0:
+                prim = new(SdKind.Sphere, f, new Vector3d(s, 0, 0));
+                return true;
+            case FBoxCommand.SdfType when FBoxCommand.TryRead(a, out var f, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
+                prim = new(SdKind.Box, f, b);
+                return true;
+            case FTorusCommand.SdfType when FTorusCommand.TryRead(a, out var f, out var t) && t.X > 0 && t.Y > 0:
+                prim = new(SdKind.Torus, f, new Vector3d(t.X, t.Y, 0));
+                return true;
+            case FCylinderCommand.SdfType when FCylinderCommand.TryRead(a, out var f, out var h, out var r) && h > 0 && r > 0:
+                prim = new(SdKind.Cylinder, f, new Vector3d(h, r, 0));
+                return true;
+            case FConeCommand.SdfType when FConeCommand.TryRead(a, out var f, out var h, out var r1, out var r2) &&
+                                           h > 0 && r1 >= 0 && r2 >= 0 && r1 + r2 > 0:
+                prim = new(SdKind.Cone, f, new Vector3d(h, r1, r2));
+                return true;
+            case FEllipsoidCommand.SdfType when FEllipsoidCommand.TryRead(a, out var f, out var r) && r.X > 0 && r.Y > 0 && r.Z > 0:
+                prim = new(SdKind.Ellipsoid, f, r);
+                return true;
+            case FPyramidCommand.SdfType when FPyramidCommand.TryRead(a, out var f, out var h, out var s) && h > 0 && s > 0:
+                prim = new(SdKind.Pyramid, f, new Vector3d(h, s, 0));
+                return true;
+            default:
+                return false;
         }
-        scene = new FrepSceneData(spheres, boxes);
-        sphereOwners = sOwners;
-        boxOwners = bOwners;
     }
 }

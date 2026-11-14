@@ -94,6 +94,13 @@ public static class SdfUserText
     public static bool TryReadFloat(ObjectAttributes attributes, string name, out double value) =>
         TryParse(attributes.GetUserString(Prefix + name), out value);
 
+    /// <summary>Reads SDF.&lt;name&gt;.x / .y.</summary>
+    public static bool TryReadVec2(ObjectAttributes attributes, string name, out double x, out double y)
+    {
+        y = 0.0;
+        return TryReadFloat(attributes, name + ".x", out x) & TryReadFloat(attributes, name + ".y", out y);
+    }
+
     /// <summary>Reads SDF.&lt;name&gt;.x / .y / .z.</summary>
     public static bool TryReadVec3(ObjectAttributes attributes, string name, out Vector3d value)
     {
