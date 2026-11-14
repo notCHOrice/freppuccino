@@ -201,7 +201,11 @@ public static class FrepShaderGen
             float k1 = length(p / (r * r));
             return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, min(r.y, r.z));
         }
-        float sdPyramid(vec3 p, float h) // unit square base centered at the origin, apex at (0, h, 0)
+        // Unit square base centered at the origin, apex at (0, h, 0).
+        // IQ's version measures distance to the four slanted faces only; the base enters just through the sign.
+        // Below the base that overestimates (the ray steps through the floor and stops inside), and just above it
+        // the interior distance ignores the floor (normals there point at the side faces). Both patched at the end.
+        float sdPyramid(vec3 p, float h)
         {
             float m2 = h * h + 0.25;
             p.xz = abs(p.xz);
@@ -213,7 +217,11 @@ public static class FrepShaderGen
             float a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
             float b = m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) + (q.y - m2 * t) * (q.y - m2 * t);
             float d2 = min(q.y, -q.x * m2 - q.y * 0.5) > 0.0 ? 0.0 : min(a, b);
-            return sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            float d = sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            // Below the base every point of the solid sits above the base square, so the base is nearest (exact).
+            // p.xz here is already abs()'d and shifted by -0.5, so max(p.xz, 0) is the overhang past the square.
+            if (p.y < 0.0) return length(vec3(max(p.x, 0.0), p.y, max(p.z, 0.0)));
+            return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
         float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
         float map(vec3 p)

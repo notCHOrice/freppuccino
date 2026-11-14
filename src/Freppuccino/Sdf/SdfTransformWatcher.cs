@@ -111,7 +111,11 @@ public static class SdfTransformWatcher
             if (doc == null || obj == null) continue;
 
             var attributes = obj.Attributes.Duplicate();
-            foreach (var key in SdfKeys(updated))
+            // Drop keys the transform removed (e.g. SDF.s when a sphere became an ellipsoid).
+            var keep = SdfKeys(updated).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in SdfKeys(attributes).Where(k => !keep.Contains(k)).ToList())
+                attributes.DeleteUserString(key);
+            foreach (var key in keep)
                 attributes.SetUserString(key, updated.GetUserString(key));
             doc.Objects.ModifyAttributes(obj, attributes, true);
             redraw.Add(doc);
