@@ -21,6 +21,9 @@ public static class DualContour
 
     const int Block = 8;
 
+    /// How far a vertex may sit outside its cell, in cells (see CellVertex).
+    public static double Slack = 0.5;
+
     /// <paramref name="resolution"/> = cells along the longest side of the field's bounds.
     public static Result Mesh(FrepField field, int resolution)
     {
@@ -244,11 +247,15 @@ public static class DualContour
             if (val[e] > 0.1 * max)
                 x += vec[e] * (V3.Dot(vec[e], rhs) / val[e]);
 
-        // Keep the vertex in its cell; this bounds how far a bad solve can move it.
+        // A crease can clip a cell without passing through it (its crossings then lie on both sides of a
+        // crease that is just outside). Clamping the vertex to the cell would pull it off the crease and
+        // serrate every edge that is not grid-aligned, so let it leave by up to half a cell. The limit
+        // still bounds how far a bad solve can move it.
+        double slack = Slack * h;
         return new V3(
-            Math.Clamp(x.X, cellMin.X, cellMin.X + h),
-            Math.Clamp(x.Y, cellMin.Y, cellMin.Y + h),
-            Math.Clamp(x.Z, cellMin.Z, cellMin.Z + h));
+            Math.Clamp(x.X, cellMin.X - slack, cellMin.X + h + slack),
+            Math.Clamp(x.Y, cellMin.Y - slack, cellMin.Y + h + slack),
+            Math.Clamp(x.Z, cellMin.Z - slack, cellMin.Z + h + slack));
     }
 
     static V3 Corner(V3 min, double h, int c) => new(min.X + (c & 1) * h, min.Y + ((c >> 1) & 1) * h, min.Z + (c >> 2) * h);
