@@ -1,12 +1,14 @@
 using Freppuccino.Commands;
+using Freppuccino.Csg;
 using Freppuccino.Sdf;
+using Freppuccino.Shaders;
 using Rhino;
 using Rhino.DocObjects;
 using Rhino.Geometry;
 
 namespace Freppuccino.Scene;
 
-/// Primitive kinds the viewport shader can draw. The order is the order primitives appear in the shader.
+/// Primitive kinds the viewport shader can draw.
 public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 
 /// One F-rep primitive: local frame (as written in SDF.Frame.*) + up to three IQ parameters packed in P.
@@ -19,15 +21,16 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
 
-/// Primitives are grouped by <see cref="SdKind"/> (stable within a kind).
-public sealed record FrepSceneData(IReadOnlyList<SdPrimitive> Primitives)
+/// Program == null: nothing to draw. Primitives/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
+public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<double> Ks, int Dropped)
 {
-    public static readonly FrepSceneData Empty = new([]);
+    public static readonly FrepSceneData Empty = new(null, [], [], 0);
     public int Count => Primitives.Count;
 }
 
-/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text, written by the F* commands).
-/// The SDF values are the source of truth, not the Rhino geometry. Rebuilt lazily after any doc/object/layer change.
+/// Visible objects in the active doc carrying F-rep metadata (SDF.* user text, written by the F* commands) + the doc's CSG tree,
+/// compiled to a shader. The SDF values are the source of truth, not the Rhino geometry. Rebuilt lazily after any
+/// doc/object/layer/tree change; blend edits rebuild too but hit the shader cache (k is a uniform).
 /// Objects under a dynamic transform (gumball/Move drag) are reported at their in-progress position.
 public static class FrepScene
 {
@@ -49,6 +52,7 @@ public static class FrepScene
         RhinoDoc.NewDocument += (_, _) => dirty = true;
     }
 
+    public static void MarkDirty() => dirty = true;
     static void Dirty(object? sender, RhinoObjectEventArgs e) => dirty = true;
 
     public static FrepSceneData Get(RhinoDoc doc)
@@ -64,8 +68,7 @@ public static class FrepScene
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
         }
-
-        return prims == null ? scene : new FrepSceneData(prims);
+        return prims == null ? scene : scene with { Primitives = prims };
     }
 
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
@@ -115,16 +118,28 @@ public static class FrepScene
     {
         dirty = false;
         docSerial = doc.RuntimeSerialNumber;
-        var found = new List<(SdPrimitive Prim, RhinoObject Owner)>();
+        var tree = FrepTrees.Get(doc);
+
+        // Prims first, so uniform rows for blend values are reserved up front; prims past the budget are dropped (= missing leaves).
+        int budget = FrepShaderGen.PrimRowBudget(tree.Nodes.Count), rows = 0, dropped = 0;
+        var prims = new List<SdPrimitive>();
+        var newOwners = new List<RhinoObject>();
+        var ids = new List<Guid>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
         foreach (var obj in doc.Objects.GetObjectList(settings))
-            if (TryRead(obj.Attributes, out var prim))
-                found.Add((prim, obj));
+        {
+            if (!TryRead(obj.Attributes, out var prim)) continue;
+            int r = FrepShaderGen.Rows(prim.Kind);
+            if (rows + r > budget) { dropped++; continue; }
+            rows += r;
+            ids.Add(obj.Id);
+            prims.Add(prim);
+            newOwners.Add(obj);
+        }
 
-        // Group by kind (OrderBy is stable) so the shader structure only depends on per-kind counts.
-        var sorted = found.OrderBy(x => x.Prim.Kind).ToList();
-        scene = new FrepSceneData(sorted.Select(x => x.Prim).ToList());
-        owners = sorted.Select(x => x.Owner).ToList();
+        var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
+        scene = new FrepSceneData(program, prims, ks, dropped);
+        owners = newOwners;
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
@@ -160,3 +175,4 @@ public static class FrepScene
         }
     }
 }
+

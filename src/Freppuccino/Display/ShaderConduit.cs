@@ -26,17 +26,13 @@ public sealed class ShaderConduit : DisplayConduit
             bool drew = false;
 
             var scene = FrepScene.Get(e.RhinoDoc);
-            if (scene.Count > 0)
+            if (scene.Dropped > 0 && !loggedCap)
             {
-                var fit = FrepShaderGen.Fit(scene);
-                if (fit < scene.Count && !loggedCap)
-                {
-                    RhinoApp.WriteLine($"Freppuccino: {scene.Count} F-rep primitives, drawing the first {fit} (uniform buffer full)");
-                    loggedCap = true;
-                }
-                if (fit > 0)
-                    drew |= gpu.Draw(dp, FrepShaderGen.Scene(scene, fit), FrepShaderGen.SceneUniforms(dp.Viewport, scene, fit, FrepSettings.Blend));
+                RhinoApp.WriteLine($"Freppuccino: uniform budget full, {scene.Dropped} primitives not drawn");
+                loggedCap = true;
             }
+            if (scene.Program != null)
+                drew |= gpu.Draw(dp, scene.Program, FrepShaderGen.SceneUniforms(dp.Viewport, scene));
 
             var (r, size) = BadgeRect(dp);
             drew |= gpu.Draw(dp, PillShader.Source, PillShader.Uniforms(r.Left, r.Top, r.Right, r.Bottom, size.Width, size.Height));
