@@ -13,117 +13,237 @@ public readonly record struct V3(double X, double Y, double Z)
     public V3 Normalized() { var l = Length; return l > 0 ? this * (1 / l) : this; }
 }
 
+/// Same kinds and parameter packing as Scene.SdKind / SdPrimitive.P.
+public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
+
+public enum FieldOp { Union, Intersect, Difference }
+
+/// A primitive (by index) or an earlier node (by index).
+public readonly record struct FieldRef(bool IsNode, int Index)
+{
+    public static FieldRef Primitive(int index) => new(false, index);
+    public static FieldRef Node(int index) => new(true, index);
+}
+
 /// CPU evaluator for the same field the viewport shader raymarches (see Shaders/FrepShaderGen.cs):
-/// spheres then boxes, folded left to right with IQ's quadratic smooth-min. Keep the two in sync.
-/// The field is 1-Lipschitz (exact primitive SDFs, and smin's gradient is a convex combination),
-/// which <see cref="DualContour"/> relies on to skip empty space.
+/// IQ primitive distance functions in their local frames, combined by CSG nodes with IQ's quadratic
+/// smooth min/max, and a hard minimum over the roots. Keep the two in sync.
+///
+/// Build it with <see cref="AddPrimitive"/>, <see cref="AddNode"/> and <see cref="AddRoot"/>. With no
+/// roots declared, all primitives are smooth-unioned in order with <see cref="Blend"/>.
 public sealed class FrepField
 {
-    readonly record struct Sphere(V3 C, double R);
-    /// Centre, unit axes, half-extents along those axes.
-    readonly record struct Box(V3 C, V3 X, V3 Y, V3 Z, V3 B);
+    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P);
+    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands);
 
-    readonly List<Sphere> spheres = [];
-    readonly List<Box> boxes = [];
+    readonly List<Prim> prims = [];
+    readonly List<Node> nodes = [];
+    readonly List<FieldRef> roots = [];
+    readonly object sealing = new();
+    volatile bool isSealed;
 
-    /// Smooth-union blend distance k; 0 = hard union.
+    /// Blend distance of the implicit union used when no roots are declared; 0 = hard union.
     public double Blend { get; init; }
 
-    public int Count => spheres.Count + boxes.Count;
-
-    public void AddSphere(V3 center, double radius) => spheres.Add(new Sphere(center, radius));
+    public int Count => prims.Count;
 
     /// <paramref name="x"/> and <paramref name="y"/> are unit and perpendicular; Z = X × Y.
-    public void AddBox(V3 center, V3 x, V3 y, V3 half) => boxes.Add(new Box(center, x, y, V3.Cross(x, y), half));
+    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p)
+    {
+        prims.Add(new Prim(kind, origin, x, y, V3.Cross(x, y), p));
+        return prims.Count - 1;
+    }
+
+    public int AddSphere(V3 center, double radius) =>
+        AddPrimitive(FieldKind.Sphere, center, new V3(1, 0, 0), new V3(0, 1, 0), new V3(radius, 0, 0));
+
+    public int AddBox(V3 center, V3 x, V3 y, V3 half) => AddPrimitive(FieldKind.Box, center, x, y, half);
+
+    /// Difference is operands[0] minus the rest. Operands must already exist. At least one operand.
+    public int AddNode(FieldOp op, double k, IEnumerable<FieldRef> operands)
+    {
+        nodes.Add(new Node(op, k, [.. operands]));
+        return nodes.Count - 1;
+    }
+
+    public void AddRoot(FieldRef root) => roots.Add(root);
+
+    public bool HasRoots => roots.Count > 0;
+
+    void Seal()
+    {
+        if (isSealed) return;
+        lock (sealing)
+        {
+            if (isSealed) return;
+            if (roots.Count == 0 && prims.Count > 0)
+                roots.Add(FieldRef.Node(AddNode(FieldOp.Union, Blend, Enumerable.Range(0, prims.Count).Select(FieldRef.Primitive))));
+            isSealed = true;
+        }
+    }
+
+    /// A factor L such that |field| <= L × distance to the surface, which lets the mesher skip space that
+    /// is provably empty. 1 for exact distance functions and their unions, intersections and differences.
+    /// The ellipsoid is not a distance and overestimates it; 1.5 × the ratio of its semi-axes is used
+    /// (measured |field| / distance: up to 3.6 at ratio 6, and below the ratio in every case tried).
+    public double Lipschitz
+    {
+        get
+        {
+            double l = 1;
+            foreach (var p in prims)
+                if (p.Kind == FieldKind.Ellipsoid)
+                    l = Math.Max(l, 1.5 * Math.Max(p.P.X, Math.Max(p.P.Y, p.P.Z)) / Math.Min(p.P.X, Math.Min(p.P.Y, p.P.Z)));
+            return l;
+        }
+    }
 
     public double Value(V3 p)
     {
-        double d = double.NaN;
-        bool first = true;
-        foreach (var s in spheres) { var v = (p - s.C).Length - s.R; d = first ? v : Smin(d, v); first = false; }
-        foreach (var b in boxes) { var v = BoxValue(p, b, out _, false); d = first ? v : Smin(d, v); first = false; }
-        return d;
-    }
-
-    /// Value and analytic gradient. At a hard crease the gradient is that of the nearer branch.
-    public double Value(V3 p, out V3 grad)
-    {
-        double d = double.NaN;
-        grad = default;
-        bool first = true;
-        foreach (var s in spheres)
+        Seal();
+        int np = prims.Count, nn = nodes.Count;
+        Span<double> v = np + nn <= 256 ? stackalloc double[np + nn] : new double[np + nn];
+        for (int i = 0; i < np; i++) v[i] = PrimValue(prims[i], p);
+        for (int i = 0; i < nn; i++)
         {
-            var r = p - s.C;
-            var len = r.Length;
-            Fold(len - s.R, len > 0 ? r * (1 / len) : new V3(0, 0, 1), ref d, ref grad, ref first);
+            var n = nodes[i];
+            double d = Get(v, np, n.Operands[0]);
+            for (int o = 1; o < n.Operands.Length; o++)
+            {
+                double t = Get(v, np, n.Operands[o]);
+                d = n.Op switch
+                {
+                    FieldOp.Union => Smin(d, t, n.K),
+                    FieldOp.Intersect => -Smin(-d, -t, n.K),
+                    _ => -Smin(-d, t, n.K),
+                };
+            }
+            v[np + i] = d;
         }
-        foreach (var b in boxes)
-        {
-            var v = BoxValue(p, b, out var g, true);
-            Fold(v, g, ref d, ref grad, ref first);
-        }
-        return d;
+        double result = double.PositiveInfinity;
+        foreach (var r in roots) result = Math.Min(result, Get(v, np, r));
+        return result;
     }
 
-    void Fold(double v, V3 g, ref double d, ref V3 grad, ref bool first)
+    static double Get(ReadOnlySpan<double> v, int np, FieldRef r) => v[r.IsNode ? np + r.Index : r.Index];
+
+    /// Gradient by central differences over <paramref name="step"/>. At a crease it mixes both sides, but
+    /// only within <paramref name="step"/> of the crease.
+    public V3 Gradient(V3 p, double step)
     {
-        if (first) { d = v; grad = g; first = false; return; }
-        // smin(a, b) = min(a, b) - h²k/4, h = max(k - |a - b|, 0)/k  =>  gradient = mix(nearer, farther, h/2)
-        double k = Blend;
-        double h = k > 0 ? Math.Max(k - Math.Abs(d - v), 0) / k : 0;
-        var (near, far) = d < v ? (grad, g) : (g, grad);
-        grad = near * (1 - h * 0.5) + far * (h * 0.5);
-        d = Math.Min(d, v) - h * h * k * 0.25;
+        double i = 0.5 / step;
+        return new V3(
+            (Value(new V3(p.X + step, p.Y, p.Z)) - Value(new V3(p.X - step, p.Y, p.Z))) * i,
+            (Value(new V3(p.X, p.Y + step, p.Z)) - Value(new V3(p.X, p.Y - step, p.Z))) * i,
+            (Value(new V3(p.X, p.Y, p.Z + step)) - Value(new V3(p.X, p.Y, p.Z - step))) * i);
     }
 
-    double Smin(double a, double b)
+    /// IQ quadratic smooth minimum; k = blend distance, 0 = hard.
+    static double Smin(double a, double b, double k)
     {
-        double k = Blend;
         if (k <= 0) return Math.Min(a, b);
         double h = Math.Max(k - Math.Abs(a - b), 0) / k;
         return Math.Min(a, b) - h * h * k * 0.25;
     }
 
-    static double BoxValue(V3 p, in Box b, out V3 grad, bool wantGrad)
+    // IQ, https://iquilezles.org/articles/distfunctions/, ported from the GLSL in FrepShaderGen (local space, Y-up).
+    static double PrimValue(in Prim s, V3 world)
     {
-        var d = p - b.C;
-        double lx = V3.Dot(d, b.X), ly = V3.Dot(d, b.Y), lz = V3.Dot(d, b.Z);
-        double qx = Math.Abs(lx) - b.B.X, qy = Math.Abs(ly) - b.B.Y, qz = Math.Abs(lz) - b.B.Z;
-        double ox = Math.Max(qx, 0), oy = Math.Max(qy, 0), oz = Math.Max(qz, 0);
-        double outside = Math.Sqrt(ox * ox + oy * oy + oz * oz);
-        double inside = Math.Min(Math.Max(qx, Math.Max(qy, qz)), 0);
-        grad = default;
-        if (wantGrad)
+        var d = world - s.O;
+        if (s.Kind == FieldKind.Sphere) return d.Length - s.P.X;
+        double x = V3.Dot(d, s.X), y = V3.Dot(d, s.Y), z = V3.Dot(d, s.Z);
+        switch (s.Kind)
         {
-            double gx = 0, gy = 0, gz = 0;
-            if (outside > 0) { gx = ox / outside; gy = oy / outside; gz = oz / outside; }
-            else if (qx >= qy && qx >= qz) gx = 1;
-            else if (qy >= qz) gy = 1;
-            else gz = 1;
-            grad = b.X * (lx < 0 ? -gx : gx) + b.Y * (ly < 0 ? -gy : gy) + b.Z * (lz < 0 ? -gz : gz);
+            case FieldKind.Box:
+            {
+                double qx = Math.Abs(x) - s.P.X, qy = Math.Abs(y) - s.P.Y, qz = Math.Abs(z) - s.P.Z;
+                return Len(Math.Max(qx, 0), Math.Max(qy, 0), Math.Max(qz, 0)) + Math.Min(Math.Max(qx, Math.Max(qy, qz)), 0);
+            }
+            case FieldKind.Torus:
+                return Len(Len(x, z) - s.P.X, y) - s.P.Y;
+            case FieldKind.Cylinder: // P.X = half height, P.Y = radius
+            {
+                double dx = Len(x, z) - s.P.Y, dy = Math.Abs(y) - s.P.X;
+                return Math.Min(Math.Max(dx, dy), 0) + Len(Math.Max(dx, 0), Math.Max(dy, 0));
+            }
+            case FieldKind.Cone: // P.X = half height, P.Y = radius at -h, P.Z = radius at +h
+            {
+                double h = s.P.X, r1 = s.P.Y, r2 = s.P.Z;
+                double qx = Len(x, z), qy = y;
+                double k2x = r2 - r1, k2y = 2 * h;
+                double cax = qx - Math.Min(qx, qy < 0 ? r1 : r2), cay = Math.Abs(qy) - h;
+                double t = Math.Clamp(((r2 - qx) * k2x + (h - qy) * k2y) / (k2x * k2x + k2y * k2y), 0, 1);
+                double cbx = qx - r2 + k2x * t, cby = qy - h + k2y * t;
+                double sign = cbx < 0 && cay < 0 ? -1 : 1;
+                return sign * Math.Sqrt(Math.Min(cax * cax + cay * cay, cbx * cbx + cby * cby));
+            }
+            case FieldKind.Ellipsoid: // a bound, not exact
+            {
+                double k0 = Len(x / s.P.X, y / s.P.Y, z / s.P.Z);
+                double k1 = Len(x / (s.P.X * s.P.X), y / (s.P.Y * s.P.Y), z / (s.P.Z * s.P.Z));
+                return k1 > 0 ? k0 * (k0 - 1) / k1 : -Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
+            }
+            case FieldKind.Pyramid: // P.X = height, P.Y = base side; base centred on the origin, apex at +Y
+            {
+                double side = s.P.Y, h = s.P.X / side;
+                double px = Math.Abs(x / side), py = y / side, pz = Math.Abs(z / side);
+                double m2 = h * h + 0.25;
+                if (pz > px) (px, pz) = (pz, px);
+                px -= 0.5; pz -= 0.5;
+                double qx = pz, qy = h * py - 0.5 * px, qz = h * px + 0.5 * py;
+                double a0 = Math.Max(-qx, 0);
+                double t = Math.Clamp((qy - 0.5 * pz) / (m2 + 0.25), 0, 1);
+                double a = m2 * (qx + a0) * (qx + a0) + qy * qy;
+                double b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
+                double d2 = Math.Min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.Min(a, b);
+                // The shader's version ends with sign(max(q.z, -p.y)): inside, it measures distance to the
+                // slanted faces only, so its value jumps across the base. That is harmless when raymarching
+                // from outside but breaks meshing, which needs the sign to change only where the value passes
+                // through zero. Same surface, continuous across the base: slanted faces ∩ half-space y >= 0.
+                double slanted = Math.Sqrt((d2 + qz * qz) / m2) * (qz < 0 ? -1 : 1);
+                return Math.Max(slanted, -py) * side;
+            }
+            default:
+                throw new ArgumentOutOfRangeException(nameof(s));
         }
-        return outside + inside;
     }
 
-    /// World-axis bounds of the zero set. A single primitive is not blended. One smooth union bulges at most k/4 beyond its two operands.
-    /// Folding more primitives in sequence compounds: the deficit x below the plain minimum grows as
-    /// x' = x + (k - x)²/4k, which approaches but never exceeds k.
+    static double Len(double a, double b) => Math.Sqrt(a * a + b * b);
+    static double Len(double a, double b, double c) => Math.Sqrt(a * a + b * b + c * c);
+
+    /// World-axis bounds containing the surface. Intersections and differences only remove material, so
+    /// the primitives' bounds suffice for them. A smooth union bulges beyond its operands: by at most
+    /// k/4 for two, and for more the deficit x below the plain minimum compounds as x' = x + (k - x)²/4k,
+    /// which approaches but never exceeds k. Nested unions add up, so pad by the sum over union nodes.
     public (V3 Min, V3 Max) Bounds()
     {
+        Seal();
         double inf = double.PositiveInfinity;
         V3 min = new(inf, inf, inf), max = new(-inf, -inf, -inf);
-        void Grow(V3 c, V3 e)
+        foreach (var s in prims)
         {
-            min = new(Math.Min(min.X, c.X - e.X), Math.Min(min.Y, c.Y - e.Y), Math.Min(min.Z, c.Z - e.Z));
-            max = new(Math.Max(max.X, c.X + e.X), Math.Max(max.Y, c.Y + e.Y), Math.Max(max.Z, c.Z + e.Z));
+            // Local half-extents, and the offset of the local box's centre along Y.
+            var (e, up) = s.Kind switch
+            {
+                FieldKind.Sphere => (new V3(s.P.X, s.P.X, s.P.X), 0.0),
+                FieldKind.Torus => (new V3(s.P.X + s.P.Y, s.P.Y, s.P.X + s.P.Y), 0.0),
+                FieldKind.Cylinder => (new V3(s.P.Y, s.P.X, s.P.Y), 0.0),
+                FieldKind.Cone => (new V3(Math.Max(s.P.Y, s.P.Z), s.P.X, Math.Max(s.P.Y, s.P.Z)), 0.0),
+                FieldKind.Pyramid => (new V3(s.P.Y * 0.5, s.P.X * 0.5, s.P.Y * 0.5), s.P.X * 0.5),
+                _ => (s.P, 0.0),
+            };
+            var c = s.O + s.Y * up;
+            var w = new V3(
+                Math.Abs(s.X.X) * e.X + Math.Abs(s.Y.X) * e.Y + Math.Abs(s.Z.X) * e.Z,
+                Math.Abs(s.X.Y) * e.X + Math.Abs(s.Y.Y) * e.Y + Math.Abs(s.Z.Y) * e.Z,
+                Math.Abs(s.X.Z) * e.X + Math.Abs(s.Y.Z) * e.Y + Math.Abs(s.Z.Z) * e.Z);
+            min = new(Math.Min(min.X, c.X - w.X), Math.Min(min.Y, c.Y - w.Y), Math.Min(min.Z, c.Z - w.Z));
+            max = new(Math.Max(max.X, c.X + w.X), Math.Max(max.Y, c.Y + w.Y), Math.Max(max.Z, c.Z + w.Z));
         }
-        foreach (var s in spheres) Grow(s.C, new V3(s.R, s.R, s.R));
-        foreach (var b in boxes)
-            Grow(b.C, new V3(
-                Math.Abs(b.X.X) * b.B.X + Math.Abs(b.Y.X) * b.B.Y + Math.Abs(b.Z.X) * b.B.Z,
-                Math.Abs(b.X.Y) * b.B.X + Math.Abs(b.Y.Y) * b.B.Y + Math.Abs(b.Z.Y) * b.B.Z,
-                Math.Abs(b.X.Z) * b.B.X + Math.Abs(b.Y.Z) * b.B.Y + Math.Abs(b.Z.Z) * b.B.Z));
-        double bulge = Count < 2 ? 0 : Math.Max(Blend, 0) * (Count > 2 ? 1.0 : 0.25);
+        double bulge = 0;
+        foreach (var n in nodes)
+            if (n.Op == FieldOp.Union && n.Operands.Length > 1)
+                bulge += Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25);
         var pad = new V3(bulge, bulge, bulge);
         return (min - pad, max + pad);
     }

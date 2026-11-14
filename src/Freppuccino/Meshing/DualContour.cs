@@ -149,8 +149,10 @@ public static class DualContour
         int nx = g.Nx, ny = g.Ny, nz = g.Nz, sx = g.Sx, sy = g.Sy, sz = g.Sz;
         var f = g.F;
 
-        // 1. Samples. The field is 1-Lipschitz, so a block of samples whose centre is farther from the
-        //    surface than the block's radius has no sign change: fill it without evaluating.
+        // 1. Samples. The field changes by at most Lipschitz per unit distance, so a block of samples
+        //    whose centre value exceeds Lipschitz times the block's radius has no sign change: fill it
+        //    without evaluating.
+        double lipschitz = field.Lipschitz;
         int bx = (sx + Block - 1) / Block, by = (sy + Block - 1) / Block, bz = (sz + Block - 1) / Block;
         Parallel.For(0, bz, kb =>
         {
@@ -164,7 +166,7 @@ public static class DualContour
                     double ex = (i1 - 1 - i0) * h * 0.5, ey = (j1 - 1 - j0) * h * 0.5, ez = (k1 - 1 - k0) * h * 0.5;
                     var c = new V3(g.Origin.X + i0 * h + ex, g.Origin.Y + j0 * h + ey, g.Origin.Z + k0 * h + ez);
                     double fc = field.Value(c);
-                    bool skip = Math.Abs(fc) > Math.Sqrt(ex * ex + ey * ey + ez * ez) * 1.001 + 1e-9 * h;
+                    bool skip = Math.Abs(fc) > lipschitz * Math.Sqrt(ex * ex + ey * ey + ez * ez) * 1.001 + 1e-9 * h;
                     for (int k = k0; k < k1; k++)
                         for (int j = j0; j < j1; j++)
                         {
@@ -620,8 +622,7 @@ public static class DualContour
                 if (g.Field.Value(mid) < 0) pin = mid; else pout = mid;
             }
             var p = (pin + pout) * 0.5;
-            g.Field.Value(p, out var grad);
-            q.Add(grad.Normalized(), p - g.Origin);
+            q.Add(g.Field.Gradient(p, 1e-5 * h).Normalized(), p - g.Origin);
         }
         return Clamp(q.Solve(), cellMin - g.Origin, h, h) + g.Origin;
     }
