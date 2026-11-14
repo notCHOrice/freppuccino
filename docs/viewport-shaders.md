@@ -23,7 +23,7 @@ Conventions every generated shader follows:
 - Fragment output: `layout(location=0) out vec4`.
 
 Programs:
-- `Shaders/FrepShaderGen.cs`: scene. N spheres (doc Breps, `Scene/SphereScene.cs`) smooth-unioned (IQ quadratic smin, k = `FrepBlend` command, default 0.5 model units), raymarched on a fullscreen triangle. N is baked into the source (one cached compile per N); camera/frustum/spheres/k are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Cap 251 spheres (4 KB).
+- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. Raymarched on a fullscreen triangle. Structure baked into source (cached by generated map); camera/frustum/prims/k's are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. 4 KB uniform cap (prims past it dropped).
 - `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground.
 
 Original slice program (removed):
@@ -50,10 +50,10 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ```
 FreppuccinoPlugin (AtStartup)
   OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(ShadedId), HighlightSurfaces=false + UpdateDisplayMode (recreated if an old wireframe copy exists)
-ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if N>0; Draw(pill) → RhinoStateReset.Apply(dp) once
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(WireframeId) + UpdateDisplayMode   (Rhino wireframe drawing kept; recreated if a shaded copy exists)
+ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
-Command "FrepBlend"               set smooth-union k (session only)
+Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FTree opens F-rep Tree panel (edit k, delete, click row = pick node)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

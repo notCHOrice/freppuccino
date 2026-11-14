@@ -2,8 +2,7 @@ using Rhino.Display;
 
 namespace Freppuccino.Display;
 
-/// "Freppuccino" = copy of Shaded (shaded underlay + click-in-surface picking), selection highlight = wires only.
-/// Created once per machine if missing (or if an older wireframe-based copy exists); persisted via UpdateDisplayMode.
+/// "Freppuccino" = copy of Wireframe. Created once per machine if missing (or if a shaded copy from 2df8dab exists); persisted via UpdateDisplayMode.
 public static class FreppuccinoDisplayMode
 {
     public const string Name = "Freppuccino";
@@ -12,20 +11,16 @@ public static class FreppuccinoDisplayMode
     public static void Ensure()
     {
         var m = DisplayModeDescription.FindByName(Name);
-        if (m != null && !m.DisplayAttributes.ShadingEnabled)
+        if (m != null && m.DisplayAttributes.ShadingEnabled)
         {
-            DisplayModeDescription.DeleteDisplayMode(m.Id); // pre-shaded version
+            DisplayModeDescription.DeleteDisplayMode(m.Id); // shaded version
             m = null;
         }
         if (m == null)
         {
-            var id = DisplayModeDescription.CopyDisplayMode(DisplayModeDescription.ShadedId, Name);
+            var id = DisplayModeDescription.CopyDisplayMode(DisplayModeDescription.WireframeId, Name);
             m = DisplayModeDescription.GetDisplayMode(id);
-            if (m != null)
-            {
-                m.DisplayAttributes.HighlightSurfaces = false;
-                DisplayModeDescription.UpdateDisplayMode(m);
-            }
+            if (m != null) DisplayModeDescription.UpdateDisplayMode(m);
         }
         Id = m?.Id ?? Guid.Empty;
     }
