@@ -38,7 +38,7 @@ public static class FrepShaderGen
             SdKind.Cylinder => $"sdCappedCylinder({q}, {o}.w, {x}.w)",
             SdKind.Cone => $"sdCappedCone({q}, {o}.w, {x}.w, {y}.w)",
             SdKind.Ellipsoid => $"sdEllipsoid({q}, vec3({o}.w, {x}.w, {y}.w))",
-            SdKind.Pyramid => $"sdPyramidScaled({q}, {o}.w, {x}.w)",
+            SdKind.Pyramid => $"sdPyramid({q}, {o}.w, {x}.w)",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
     }
@@ -189,27 +189,18 @@ public static class FrepShaderGen
             float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
             return s * sqrt(min(dot2(ca), dot2(cb)));
         }
-        float sdEllipsoid(vec3 p, vec3 r) // bound, not exact
+        // Not IQ's sdEllipsoid / sdPyramid: those jump in value (at the ellipsoid's centre, across the
+        // pyramid's base), which breaks smooth CSG and meshing. These have the exact surface and change by
+        // at most 1 per unit distance. Keep in sync with Meshing/FrepField.cs.
+        float sdEllipsoid(vec3 p, vec3 r) // unit sphere scaled by r, times the smallest semi-axis
         {
-            float k0 = length(p / r);
-            float k1 = length(p / (r * r));
-            return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, min(r.y, r.z));
+            return (length(p / r) - 1.0) * min(r.x, min(r.y, r.z));
         }
-        float sdPyramid(vec3 p, float h) // unit square base centered at the origin, apex at (0, h, 0)
+        float sdPyramid(vec3 p, float h, float s) // base side s centered at the origin, apex at (0, h, 0)
         {
-            float m2 = h * h + 0.25;
-            p.xz = abs(p.xz);
-            p.xz = (p.z > p.x) ? p.zx : p.xz;
-            p.xz -= 0.5;
-            vec3 q = vec3(p.z, h * p.y - 0.5 * p.x, h * p.x + 0.5 * p.y);
-            float s = max(-q.x, 0.0);
-            float t = clamp((q.y - 0.5 * p.z) / (m2 + 0.25), 0.0, 1.0);
-            float a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
-            float b = m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) + (q.y - m2 * t) * (q.y - m2 * t);
-            float d2 = min(q.y, -q.x * m2 - q.y * 0.5) > 0.0 ? 0.0 : min(a, b);
-            return sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            float b = 0.5 * s; // max over the five face planes
+            return max((h * max(abs(p.x), abs(p.z)) + b * (p.y - h)) / length(vec2(h, b)), -p.y);
         }
-        float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
         float map(vec3 p)
         {
         {{map}}    return d;
