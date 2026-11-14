@@ -247,13 +247,18 @@ public static class FrepShaderGen
             float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
             return s * sqrt(min(dot2(ca), dot2(cb)));
         }
-        float sdEllipsoid(vec3 p, vec3 r) // bound, not exact
+        // Not IQ's sdEllipsoid: its value at the centre depends on the direction of approach, which breaks
+        // smooth CSG and meshing. This has the exact surface and changes by at most 1 per unit distance,
+        // but it underestimates distance. Keep in sync with Meshing/FrepField.cs.
+        float sdEllipsoid(vec3 p, vec3 r) // unit sphere scaled by r, times the smallest semi-axis
         {
-            float k0 = length(p / r);
-            float k1 = length(p / (r * r));
-            return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, min(r.y, r.z));
+            return (length(p / r) - 1.0) * min(r.x, min(r.y, r.z));
         }
-        float sdPyramid(vec3 p, float h) // unit square base centered at the origin, apex at (0, h, 0)
+        // Unit square base centered at the origin, apex at (0, h, 0).
+        // IQ's version measures distance to the four slanted faces only; the base enters just through the sign.
+        // Below the base that overestimates (the ray steps through the floor and stops inside), and just above it
+        // the interior distance ignores the floor (normals there point at the side faces). Both patched at the end.
+        float sdPyramid(vec3 p, float h)
         {
             float m2 = h * h + 0.25;
             p.xz = abs(p.xz);
@@ -265,7 +270,11 @@ public static class FrepShaderGen
             float a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
             float b = m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) + (q.y - m2 * t) * (q.y - m2 * t);
             float d2 = min(q.y, -q.x * m2 - q.y * 0.5) > 0.0 ? 0.0 : min(a, b);
-            return sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            float d = sqrt((d2 + q.z * q.z) / m2) * sign(max(q.z, -p.y));
+            // Below the base every point of the solid sits above the base square, so the base is nearest (exact).
+            // p.xz here is already abs()'d and shifted by -0.5, so max(p.xz, 0) is the overhang past the square.
+            if (p.y < 0.0) return length(vec3(max(p.x, 0.0), p.y, max(p.z, 0.0)));
+            return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
         float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
         float map(vec3 p)
@@ -395,9 +404,19 @@ public static class FrepShaderGen
         double radius = 0;
         foreach (var p in prims) radius = Math.Max(radius, c.DistanceTo(p.Frame.Origin) + PrimRadius(p));
 
-        double pad = 0;
-        foreach (var k in scene.Ks) if (k > 0) pad += 0.25 * k;
-        radius += pad;
+        // A smooth union lowers the field by up to k/4 for two operands, and by up to k for more (it
+        // compounds), so pad by k per node. The ellipsoid's field underestimates distance by up to the
+        // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
+        double pad = 0, stretch = 1;
+        foreach (var k in scene.Ks) if (k > 0) pad += k;
+        foreach (var p in prims)
+            if (p.Kind == SdKind.Ellipsoid)
+            {
+                double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
+                if (lo > 0) stretch = Math.Max(stretch, hi / lo);
+            }
+        radius += pad * stretch;
         return (c, radius * 1.01 + 1e-6); // margin for float32 rounding
     }
 }
