@@ -36,7 +36,7 @@ public class FrepMeshCommand : Command
             RhinoApp.WriteLine("FrepMesh: no F-rep objects in the document (create some with FSphere, FBox, ...).");
             return Result.Nothing;
         }
-        var field = BuildField(scene, FrepTrees.Get(doc));
+        var field = BuildField(scene, scene.Tree);
         if (!field.HasRoots)
         {
             RhinoApp.WriteLine("FrepMesh: nothing to mesh (every F-rep is hidden or cancelled out by the CSG tree).");
@@ -94,7 +94,7 @@ public class FrepMeshCommand : Command
 
     /// The scene as a CPU field, following FrepShaderGen.Compile: nodes in creation order, missing
     /// leaves (hidden or deleted primitives, hidden nodes) dropped the same way, parentless primitives
-    /// and nodes as roots.
+    /// and nodes as roots. Warps: hidden = missing, missing child = empty, ref gone = child unwarped.
     static FrepField BuildField(FrepSceneData scene, FrepTree tree)
     {
         var field = new FrepField();
@@ -116,6 +116,9 @@ public class FrepMeshCommand : Command
             index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p));
         }
 
+        var warps = new Dictionary<int, SdWarp>();
+        for (int i = 0; i < scene.Warps.Count; i++) warps[scene.WarpIds[i]] = scene.Warps[i];
+
         var nodeRef = new Dictionary<int, FieldRef?>();
         FieldRef? Ref(FrepOperand o) => o.IsNode
             ? nodeRef.GetValueOrDefault(o.NodeId)
@@ -124,6 +127,15 @@ public class FrepMeshCommand : Command
         {
             nodeRef[n.Id] = null;
             if (n.Hidden) continue;
+            if (n.Op.IsWarp())
+            {
+                if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;
+                nodeRef[n.Id] = warps.TryGetValue(n.Id, out var w)
+                    ? FieldRef.Node(field.AddWarp(n.Op switch { FrepOp.Twist => FieldOp.Twist, FrepOp.Bend => FieldOp.Bend, _ => FieldOp.Repeat },
+                        FrepWarpMath.Rows(w), child))
+                    : child;
+                continue;
+            }
             var terms = n.Operands.Select(Ref).ToList();
             // Union skips missing operands; intersect with one missing is empty; difference needs its base.
             bool empty = n.Op switch

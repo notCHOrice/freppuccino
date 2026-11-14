@@ -1,5 +1,6 @@
 using System.Text;
 using Freppuccino.Csg;
+using Freppuccino.Meshing;
 using Freppuccino.Scene;
 using Rhino.Display;
 using Rhino.Geometry;
@@ -7,22 +8,27 @@ using Rhino.Geometry;
 namespace Freppuccino.Shaders;
 
 /// Runtime-generated SDF scene from the CSG DAG, raymarched on a fullscreen triangle.
-/// Structure (prim kinds, tree shape) is baked into the source; parameters (camera, prims, per-node blend k) are uniforms,
-/// so moving primitives or editing blends never recompiles.
-/// map(): one local per prim, one per node (creation order = topological, so shared DAG nodes evaluate once),
-/// then hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at codegen:
-/// union skips them, intersect becomes empty, difference with missing base becomes empty.
+/// Structure (prim kinds, tree shape) is baked into the source; parameters (camera, prims, warp frames, per-node blend k) are uniforms,
+/// so moving primitives/axes or editing blends/warp params never recompiles.
+/// map(): emitted lazily from the roots. A value = (operand, point context): context 0 is p; each warp node opens a new context
+/// (its warped point) for its subtree, so a subtree shared by different warps is emitted once per context, else once.
+/// Root = hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at
+/// codegen: union skips them, intersect becomes empty, difference with missing base becomes empty, warp of a missing child
+/// becomes empty. A warp whose line/box is gone passes its child through unwarped.
 public static class FrepShaderGen
 {
-    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, then blend k's packed 4 per row.
+    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, warp rows, then blend k's packed 4 per row.
     const int HeaderRows = 7;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
     public static int Rows(SdKind kind) => kind == SdKind.Sphere ? 1 : 3;
+    /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
+    static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
-    /// Rows left for prims once every node's k has a slot.
-    public static int PrimRowBudget(int nodes) => MaxDataRows - KRows(nodes);
+    /// Rows left for prims once every node's k / warp rows have a slot.
+    public static int PrimRowBudget(FrepTree tree) =>
+        MaxDataRows - KRows(tree.Nodes.Count(n => !n.Op.IsWarp())) - tree.Nodes.Sum(n => n.Hidden ? 0 : WarpRows(n.Op));
 
     /// Shapes are drawn this many screen pixels inside their true outline, so Rhino's wireframe edges show around them.
     /// A uniform, so changing it never recompiles.
@@ -30,12 +36,12 @@ public static class FrepShaderGen
 
     static readonly Dictionary<string, ShaderSource> cache = [];
 
-    /// GLSL call evaluating one primitive whose rows start at <paramref name="row"/>; q is the point in its local frame.
-    static string Term(SdKind kind, int row)
+    /// GLSL call evaluating one primitive whose rows start at <paramref name="row"/> at point <paramref name="p"/>.
+    static string Term(SdKind kind, int row, string p)
     {
-        if (kind == SdKind.Sphere) return $"sdSphere(p, u.data[{row}])";
+        if (kind == SdKind.Sphere) return $"sdSphere({p}, u.data[{row}])";
         string o = $"u.data[{row}]", x = $"u.data[{row + 1}]", y = $"u.data[{row + 2}]";
-        string q = $"toLocal(p, {o}, {x}, {y})";
+        string q = $"toLocal({p}, {o}, {x}, {y})";
         return kind switch
         {
             SdKind.Box => $"sdBox({q}, vec3({o}.w, {x}.w, {y}.w))",
@@ -60,66 +66,113 @@ public static class FrepShaderGen
         """;
 
     /// <paramref name="ids"/> parallel to <paramref name="prims"/>; prims must fit <see cref="PrimRowBudget"/>.
-    /// Returns Program = null if the root is empty. Ks indexed by k slot, for <see cref="SceneUniforms"/>.
-    public static (ShaderSource? Program, List<double> Ks) Compile(IReadOnlyList<SdPrimitive> prims, IReadOnlyList<Guid> ids, FrepTree tree)
+    /// <paramref name="liveWarps"/>: warp node ids whose reference geometry resolved. Returns Program = null if the root is empty;
+    /// Ks (k slot order) and Warps (warp row order) for <see cref="SceneUniforms"/>.
+    public static (ShaderSource? Program, List<double> Ks, List<int> Warps) Compile(
+        IReadOnlyList<SdPrimitive> prims, IReadOnlyList<Guid> ids, FrepTree tree, IReadOnlySet<int> liveWarps)
     {
-        var map = new StringBuilder();
         var index = new Dictionary<Guid, int>();
+        var primRow = new int[prims.Count];
         int row = 0;
         for (int i = 0; i < prims.Count; i++)
         {
             index[ids[i]] = i;
-            map.Append($"    float p{i} = {Term(prims[i].Kind, row)};\n");
+            primRow[i] = row;
             row += Rows(prims[i].Kind);
         }
 
-        int kBase = row;
-        var ks = new List<double>();
-        var nodeVar = new Dictionary<int, string?>();
-        string? Var(FrepOperand o) => o.IsNode
-            ? nodeVar.GetValueOrDefault(o.NodeId)
-            : index.TryGetValue(o.ObjectId, out var i) ? $"p{i}" : null;
-
+        // Slots are assigned up front (in tree order), so rows are fixed before lazy emission.
+        var warpRow = new Dictionary<int, int>();
+        var warps = new List<int>();
         foreach (var n in tree.Nodes)
-        {
-            if (n.Hidden)
+            if (n.Op.IsWarp() && !n.Hidden && liveWarps.Contains(n.Id))
             {
-                nodeVar[n.Id] = null;
-                continue;
+                warpRow[n.Id] = row;
+                row += WarpRows(n.Op);
+                warps.Add(n.Id);
             }
-            var terms = n.Operands.Select(Var).ToList();
+        int kBase = row;
+        var kSlot = new Dictionary<int, int>();
+        var ks = new List<double>();
+        foreach (var n in tree.Nodes)
+            if (!n.Op.IsWarp())
+            {
+                kSlot[n.Id] = ks.Count;
+                ks.Add(n.K);
+            }
+
+        var map = new StringBuilder();
+        var memo = new Dictionary<(FrepOperand, int), string?>();
+        int contexts = 1;
+        static string Suffix(int c) => c == 0 ? "" : $"_{c}";
+        static string Point(int c) => c == 0 ? "p" : $"q{c}";
+        static string Row(int r) => $"u.data[{r}]";
+
+        string? Eval(FrepOperand o, int c)
+        {
+            if (memo.TryGetValue((o, c), out var v)) return v;
+            v = o.IsNode ? EvalNode(o.NodeId, c) : EvalPrim(o.ObjectId, c);
+            return memo[(o, c)] = v;
+        }
+
+        string? EvalPrim(Guid id, int c)
+        {
+            if (!index.TryGetValue(id, out var i)) return null;
+            var v = $"p{i}{Suffix(c)}";
+            map.Append($"    float {v} = {Term(prims[i].Kind, primRow[i], Point(c))};\n");
+            return v;
+        }
+
+        string? EvalNode(int id, int c)
+        {
+            if (tree.Find(id) is not { Hidden: false } n) return null;
+            var v = $"n{id}{Suffix(c)}";
+            if (n.Op.IsWarp())
+            {
+                if (n.Operands.Length == 0) return null;
+                if (!warpRow.TryGetValue(id, out var r)) return Eval(n.Operands[0], c); // line/box deleted: unwarped
+                int cc = contexts++;
+                string p = Point(c), q = Point(cc), l = $"l{cc}";
+                map.Append(n.Op switch
+                {
+                    FrepOp.Twist => $"    float {l}; vec3 {q} = opTwist({p}, {Row(r)}, {Row(r + 1)}, {l});\n",
+                    FrepOp.Bend => $"    float {l}; vec3 {q} = opBend({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {l});\n",
+                    _ => $"    float {l} = 1.0; vec3 {q} = opRepeat({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {Row(r + 3)}, {Row(r + 4)});\n",
+                });
+                if (Eval(n.Operands[0], cc) is not { } child) return null;
+                // Twist/bend stretch space; dividing by the local Lipschitz bound keeps steps conservative.
+                map.Append($"    float {v} = {child} / {l};\n");
+                return v;
+            }
+
+            var terms = n.Operands.Select(o => Eval(o, c)).ToList();
             List<string>? live = n.Op switch
             {
                 FrepOp.Union => [.. terms.OfType<string>()],
                 FrepOp.Intersect => terms.Contains(null) ? null : [.. terms.OfType<string>()],
                 _ => terms.Count == 0 || terms[0] == null ? null : [.. terms.OfType<string>()],
             };
-            string? v = null;
-            if (live is { Count: > 0 })
-            {
-                int slot = ks.Count;
-                ks.Add(n.K);
-                var k = $"u.data[{kBase + slot / 4}].{"xyzw"[slot % 4]}";
-                v = $"n{n.Id}";
-                map.Append($"    float {v} = {live[0]};\n");
-                foreach (var t in live.Skip(1))
-                    map.Append(n.Op switch
-                    {
-                        FrepOp.Union => $"    {v} = smin({v}, {t}, {k});\n",
-                        FrepOp.Intersect => $"    {v} = smax({v}, {t}, {k});\n",
-                        _ => $"    {v} = smax({v}, -{t}, {k});\n",
-                    });
-            }
-            nodeVar[n.Id] = v;
+            if (live is not { Count: > 0 }) return null;
+            int slot = kSlot[id];
+            var k = $"u.data[{kBase + slot / 4}].{"xyzw"[slot % 4]}";
+            map.Append($"    float {v} = {live[0]};\n");
+            foreach (var t in live.Skip(1))
+                map.Append(n.Op switch
+                {
+                    FrepOp.Union => $"    {v} = smin({v}, {t}, {k});\n",
+                    FrepOp.Intersect => $"    {v} = smax({v}, {t}, {k});\n",
+                    _ => $"    {v} = smax({v}, -{t}, {k});\n",
+                });
+            return v;
         }
 
         var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
         var roots = new List<string>();
         for (int i = 0; i < prims.Count; i++)
-            if (!referenced.Contains(FrepOperand.Object(ids[i]))) roots.Add($"p{i}");
+            if (!referenced.Contains(FrepOperand.Object(ids[i])) && Eval(FrepOperand.Object(ids[i]), 0) is { } v) roots.Add(v);
         foreach (var n in tree.Nodes)
-            if (nodeVar[n.Id] is { } v && !referenced.Contains(FrepOperand.Node(n.Id))) roots.Add(v);
-        if (roots.Count == 0) return (null, ks);
+            if (!referenced.Contains(FrepOperand.Node(n.Id)) && Eval(FrepOperand.Node(n.Id), 0) is { } v) roots.Add(v);
+        if (roots.Count == 0) return (null, ks, warps);
 
         map.Append($"    float d = {roots[0]};\n");
         foreach (var r in roots.Skip(1)) map.Append($"    d = min(d, {r});\n");
@@ -128,7 +181,7 @@ public static class FrepShaderGen
         var key = dataRows + "\n" + map;
         if (!cache.TryGetValue(key, out var src))
             cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString()));
-        return (src, ks);
+        return (src, ks, warps);
     }
 
     static string Fragment(int dataRows, string map) => $$"""
@@ -143,8 +196,8 @@ public static class FrepShaderGen
             vec4 camZ;       // xyz unit view direction; w = near
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
-            vec4 bound;      // xyz center, w radius: sphere enclosing every prim (+ smooth-union growth); w <= 0 = empty
-            // prims, then node blend k's (4 per row)
+            vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
+            // prims, then warp rows (see opTwist/opBend/opRepeat), then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
             // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
             //   box b = P; torus t = P.xy; cylinder h, r; cone h, r1, r2; ellipsoid r = P; pyramid h, s
@@ -225,6 +278,56 @@ public static class FrepShaderGen
             return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
         float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
+
+        // Domain warps: return the point to evaluate the child at; lip = local Lipschitz bound (child distance gets divided by it).
+        // Twist: a = (line start, rate rad/unit), d = (unit dir, extent = child radius around the axis, clamps the bound).
+        vec3 opTwist(vec3 p, vec4 a, vec4 d, out float lip)
+        {
+            vec3 v = p - a.xyz;
+            float h = dot(v, d.xyz);
+            vec3 r = v - d.xyz * h;
+            float ang = -a.w * h, c = cos(ang), s = sin(ang);
+            float sh = abs(a.w) * min(length(r), d.w);
+            lip = 0.5 * (sh + sqrt(sh * sh + 4.0)); // largest singular value of a shear by sh
+            return a.xyz + d.xyz * h + r * c + cross(d.xyz, r) * s;
+        }
+        // Bend: a = (line start, length L), d = (unit dir, total angle >= 0), n = (unit bend direction, min radius for the bound).
+        // [0, L] along d bends into an arc toward n; straight (rigid) before the start and past the end.
+        vec3 opBend(vec3 p, vec4 a, vec4 d, vec4 n, out float lip)
+        {
+            lip = 1.0;
+            float beta = d.w, L = a.w;
+            vec3 v = p - a.xyz;
+            float h = dot(v, d.xyz);
+            if (beta < 1e-5 || h <= 0.0) return p;
+            float y = dot(v, n.xyz);
+            vec3 b = v - d.xyz * h - n.xyz * y;
+            float R = L / beta;
+            vec2 c = vec2(h, R - y); // from the arc center
+            float alpha = atan(c.x, c.y), h0, y0;
+            if (alpha <= beta)
+            {
+                float rho = length(c);
+                h0 = R * alpha;
+                y0 = R - rho;
+                lip = max(1.0, R / max(rho, n.w));
+            }
+            else
+            {
+                vec2 q = vec2(h, y) - R * vec2(sin(beta), 1.0 - cos(beta)); // from the arc end
+                h0 = L + dot(q, vec2(cos(beta), sin(beta)));
+                y0 = dot(q, vec2(-sin(beta), cos(beta)));
+            }
+            return a.xyz + d.xyz * h0 + n.xyz * y0 + b;
+        }
+        // Limited repetition: o = (anchor = child center, spacing x), x = (unit box X, spacing y), y = (unit box Y, spacing z),
+        // lo/hi = copy index range per axis (box axes). Cells are centered on the anchor; the child must fit within one spacing.
+        vec3 opRepeat(vec3 p, vec4 o, vec4 x, vec4 y, vec4 lo, vec4 hi)
+        {
+            vec3 s = vec3(o.w, x.w, y.w);
+            vec3 i = clamp(round(toLocal(p, o, x, y) / max(s, vec3(1e-9))), lo.xyz, hi.xyz) * s;
+            return p - x.xyz * i.x - y.xyz * i.y - cross(x.xyz, y.xyz) * i.z;
+        }
         float map(vec3 p)
         {
         {{map}}    return d;
@@ -296,7 +399,7 @@ public static class FrepShaderGen
             .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
-        // Same order as Compile(): prim rows, then k's.
+        // Same order as Compile(): prim rows, warp rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
             u.Vec4(f.Origin.X, f.Origin.Y, f.Origin.Z, v.X);
@@ -304,59 +407,97 @@ public static class FrepShaderGen
             u.Vec4(f.XAxis.X, f.XAxis.Y, f.XAxis.Z, v.Y)
              .Vec4(f.YAxis.X, f.YAxis.Y, f.YAxis.Z, v.Z);
         }
+        foreach (var w in scene.Warps) WarpUniforms(u, w);
         var ks = scene.Ks;
         for (int i = 0; i < ks.Count; i += 4)
             u.Vec4(ks[i], i + 1 < ks.Count ? ks[i + 1] : 0, i + 2 < ks.Count ? ks[i + 2] : 0, i + 3 < ks.Count ? ks[i + 3] : 0);
         return u.ToBytes();
     }
 
-    /// Conservative world-space bounding sphere of the drawn scene. Each prim gets a sphere around its frame origin;
-    /// smooth unions can grow the surface by up to k/4 per blend, so pad by the sum of those (intersect/difference only shrink).
+    static void WarpUniforms(Uniforms u, SdWarp w)
+    {
+        foreach (var r in FrepWarpMath.Rows(w)) u.Vec4(r.X, r.Y, r.Z, r.W);
+    }
+
+    static double PrimRadius(SdPrimitive p)
+    {
+        var v = p.P;
+        return p.Kind switch
+        {
+            SdKind.Sphere => Math.Abs(v.X),
+            SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
+            SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
+            SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
+            SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),
+            SdKind.Ellipsoid => Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))),
+            SdKind.Pyramid => Math.Sqrt(v.X * v.X + 0.5 * v.Y * v.Y), // origin at base center, apex at +h
+            _ => 0,
+        };
+    }
+
+    /// Conservative world-space bounding sphere of the drawn scene, from the in-memory prims/warps (follows gumball drags).
+    /// Walks the tree like Compile(): prims → spheres, nodes union their operands, live warps grow their child's box.
     static (Point3d Center, double Radius) Bound(FrepSceneData scene)
     {
-        var prims = scene.Primitives;
-        if (prims.Count == 0) return (Point3d.Origin, 0);
+        var tree = scene.Tree;
+        var prim = new Dictionary<Guid, int>();
+        for (int i = 0; i < scene.Ids.Count; i++) prim[scene.Ids[i]] = i;
+        var warp = new Dictionary<int, SdWarp>();
+        for (int i = 0; i < scene.WarpIds.Count; i++) warp[scene.WarpIds[i]] = scene.Warps[i];
+        var memo = new Dictionary<FrepOperand, BoundingBox>();
 
-        static double PrimRadius(SdPrimitive p)
+        BoundingBox Of(FrepOperand o)
         {
-            var v = p.P;
-            return p.Kind switch
+            if (memo.TryGetValue(o, out var b)) return b;
+            b = BoundingBox.Empty;
+            if (!o.IsNode)
             {
-                SdKind.Sphere => Math.Abs(v.X),
-                SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
-                SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
-                SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
-                SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),
-                SdKind.Ellipsoid => Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))),
-                SdKind.Pyramid => Math.Sqrt(v.X * v.X + 0.5 * v.Y * v.Y), // origin at base center, apex at +h
-                _ => 0,
-            };
+                if (prim.TryGetValue(o.ObjectId, out var i))
+                {
+                    var p = scene.Primitives[i];
+                    var r = new Vector3d(1, 1, 1) * PrimRadius(p);
+                    b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
+                }
+            }
+            else if (tree.Find(o.NodeId) is { Hidden: false } n)
+            {
+                if (n.Op == FrepOp.Difference) { if (n.Operands.Length > 0) b = Of(n.Operands[0]); }
+                else foreach (var c in n.Operands) b.Union(Of(c));
+                if (b.IsValid && warp.TryGetValue(n.Id, out var w)) b = Warped(b, w);
+            }
+            return memo[o] = b;
         }
 
         var box = BoundingBox.Empty;
-        foreach (var p in prims)
-        {
-            double r = PrimRadius(p);
-            box.Union(new BoundingBox(p.Frame.Origin - new Vector3d(r, r, r), p.Frame.Origin + new Vector3d(r, r, r)));
-        }
-        var c = box.Center;
-        double radius = 0;
-        foreach (var p in prims) radius = Math.Max(radius, c.DistanceTo(p.Frame.Origin) + PrimRadius(p));
+        var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
+        foreach (var id in scene.Ids)
+            if (!referenced.Contains(FrepOperand.Object(id))) box.Union(Of(FrepOperand.Object(id)));
+        foreach (var n in tree.Nodes)
+            if (!referenced.Contains(FrepOperand.Node(n.Id))) box.Union(Of(FrepOperand.Node(n.Id)));
+        if (!box.IsValid) return (Point3d.Origin, 0);
 
         // A smooth union lowers the field by up to k/4 for two operands, and by up to k for more (it
         // compounds), so pad by k per node. The ellipsoid's field underestimates distance by up to the
         // ratio of its semi-axes, so the same drop in value moves its surface that much farther.
         double pad = 0, stretch = 1;
         foreach (var k in scene.Ks) if (k > 0) pad += k;
-        foreach (var p in prims)
+        foreach (var p in scene.Primitives)
             if (p.Kind == SdKind.Ellipsoid)
             {
                 double lo = Math.Min(Math.Abs(p.P.X), Math.Min(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
                 double hi = Math.Max(Math.Abs(p.P.X), Math.Max(Math.Abs(p.P.Y), Math.Abs(p.P.Z)));
                 if (lo > 0) stretch = Math.Max(stretch, hi / lo);
             }
-        radius += pad * stretch;
-        return (c, radius * 1.01 + 1e-6); // margin for float32 rounding
+        double radius = 0.5 * box.Diagonal.Length + pad * stretch;
+        return (box.Center, radius * 1.01 + 1e-6); // margin for float32 rounding
+    }
+
+    /// Box of a warp's output given its child's box; same as the mesher's (FrepField.WarpBox).
+    internal static BoundingBox Warped(BoundingBox child, SdWarp w)
+    {
+        var op = w.Op switch { FrepOp.Twist => FieldOp.Twist, FrepOp.Bend => FieldOp.Bend, _ => FieldOp.Repeat };
+        var (lo, hi) = FrepField.WarpBox(op, FrepWarpMath.Rows(w), (new(child.Min.X, child.Min.Y, child.Min.Z), new(child.Max.X, child.Max.Y, child.Max.Z)));
+        return new BoundingBox(lo.X, lo.Y, lo.Z, hi.X, hi.Y, hi.Z);
     }
 }
 
