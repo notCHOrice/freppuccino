@@ -65,8 +65,8 @@ export type UiMessage =
   /** primitive: Rhino show/hide; operation: hides the node's result (undoable) */
   | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
-  /** STUB on the host */
-  | { type: 'setParam'; id: Id; name: string; value: number }
+  /** preview: live drag tick, no undo; the next non-preview setParam ends the gesture as one undo step. */
+  | { type: 'setParam'; id: Id; name: string; value: number; preview?: boolean }
   /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
   /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step. */

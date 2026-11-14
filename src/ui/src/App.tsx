@@ -34,6 +34,7 @@ export default function App() {
 
   const labels = useMemo(() => labelNodes(scene), [scene])
   const byId = useMemo(() => indexNodes(scene), [scene])
+  const roots = useMemo(() => new Set(scene.map((n) => n.id)), [scene])
   const selectedSet = useMemo(() => new Set(selection), [selection])
   const selected = useMemo(() => selection.map((id) => byId.get(id)).filter((n) => !!n), [selection, byId])
 
@@ -69,7 +70,7 @@ export default function App() {
       </ScrollArea>
 
       <div className="max-h-[65%] shrink-0 overflow-y-auto border-t bg-card">
-        <Inspector selected={selected} labels={labels} />
+        <Inspector selected={selected} labels={labels} roots={roots} />
       </div>
 
       <NoticeToast />

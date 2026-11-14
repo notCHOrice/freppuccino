@@ -25,16 +25,15 @@ export function ParamSlider(props: {
   const id = useId()
   const [value, setValue] = useState(props.value)
   const [text, setText] = useState(format(props.value))
-  // Follow the prop when the host changes it (undo, command line edits).
+  // Follow the prop when the host changes it (undo, command line edits). A drag keeps the finger's value.
   const [prop, setProp] = useState(props.value)
-  if (props.value !== prop) {
+  /** value of an uncommitted drag */
+  const dragged = useRef<number | null>(null)
+  if (props.value !== prop && dragged.current === null) {
     setProp(props.value)
     setValue(props.value)
     setText(format(props.value))
   }
-
-  /** value of an uncommitted drag */
-  const dragged = useRef<number | null>(null)
 
   const show = (v: number) => {
     setValue(v)

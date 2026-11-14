@@ -48,7 +48,6 @@ export function createMockHost(): Transport {
   const map = (nodes: SceneNode[], fn: (n: SceneNode) => SceneNode): SceneNode[] =>
     nodes.map((x) => fn({ ...x, children: x.children && map(x.children, fn) }))
   const flat = (nodes: SceneNode[]): SceneNode[] => nodes.flatMap((x) => [x, ...flat(x.children ?? [])])
-  const notImplemented = (what: string) => emit({ type: 'notice', level: 'info', text: `${what}: not implemented yet (mock).` })
 
   function handle(m: UiMessage) {
     switch (m.type) {
@@ -75,7 +74,8 @@ export function createMockHost(): Transport {
         break
       }
       case 'setParam':
-        notImplemented('Editing primitive parameters')
+        scene = map(scene, (x) => (x.id === m.id ? { ...x, params: { ...x.params, [m.name]: m.value } } : x))
+        emit({ type: 'scene', scene })
         break
       case 'applyOperation': {
         const all = flat(scene)
