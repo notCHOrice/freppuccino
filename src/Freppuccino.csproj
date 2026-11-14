@@ -1,0 +1,52 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	
+  <PropertyGroup>
+    <!-- Select the framework(s) you wish to target.
+        Rhino 6: net45
+        Rhino 7: net48
+        Rhino 8 Windows: net48, net7.0, net7.0-windows, net7.0-windows10.0.22000.0, etc
+        Rhino 8 Mac: net7.0, net7.0-macos, net7.0-macos12.0, etc
+        Rhino 9 Windows: net48, net8.0, net8.0-windows, net8.0-windows10.0.22000.0, etc
+        Rhino 9 Mac: net8.0, net8.0-macos, net8.0-macos12.0, etc
+    -->
+    <TargetFrameworks>net8.0;net48</TargetFrameworks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.rhp</TargetExt>
+    <NoWarn>NU1701</NoWarn>
+  </PropertyGroup>
+  
+  <PropertyGroup>
+    <!-- Specifies information for Assembly and Yak -->
+    <Version>1.0</Version> <!-- Sets the Yak Version Attribute -->
+    <Title>Freppuccino</Title>
+    <Company>Freppuccino Authors</Company><!-- Sets the Yak Author Attribute -->
+    <Description>Description of Freppuccino</Description><!-- Sets the Yak Description Attribute -->
+    <!--<AssemblyName>Freppuccino</AssemblyName>--><!-- Sets the Yak Name Attribute -->
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="9.0.26279.6303-beta" ExcludeAssets="runtime" />
+  </ItemGroup>
+  
+  <Target Name="BuildYakPackage" AfterTargets="DispatchToInnerBuilds">
+    <PropertyGroup>
+      <YakExecutable Condition="$(YakExecutable) == '' and $([MSBuild]::IsOSPlatform(windows)) and Exists('C:\Program Files\Rhino 9\System\Yak.exe')">C:\Program Files\Rhino 9\System\Yak.exe</YakExecutable>
+      <YakExecutable Condition="$(YakExecutable) == '' and $([MSBuild]::IsOSPlatform(macos)) and Exists('/Applications/Rhino 9.app/Contents/Resources/bin/yak')">/Applications/Rhino 9.app/Contents/Resources/bin/yak</YakExecutable>
+      
+      <BuildYakPackage Condition="$(BuildYakPackage) == '' and $(YakExecutable) != '' and Exists($(YakExecutable))">True</BuildYakPackage>
+    </PropertyGroup>
+    
+    <Warning Text="Could not find Yak executable" Condition="$(YakExecutable) == ''" />
+
+    <ItemGroup>
+      <YakPackagesToDelete Include="$(OutputPath)\*.yak;$(OutputPath)\**\manifest.yml" />
+    </ItemGroup>
+    
+    <Delete Files="@(YakPackagesToDelete)" />
+
+    <Exec Command="&quot;$(YakExecutable)&quot; spec" WorkingDirectory="$(OutputPath)" Condition="$(BuildYakPackage) == 'True'" />
+    <Exec Command="&quot;$(YakExecutable)&quot; build" WorkingDirectory="$(OutputPath)" Condition="$(BuildYakPackage) == 'True'" />
+
+  </Target>
+
+</Project>

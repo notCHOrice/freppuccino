@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "l+Cl/r6F57g=",
+  "success": true,
+  "projectFilePath": "/Users/sykes/gits/freppuccino/src/Freppuccino.csproj",
+  "expectedPackageFiles": [
+    "/Users/sykes/.nuget/packages/microsoft.netframework.referenceassemblies/1.0.3/microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/microsoft.netframework.referenceassemblies.net48/1.0.3/microsoft.netframework.referenceassemblies.net48.1.0.3.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/microsoft.win32.systemevents/8.0.0/microsoft.win32.systemevents.8.0.0.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/rhinocommon/9.0.26279.6303-beta/rhinocommon.9.0.26279.6303-beta.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/system.drawing.common/8.0.0/system.drawing.common.8.0.0.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/microsoft.netcore.app.ref/8.0.24/microsoft.netcore.app.ref.8.0.24.nupkg.sha512",
+    "/Users/sykes/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.24/microsoft.aspnetcore.app.ref.8.0.24.nupkg.sha512"
+  ],
+  "logs": []
+}
