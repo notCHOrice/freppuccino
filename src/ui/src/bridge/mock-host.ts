@@ -91,6 +91,10 @@ export function createMockHost(): Transport {
         scene = map(scene, (x) => (x.id === m.id ? { ...x, op: m.op, k: m.k } : x))
         emit({ type: 'scene', scene })
         break
+      case 'setNodeParam':
+        scene = map(scene, (x) => (x.id === m.id ? { ...x, params: { ...x.params, [m.name]: m.value } } : x))
+        emit({ type: 'scene', scene })
+        break
       case 'deleteNodes': {
         // Only roots can go (nothing references them); their operands become roots again.
         const roots = scene.filter((x) => m.ids.includes(x.id) && x.kind === 'operation')

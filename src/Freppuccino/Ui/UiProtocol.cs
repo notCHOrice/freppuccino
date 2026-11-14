@@ -34,6 +34,10 @@ public static class OperationKind
     /// children[0] minus children[1..]
     public const string Subtract = "subtract";
     public const string Intersect = "intersect";
+    /// Domain warps of one child (children[0]); Ref = line/box object id, Params = FrepOps.ParamNames → value.
+    public const string Twist = "twist";
+    public const string Bend = "bend";
+    public const string Repeat = "repeat";
 }
 
 /// <summary>
@@ -51,7 +55,9 @@ public sealed record SceneNode(
     string? Op = null,
     double? K = null,
     IReadOnlyList<SceneNode>? Children = null,
-    bool? Missing = null);
+    bool? Missing = null,
+    string? Ref = null,
+    bool? RefMissing = null);
 
 public sealed record UiSettings(string Units);
 
@@ -111,6 +117,9 @@ public sealed record ApplyOperationRequest(string[] Operands, string Op, double 
 
 /// Edit an existing operation node. Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
 public sealed record SetOperationRequest(string Id, string Op, double K, bool Preview = false);
+
+/// Edit one param of a warp node (FrepOps.ParamNames). Preview semantics as SetOperationRequest.
+public sealed record SetNodeParamRequest(string Id, string Name, double Value, bool Preview = false);
 
 /// Delete operation nodes nothing else uses.
 public sealed record DeleteNodesRequest(string[] Ids);

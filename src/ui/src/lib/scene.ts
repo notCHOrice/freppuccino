@@ -1,5 +1,5 @@
 import type { BrandIconName } from '@/components/brand-icon'
-import type { AllowedCommand, OperationKind, SceneNode } from '@/bridge/protocol'
+import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
 
 interface PrimitiveInfo {
   label: string
@@ -30,20 +30,31 @@ export const OPERATIONS: Record<OperationKind, { label: string; icon: BrandIconN
   intersect: { label: 'Intersect', icon: 'intersect' },
 }
 
+/** Commands take the selected object / node, then ask for the line / box. Angles in degrees. */
+export const DEFORMS: Record<DeformKind, { label: string; icon: BrandIconName; command: AllowedCommand; params: Record<string, string> }> = {
+  twist: { label: 'Twist', icon: 'twist', command: 'FTwist', params: { angle: 'Angle' } },
+  bend: { label: 'Bend', icon: 'bend', command: 'FBend', params: { angle: 'Angle', direction: 'Direction' } },
+  repeat: { label: 'Repeat', icon: 'repeat', command: 'FRepeat', params: { x: 'Spacing X', y: 'Spacing Y', z: 'Spacing Z' } },
+}
+
+export function isDeform(op: SceneNode['op']): op is DeformKind {
+  return !!op && op in DEFORMS
+}
+
 export function nodeIconName(node: SceneNode): BrandIconName | undefined {
-  if (node.kind === 'operation') return node.op && OPERATIONS[node.op].icon
+  if (node.kind === 'operation') return !node.op ? undefined : isDeform(node.op) ? DEFORMS[node.op].icon : OPERATIONS[node.op].icon
   return node.sdfType ? PRIMITIVES[node.sdfType]?.icon : undefined
 }
 
 export function typeLabel(node: SceneNode): string {
-  if (node.kind === 'operation') return node.op ? OPERATIONS[node.op].label : 'Operation'
+  if (node.kind === 'operation') return !node.op ? 'Operation' : isDeform(node.op) ? DEFORMS[node.op].label : OPERATIONS[node.op].label
   return (node.sdfType && PRIMITIVES[node.sdfType]?.label) || node.sdfType || 'Primitive'
 }
 
 /** Params with display labels: known ones in catalogue order, then any others (raw key). */
 export function displayParams(node: SceneNode): { key: string; label: string; value: number }[] {
   const values = node.params ?? {}
-  const known = (node.sdfType && PRIMITIVES[node.sdfType]?.params) || {}
+  const known = (isDeform(node.op) ? DEFORMS[node.op].params : node.sdfType && PRIMITIVES[node.sdfType]?.params) || {}
   const ordered = [...Object.keys(known).filter((k) => k in values), ...Object.keys(values).filter((k) => !(k in known))]
   return ordered.map((key) => ({ key, label: known[key] ?? key, value: values[key] }))
 }

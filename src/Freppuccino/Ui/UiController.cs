@@ -171,6 +171,9 @@ public sealed class UiController : IDisposable
         FrepOp.Union => OperationKind.Union,
         FrepOp.Intersect => OperationKind.Intersect,
         FrepOp.Difference => OperationKind.Subtract,
+        FrepOp.Twist => OperationKind.Twist,
+        FrepOp.Bend => OperationKind.Bend,
+        FrepOp.Repeat => OperationKind.Repeat,
         _ => throw new ArgumentOutOfRangeException(nameof(op)),
     };
 
@@ -195,6 +198,15 @@ public sealed class UiController : IDisposable
             var children = n.Operands.Select(o => o.IsNode
                 ? (tree.Find(o.NodeId) is { } child ? Node(child) : Missing(NodeKey(o.NodeId)))
                 : Primitive(doc, o.ObjectId)).ToList();
+            if (n.Op.IsWarp())
+            {
+                var names = n.Op.ParamNames();
+                bool refOk = doc.Objects.FindId(n.Ref) is { IsDeleted: false } r && FrepRefs.Fits(n.Op, r.Geometry);
+                return built[n.Id] = new SceneNode(
+                    Id: NodeKey(n.Id), Kind: SceneNodeKind.Operation, Name: n.Name, Visible: !n.Hidden, Locked: false,
+                    Op: ToKind(n.Op), Params: names.Select((name, i) => (name, i)).ToDictionary(x => x.name, x => n.Param(x.i)),
+                    Children: children, Ref: ObjectKey(n.Ref), RefMissing: refOk ? null : true);
+            }
             return built[n.Id] = new SceneNode(
                 Id: NodeKey(n.Id), Kind: SceneNodeKind.Operation, Name: n.Name, Visible: !n.Hidden, Locked: false,
                 Op: ToKind(n.Op), K: n.K, Children: children);
@@ -270,8 +282,8 @@ public sealed class UiController : IDisposable
     {
         var doc = RhinoDoc.ActiveDoc;
         if (doc == null) return;
-        // Anything but setOperation ends a live edit whose commit never came.
-        if (type != "setOperation") FrepTrees.Commit(doc);
+        // Anything but a live edit ends a live edit whose commit never came.
+        if (type is not ("setOperation" or "setNodeParam")) FrepTrees.Commit(doc);
         try
         {
             switch (type)
@@ -298,6 +310,9 @@ public sealed class UiController : IDisposable
                     break;
                 case "setOperation":
                     SetOperation(doc, Parse<SetOperationRequest>(message));
+                    break;
+                case "setNodeParam":
+                    SetNodeParam(doc, Parse<SetNodeParamRequest>(message));
                     break;
                 case "deleteNodes":
                     DeleteNodes(doc, Parse<DeleteNodesRequest>(message));
@@ -328,7 +343,7 @@ public sealed class UiController : IDisposable
         var nodeIds = Nodes(tree, request.Ids).ToList();
 
         // While FUnion/FIntersect/FDifference wait for operands, a node click feeds the command (like typing "N3").
-        if (FCsgCommand.Picking)
+        if (FrepNodeCommand.Picking)
         {
             foreach (var n in nodeIds) RhinoApp.SendKeystrokes(FrepTree.NodeName(n), true);
             return;
@@ -395,10 +410,20 @@ public sealed class UiController : IDisposable
     {
         if (ParseKind(request.Op) is not { } op) throw new JsonException($"unknown op '{request.Op}'");
         var tree = FrepTrees.Get(doc);
-        if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node) return;
+        if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node || node.Op.IsWarp()) return;
         var k = Math.Max(0, request.K);
         // Previews apply live; the final message records the whole gesture as one undo step.
         if (node.Op != op || node.K != k) FrepTrees.Preview(doc, tree.WithOp(id, op, k), $"Edit {node.Name}");
+        if (!request.Preview) FrepTrees.Commit(doc);
+    }
+
+    static void SetNodeParam(RhinoDoc doc, SetNodeParamRequest request)
+    {
+        var tree = FrepTrees.Get(doc);
+        if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node) return;
+        int i = node.Op.ParamNames().ToList().IndexOf(request.Name);
+        if (i < 0 || !double.IsFinite(request.Value)) throw new JsonException($"bad param '{request.Name}' for {node.Name}");
+        if (node.Param(i) != request.Value) FrepTrees.Preview(doc, tree.WithParam(id, i, request.Value), $"Edit {node.Name}");
         if (!request.Preview) FrepTrees.Commit(doc);
     }
 
