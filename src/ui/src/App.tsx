@@ -1,8 +1,10 @@
-import { X } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { Sparkles, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { AiPanel } from '@/components/ai-panel'
 import { Inspector } from '@/components/inspector'
 import { SceneTree } from '@/components/scene-tree'
 import { dismissNotice, send, useHost } from '@/bridge/host'
@@ -11,7 +13,10 @@ import { cn } from '@/lib/utils'
 import appIcon from '@/brand/app-icon.svg'
 import wordmark from '@/brand/wordmark.svg?raw'
 
+type Tab = 'scene' | 'ai'
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>('scene')
   const host = useHost((s) => s.host)
   const synced = useHost((s) => s.synced)
   const scene = useHost((s) => s.scene)
@@ -51,25 +56,45 @@ export default function App() {
         <span className="ml-auto flex items-center gap-1.5">
           {host === 'mock' && <Badge variant="new">Mock host</Badge>}
           {!synced && <span className="type-small text-muted-foreground">connecting…</span>}
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={0}
+            value={tab}
+            onValueChange={(v) => v && setTab(v as Tab)}
+            aria-label="Panel"
+          >
+            <ToggleGroupItem value="scene" className="px-2">Scene</ToggleGroupItem>
+            <ToggleGroupItem value="ai" className="px-2">
+              <Sparkles /> AI
+            </ToggleGroupItem>
+          </ToggleGroup>
         </span>
       </header>
 
-      <div className="flex h-9 shrink-0 items-center px-4 text-muted-foreground">
-        <span className="type-label">Browser</span>
-        <span className="type-numeric ml-auto">{byId.size}</span>
-      </div>
-      <ScrollArea className="min-h-24 flex-1">
-        <SceneTree
-          nodes={scene}
-          labels={labels}
-          selection={selectedSet}
-          onSelect={(ids, mode) => send({ type: 'select', ids, mode })}
-          onSetVisible={(id, visible) => send({ type: 'setVisible', id, visible })}
-        />
-      </ScrollArea>
+      {/* Both stay mounted so switching keeps scroll position and the chat draft. */}
+      <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'scene' && 'hidden')}>
+        <div className="flex h-9 shrink-0 items-center px-4 text-muted-foreground">
+          <span className="type-label">Browser</span>
+          <span className="type-numeric ml-auto">{byId.size}</span>
+        </div>
+        <ScrollArea className="min-h-24 flex-1">
+          <SceneTree
+            nodes={scene}
+            labels={labels}
+            selection={selectedSet}
+            onSelect={(ids, mode) => send({ type: 'select', ids, mode })}
+            onSetVisible={(id, visible) => send({ type: 'setVisible', id, visible })}
+          />
+        </ScrollArea>
 
-      <div className="max-h-[65%] shrink-0 overflow-y-auto border-t bg-card">
-        <Inspector selected={selected} labels={labels} />
+        <div className="max-h-[65%] shrink-0 overflow-y-auto border-t bg-card">
+          <Inspector selected={selected} labels={labels} />
+        </div>
+      </div>
+      <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'ai' && 'hidden')}>
+        <AiPanel />
       </div>
 
       <NoticeToast />

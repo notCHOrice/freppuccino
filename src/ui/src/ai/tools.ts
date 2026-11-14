@@ -1,0 +1,204 @@
+import type { ToolDef } from './openrouter'
+import { callTool, ToolError } from '@/bridge/host'
+import { findSkill, SKILLS } from './skills'
+
+// Tools the model can call. Everything but load_skill runs in Rhino: src/Freppuccino/Ai/AiTools.cs (same names and
+// argument shapes; shape fields are documented in Ai/AiShapes.cs). Keep the three in sync.
+
+const vec3 = (description: string) => ({
+  type: 'array',
+  items: { type: 'number' },
+  minItems: 3,
+  maxItems: 3,
+  description,
+})
+const refs = (description: string) => ({ type: 'array', items: { type: 'string' }, minItems: 1, description })
+
+const SHAPE_FIELDS = {
+  center: vec3('sphere / box / ellipsoid / torus: center point [x,y,z]'),
+  radius: { type: 'number', description: 'sphere, cylinder: radius' },
+  size: vec3('box: full lengths [x,y,z] along x_axis, y_axis and their cross product (world X/Y/Z by default)'),
+  radii: vec3('ellipsoid: semi-axis lengths [x,y,z] along x_axis, y_axis and their cross product'),
+  x_axis: vec3('box / ellipsoid / pyramid: optional local X direction for rotated shapes (default [1,0,0])'),
+  y_axis: vec3('box / ellipsoid: optional local Y direction (default [0,1,0]); made perpendicular to x_axis'),
+  start: vec3('cylinder / cone: center of the start cap'),
+  end: vec3('cylinder / cone: center of the end cap'),
+  start_radius: { type: 'number', description: 'cone: radius at start (0 = point)' },
+  end_radius: { type: 'number', description: 'cone: radius at end (0 = point); both > 0 makes a frustum' },
+  axis: vec3('torus: normal of the ring plane (default [0,0,1] = ring lies flat); pyramid: base → apex direction (default [0,0,1])'),
+  major_radius: { type: 'number', description: 'torus: ring radius (center to tube center)' },
+  minor_radius: { type: 'number', description: 'torus: tube radius' },
+  base_center: vec3('pyramid: center of the square base'),
+  height: { type: 'number', description: 'pyramid: height from base to apex' },
+  base_size: { type: 'number', description: 'pyramid: side length of the square base' },
+}
+
+const TYPES = ['sphere', 'box', 'ellipsoid', 'cylinder', 'cone', 'torus', 'pyramid']
+
+function tool(name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ToolDef {
+  return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } }
+}
+
+export const TOOLS: ToolDef[] = [
+  tool(
+    'get_scene',
+    'Lists every F-rep primitive (ref, type, shape fields, used_by) and operation node (ref N#, op, k, operands), the roots ' +
+      '(what is drawn), the bounding box and the model units. Call it first, and whenever you are unsure of refs or positions.',
+  ),
+  tool(
+    'create_primitive',
+    'Adds one primitive. All coordinates are world space, model units, Z up. Fields by type: ' +
+      'sphere(center, radius); box(center, size, x_axis?, y_axis?); ellipsoid(center, radii, x_axis?, y_axis?); ' +
+      'cylinder(start, end, radius); cone(start, end, start_radius, end_radius); ' +
+      'torus(center, axis?, major_radius, minor_radius); pyramid(base_center, height, base_size, axis?, x_axis?). ' +
+      'Returns its ref (the name, made unique). Create several at once with parallel calls.',
+    { type: { type: 'string', enum: TYPES }, name: { type: 'string', description: 'short descriptive snake_case name, e.g. "cup_body"' }, ...SHAPE_FIELDS },
+    ['type', 'name'],
+  ),
+  tool(
+    'update_primitive',
+    "Changes a primitive's shape fields in place (same fields as create_primitive; omitted fields keep their value) or renames it. " +
+      'Its type cannot change. Operations using it update automatically.',
+    { ref: { type: 'string' }, name: { type: 'string', description: 'new name (optional)' }, ...SHAPE_FIELDS },
+    ['ref'],
+  ),
+  tool(
+    'transform',
+    'Moves / rotates / scales primitives, or every primitive under an operation node. Order: scale, then rotate, then translate, ' +
+      'about pivot (default: center of their bounding box). Non-uniform scale turns spheres into ellipsoids; it fails for shapes ' +
+      'that cannot represent the result (e.g. a cylinder squashed across its axis).',
+    {
+      refs: refs('primitives or nodes to transform'),
+      translate: vec3('offset [dx,dy,dz]'),
+      rotate: {
+        type: 'object',
+        properties: { angle_degrees: { type: 'number' }, axis: vec3('rotation axis direction (default [0,0,1])') },
+        required: ['angle_degrees'],
+      },
+      scale: { description: 'uniform factor, or [sx,sy,sz] along world axes', anyOf: [{ type: 'number' }, vec3('per-axis factors')] },
+      pivot: vec3('center for scale / rotate'),
+    },
+    ['refs'],
+  ),
+  tool(
+    'combine',
+    'Creates a CSG operation node from ≥ 2 operands (primitive refs or node refs). union: merge; subtract: operands[0] minus all ' +
+      'the others; intersect: the overlap. k = blend radius in model units (0 = sharp edge, > 0 = smooth fillet-like blend). ' +
+      'Operands are consumed: only roots are drawn. Returns the node ref (N#).',
+    {
+      op: { type: 'string', enum: ['union', 'subtract', 'intersect'] },
+      operands: refs('primitive or node refs; for subtract the first is the target'),
+      k: { type: 'number', description: 'blend radius, ≥ 0 (default 0)' },
+    },
+    ['op', 'operands'],
+  ),
+  tool(
+    'edit_operation',
+    "Changes an operation node's op and/or blend k.",
+    { ref: { type: 'string', description: 'node ref, e.g. "N3"' }, op: { type: 'string', enum: ['union', 'subtract', 'intersect'] }, k: { type: 'number' } },
+    ['ref'],
+  ),
+  tool(
+    'delete',
+    'Deletes primitives and/or operation nodes. Something still used by another operation is kept (delete the parent first). ' +
+      'recursive=true also deletes everything under the given nodes that nothing else uses.',
+    { refs: refs('refs to delete'), recursive: { type: 'boolean' } },
+    ['refs'],
+  ),
+  tool('set_visible', 'Shows or hides primitives / operation nodes (hidden ones are not drawn).', {
+    refs: refs('refs'),
+    visible: { type: 'boolean' },
+  }, ['refs', 'visible']),
+  tool(
+    'clear_scene',
+    'Deletes ALL F-rep primitives and operations (undoable). Only when the user asks for a fresh start or a new, unrelated object ' +
+      'and the scene holds your previous attempt.',
+  ),
+  tool(
+    'capture_views',
+    'Renders screenshots of the F-rep result (what the user sees, CSG applied) and returns them as images. ' +
+      'Views: perspective, perspective_back, perspective_below, front (looking +Y), back, left, right (looking -X), top, bottom. ' +
+      'Default: perspective, front, right, top. Framed on all visible primitives, or on focus refs to zoom in on a detail.',
+    {
+      views: { type: 'array', items: { type: 'string' }, maxItems: 6 },
+      focus: refs('optional refs to frame instead of everything'),
+      size: { type: 'number', description: 'image size in px (default 512, max 1024)' },
+    },
+  ),
+  tool(
+    'load_skill',
+    'Reads a skill: guidance and proven recipes for a kind of object or task. Load the matching ones before building.',
+    { name: { type: 'string', enum: SKILLS.filter((s) => !s.always).map((s) => s.name) } },
+    ['name'],
+  ),
+]
+
+export interface ToolOutcome {
+  ok: boolean
+  /** JSON text for the model (images stripped) */
+  content: string
+  /** screenshots (data URLs) to show the model and the user */
+  images?: { view: string; dataUrl: string }[]
+  /** one-line summary for the chat */
+  summary: string
+}
+
+export async function runTool(name: string, rawArgs: string): Promise<ToolOutcome> {
+  let args: Record<string, unknown>
+  try {
+    args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
+  } catch {
+    return fail(`arguments are not valid JSON: ${rawArgs.slice(0, 200)}`)
+  }
+
+  if (name === 'load_skill') {
+    const skill = findSkill(String(args.name ?? ''))
+    if (!skill) return fail(`no skill '${args.name}'. Available: ${SKILLS.map((s) => s.name).join(', ')}`)
+    return { ok: true, content: skill.body, summary: skill.name }
+  }
+
+  try {
+    const result = (await callTool(name, args, name === 'capture_views' ? 120_000 : 60_000)) as Record<string, unknown>
+    if (name === 'capture_views') {
+      const views = (result.views as string[]) ?? []
+      const images = ((result.images as string[]) ?? []).map((dataUrl, i) => ({ view: views[i] ?? `view ${i + 1}`, dataUrl }))
+      return {
+        ok: true,
+        content: JSON.stringify({ captured: views, note: 'The images follow in the next message, in this order.' }),
+        images,
+        summary: views.join(', '),
+      }
+    }
+    return { ok: true, content: JSON.stringify(result), summary: summarize(name, args, result) }
+  } catch (e) {
+    return fail(e instanceof ToolError ? e.message : `${(e as Error).message}`)
+  }
+}
+
+function fail(message: string): ToolOutcome {
+  return { ok: false, content: JSON.stringify({ error: message }), summary: message }
+}
+
+function summarize(name: string, args: Record<string, unknown>, result: Record<string, unknown>): string {
+  switch (name) {
+    case 'get_scene': {
+      const p = (result.primitives as unknown[])?.length ?? 0
+      const o = (result.operations as unknown[])?.length ?? 0
+      return `${p} primitives, ${o} operations`
+    }
+    case 'create_primitive':
+      return `${args.type} ${result.ref}`
+    case 'update_primitive':
+      return String(args.ref)
+    case 'combine':
+      return `${result.ref} = ${args.op}(${(args.operands as string[]).join(', ')})${args.k ? ` k=${args.k}` : ''}`
+    case 'edit_operation':
+      return `${result.ref}: ${result.op} k=${result.k}`
+    case 'delete':
+      return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
+    case 'transform':
+      return ((result.transformed as string[]) ?? []).join(', ')
+    default:
+      return 'done'
+  }
+}

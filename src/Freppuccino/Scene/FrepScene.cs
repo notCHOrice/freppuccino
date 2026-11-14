@@ -167,7 +167,7 @@ public static class FrepScene
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
-    static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
+    public static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
     {
         prim = default;
         switch (SdfUserText.ReadType(a))

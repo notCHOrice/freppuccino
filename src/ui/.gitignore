@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# OpenRouter key for the AI panel (see docs/ai.md); never commit
+.env
+.env.*
+!.env.example
