@@ -29,6 +29,10 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 /// IQ primitive distance functions in their local frames, combined by CSG nodes with IQ's quadratic
 /// smooth min/max, and a hard minimum over the roots. Keep the two in sync.
 ///
+/// Every primitive here changes by at most 1 per unit distance, and the CSG operations preserve that,
+/// so |field| <= distance to the surface: the mesher relies on it to skip empty space. The ellipsoid and pyramid deliberately differ from the shader's formulas, which
+/// do not have these properties (same surfaces, different values away from them; see PrimValue).
+///
 /// Build it with <see cref="AddPrimitive"/>, <see cref="AddNode"/> and <see cref="AddRoot"/>. With no
 /// roots declared, all primitives are smooth-unioned in order with <see cref="Blend"/>.
 public sealed class FrepField
@@ -79,22 +83,6 @@ public sealed class FrepField
             if (roots.Count == 0 && prims.Count > 0)
                 roots.Add(FieldRef.Node(AddNode(FieldOp.Union, Blend, Enumerable.Range(0, prims.Count).Select(FieldRef.Primitive))));
             isSealed = true;
-        }
-    }
-
-    /// A factor L such that |field| <= L × distance to the surface, which lets the mesher skip space that
-    /// is provably empty. 1 for exact distance functions and their unions, intersections and differences.
-    /// The ellipsoid is not a distance and overestimates it; 1.5 × the ratio of its semi-axes is used
-    /// (measured |field| / distance: up to 3.6 at ratio 6, and below the ratio in every case tried).
-    public double Lipschitz
-    {
-        get
-        {
-            double l = 1;
-            foreach (var p in prims)
-                if (p.Kind == FieldKind.Ellipsoid)
-                    l = Math.Max(l, 1.5 * Math.Max(p.P.X, Math.Max(p.P.Y, p.P.Z)) / Math.Min(p.P.X, Math.Min(p.P.Y, p.P.Z)));
-            return l;
         }
     }
 
@@ -177,31 +165,24 @@ public sealed class FrepField
                 double sign = cbx < 0 && cay < 0 ? -1 : 1;
                 return sign * Math.Sqrt(Math.Min(cax * cax + cay * cay, cbx * cbx + cby * cby));
             }
-            case FieldKind.Ellipsoid: // a bound, not exact
+            case FieldKind.Ellipsoid:
             {
+                // The shader's version, k0 (k0 - 1) / k1, is a better distance estimate but its value at the
+                // centre depends on the direction of approach. Under a smooth CSG node that turns into a
+                // sign jump, and it defeats the mesher's empty-space skipping. This one has the same
+                // surface and changes by at most 1 per unit distance: a unit sphere scaled by r,
+                // times the smallest semi-axis.
                 double k0 = Len(x / s.P.X, y / s.P.Y, z / s.P.Z);
-                double k1 = Len(x / (s.P.X * s.P.X), y / (s.P.Y * s.P.Y), z / (s.P.Z * s.P.Z));
-                return k1 > 0 ? k0 * (k0 - 1) / k1 : -Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
+                return (k0 - 1) * Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
             }
             case FieldKind.Pyramid: // P.X = height, P.Y = base side; base centred on the origin, apex at +Y
             {
-                double side = s.P.Y, h = s.P.X / side;
-                double px = Math.Abs(x / side), py = y / side, pz = Math.Abs(z / side);
-                double m2 = h * h + 0.25;
-                if (pz > px) (px, pz) = (pz, px);
-                px -= 0.5; pz -= 0.5;
-                double qx = pz, qy = h * py - 0.5 * px, qz = h * px + 0.5 * py;
-                double a0 = Math.Max(-qx, 0);
-                double t = Math.Clamp((qy - 0.5 * pz) / (m2 + 0.25), 0, 1);
-                double a = m2 * (qx + a0) * (qx + a0) + qy * qy;
-                double b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
-                double d2 = Math.Min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.Min(a, b);
-                // The shader's version ends with sign(max(q.z, -p.y)): inside, it measures distance to the
-                // slanted faces only, so its value jumps across the base. That is harmless when raymarching
-                // from outside but breaks meshing, which needs the sign to change only where the value passes
-                // through zero. Same surface, continuous across the base: slanted faces ∩ half-space y >= 0.
-                double slanted = Math.Sqrt((d2 + qz * qz) / m2) * (qz < 0 ? -1 : 1);
-                return Math.Max(slanted, -py) * side;
+                // The shader's version jumps in value across the base (inside, it measures distance to the
+                // slanted faces only). Same surface, changing by at most 1 per unit distance: the five
+                // face planes' signed distances, combined by max (the pyramid is their intersection).
+                double h = s.P.X, half = s.P.Y * 0.5;
+                double slanted = (h * Math.Max(Math.Abs(x), Math.Abs(z)) + half * (y - h)) / Len(h, half);
+                return Math.Max(slanted, -y);
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(s));
@@ -211,40 +192,67 @@ public sealed class FrepField
     static double Len(double a, double b) => Math.Sqrt(a * a + b * b);
     static double Len(double a, double b, double c) => Math.Sqrt(a * a + b * b + c * c);
 
-    /// World-axis bounds containing the surface. Intersections and differences only remove material, so
-    /// the primitives' bounds suffice for them. A smooth union bulges beyond its operands: by at most
-    /// k/4 for two, and for more the deficit x below the plain minimum compounds as x' = x + (k - x)²/4k,
-    /// which approaches but never exceeds k. Nested unions add up, so pad by the sum over union nodes.
+    /// World-axis bounds containing the surface, following the CSG structure from the roots, so that
+    /// cutters, intersected-away regions and primitives no root reaches do not inflate them:
+    /// a difference is bounded by its base, an intersection by the overlap of its operands, a union by
+    /// its operands plus its blend bulge. A smooth union bulges beyond its operands by at most k/4 for
+    /// two; for more, the deficit x below the plain minimum compounds as x' = x + (k - x)²/4k, which
+    /// approaches but never exceeds k. Empty (Min > Max on some axis) if there is no surface.
     public (V3 Min, V3 Max) Bounds()
     {
         Seal();
         double inf = double.PositiveInfinity;
-        V3 min = new(inf, inf, inf), max = new(-inf, -inf, -inf);
-        foreach (var s in prims)
+        (V3 Min, V3 Max) empty = (new V3(inf, inf, inf), new V3(-inf, -inf, -inf));
+        var nodeBounds = new (V3 Min, V3 Max)[nodes.Count];
+        (V3 Min, V3 Max) Of(FieldRef r) => r.IsNode ? nodeBounds[r.Index] : PrimBounds(prims[r.Index]);
+        static bool IsEmpty((V3 Min, V3 Max) b) => b.Min.X > b.Max.X || b.Min.Y > b.Max.Y || b.Min.Z > b.Max.Z;
+        static (V3 Min, V3 Max) Join((V3 Min, V3 Max) a, (V3 Min, V3 Max) b) => (
+            new V3(Math.Min(a.Min.X, b.Min.X), Math.Min(a.Min.Y, b.Min.Y), Math.Min(a.Min.Z, b.Min.Z)),
+            new V3(Math.Max(a.Max.X, b.Max.X), Math.Max(a.Max.Y, b.Max.Y), Math.Max(a.Max.Z, b.Max.Z)));
+
+        for (int i = 0; i < nodes.Count; i++)
         {
-            // Local half-extents, and the offset of the local box's centre along Y.
-            var (e, up) = s.Kind switch
+            var n = nodes[i];
+            var box = Of(n.Operands[0]);
+            if (n.Op == FieldOp.Union)
             {
-                FieldKind.Sphere => (new V3(s.P.X, s.P.X, s.P.X), 0.0),
-                FieldKind.Torus => (new V3(s.P.X + s.P.Y, s.P.Y, s.P.X + s.P.Y), 0.0),
-                FieldKind.Cylinder => (new V3(s.P.Y, s.P.X, s.P.Y), 0.0),
-                FieldKind.Cone => (new V3(Math.Max(s.P.Y, s.P.Z), s.P.X, Math.Max(s.P.Y, s.P.Z)), 0.0),
-                FieldKind.Pyramid => (new V3(s.P.Y * 0.5, s.P.X * 0.5, s.P.Y * 0.5), s.P.X * 0.5),
-                _ => (s.P, 0.0),
-            };
-            var c = s.O + s.Y * up;
-            var w = new V3(
-                Math.Abs(s.X.X) * e.X + Math.Abs(s.Y.X) * e.Y + Math.Abs(s.Z.X) * e.Z,
-                Math.Abs(s.X.Y) * e.X + Math.Abs(s.Y.Y) * e.Y + Math.Abs(s.Z.Y) * e.Z,
-                Math.Abs(s.X.Z) * e.X + Math.Abs(s.Y.Z) * e.Y + Math.Abs(s.Z.Z) * e.Z);
-            min = new(Math.Min(min.X, c.X - w.X), Math.Min(min.Y, c.Y - w.Y), Math.Min(min.Z, c.Z - w.Z));
-            max = new(Math.Max(max.X, c.X + w.X), Math.Max(max.Y, c.Y + w.Y), Math.Max(max.Z, c.Z + w.Z));
+                for (int o = 1; o < n.Operands.Length; o++) box = Join(box, Of(n.Operands[o]));
+                double bulge = n.Operands.Length < 2 ? 0 : Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25);
+                if (!IsEmpty(box)) box = (box.Min - new V3(bulge, bulge, bulge), box.Max + new V3(bulge, bulge, bulge));
+            }
+            else if (n.Op == FieldOp.Intersect)
+                for (int o = 1; o < n.Operands.Length; o++)
+                {
+                    var other = Of(n.Operands[o]);
+                    box = (
+                        new V3(Math.Max(box.Min.X, other.Min.X), Math.Max(box.Min.Y, other.Min.Y), Math.Max(box.Min.Z, other.Min.Z)),
+                        new V3(Math.Min(box.Max.X, other.Max.X), Math.Min(box.Max.Y, other.Max.Y), Math.Min(box.Max.Z, other.Max.Z)));
+                }
+            nodeBounds[i] = IsEmpty(box) ? empty : box;
         }
-        double bulge = 0;
-        foreach (var n in nodes)
-            if (n.Op == FieldOp.Union && n.Operands.Length > 1)
-                bulge += Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25);
-        var pad = new V3(bulge, bulge, bulge);
-        return (min - pad, max + pad);
+
+        var all = empty;
+        foreach (var r in roots) all = Join(all, Of(r));
+        return all;
+    }
+
+    static (V3 Min, V3 Max) PrimBounds(in Prim s)
+    {
+        // Local half-extents, and the offset of the local box's centre along Y.
+        var (e, up) = s.Kind switch
+        {
+            FieldKind.Sphere => (new V3(s.P.X, s.P.X, s.P.X), 0.0),
+            FieldKind.Torus => (new V3(s.P.X + s.P.Y, s.P.Y, s.P.X + s.P.Y), 0.0),
+            FieldKind.Cylinder => (new V3(s.P.Y, s.P.X, s.P.Y), 0.0),
+            FieldKind.Cone => (new V3(Math.Max(s.P.Y, s.P.Z), s.P.X, Math.Max(s.P.Y, s.P.Z)), 0.0),
+            FieldKind.Pyramid => (new V3(s.P.Y * 0.5, s.P.X * 0.5, s.P.Y * 0.5), s.P.X * 0.5),
+            _ => (s.P, 0.0),
+        };
+        var c = s.O + s.Y * up;
+        var w = new V3(
+            Math.Abs(s.X.X) * e.X + Math.Abs(s.Y.X) * e.Y + Math.Abs(s.Z.X) * e.Z,
+            Math.Abs(s.X.Y) * e.X + Math.Abs(s.Y.Y) * e.Y + Math.Abs(s.Z.Y) * e.Z,
+            Math.Abs(s.X.Z) * e.X + Math.Abs(s.Y.Z) * e.Y + Math.Abs(s.Z.Z) * e.Z);
+        return (c - w, c + w);
     }
 }

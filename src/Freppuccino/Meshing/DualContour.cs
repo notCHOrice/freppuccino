@@ -142,6 +142,8 @@ public static class DualContour
     {
         var (bmin, bmax) = field.Bounds();
         var size = bmax - bmin;
+        if (!(size.X > 0 && size.Y > 0 && size.Z > 0) || double.IsInfinity(size.X + size.Y + size.Z))
+            return new Result([], [], 0, 0, 0, 0); // no surface
         double h = Math.Max(size.X, Math.Max(size.Y, size.Z)) / resolution;
         // Two cells of padding: every sample on the grid boundary is strictly outside.
         var g = new Grid(field, bmin - new V3(2 * h, 2 * h, 2 * h), h,
@@ -149,10 +151,9 @@ public static class DualContour
         int nx = g.Nx, ny = g.Ny, nz = g.Nz, sx = g.Sx, sy = g.Sy, sz = g.Sz;
         var f = g.F;
 
-        // 1. Samples. The field changes by at most Lipschitz per unit distance, so a block of samples
-        //    whose centre value exceeds Lipschitz times the block's radius has no sign change: fill it
-        //    without evaluating.
-        double lipschitz = field.Lipschitz;
+        // 1. Samples. |field| never exceeds the distance to the surface (see FrepField), so a block of
+        //    samples whose centre is farther from the surface than the block's radius has no sign change:
+        //    fill it without evaluating.
         int bx = (sx + Block - 1) / Block, by = (sy + Block - 1) / Block, bz = (sz + Block - 1) / Block;
         Parallel.For(0, bz, kb =>
         {
@@ -166,7 +167,7 @@ public static class DualContour
                     double ex = (i1 - 1 - i0) * h * 0.5, ey = (j1 - 1 - j0) * h * 0.5, ez = (k1 - 1 - k0) * h * 0.5;
                     var c = new V3(g.Origin.X + i0 * h + ex, g.Origin.Y + j0 * h + ey, g.Origin.Z + k0 * h + ez);
                     double fc = field.Value(c);
-                    bool skip = Math.Abs(fc) > lipschitz * Math.Sqrt(ex * ex + ey * ey + ez * ez) * 1.001 + 1e-9 * h;
+                    bool skip = Math.Abs(fc) > Math.Sqrt(ex * ex + ey * ey + ez * ez) * 1.001 + 1e-9 * h;
                     for (int k = k0; k < k1; k++)
                         for (int j = j0; j < j1; j++)
                         {
