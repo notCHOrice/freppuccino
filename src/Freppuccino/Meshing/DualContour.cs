@@ -22,7 +22,10 @@ public static class DualContour
     const int Block = 8;
 
     /// How far a vertex may sit outside its cell, in cells (see CellVertex).
-    public static double Slack = 0.5;
+    public static double Slack = 1.0;
+
+    /// Eigenvalues of the fit below this fraction of the largest are treated as zero (see CellVertex).
+    public static double Cutoff = 0.1;
 
     /// <paramref name="resolution"/> = cells along the longest side of the field's bounds.
     public static Result Mesh(FrepField field, int resolution)
@@ -244,12 +247,12 @@ public static class DualContour
         double max = Math.Max(val[0], Math.Max(val[1], val[2]));
         var x = mass;
         for (int e = 0; e < 3; e++)
-            if (val[e] > 0.1 * max)
+            if (val[e] > Cutoff * max)
                 x += vec[e] * (V3.Dot(vec[e], rhs) / val[e]);
 
         // A crease can clip a cell without passing through it (its crossings then lie on both sides of a
         // crease that is just outside). Clamping the vertex to the cell would pull it off the crease and
-        // serrate every edge that is not grid-aligned, so let it leave by up to half a cell. The limit
+        // serrate every edge that is not grid-aligned, so let it leave by up to one cell. The limit
         // still bounds how far a bad solve can move it.
         double slack = Slack * h;
         return new V3(
