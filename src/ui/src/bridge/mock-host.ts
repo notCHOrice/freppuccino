@@ -3,8 +3,7 @@ import type { AllowedCommand, HostMessage, SceneNode, UiMessage } from './protoc
 
 /**
  * Stand-in for Rhino when the page runs in a normal browser (`npm run dev`).
- * Behaves like UiController.cs, including the stubs. The scene includes operation nodes
- * (which the real host doesn't send yet) so the nested browser tree can be developed now.
+ * Behaves roughly like UiController.cs, including the stubs. Operation ids are "N<n>" like the real host.
  * Add ?theme=dark / ?theme=light to the URL to force a theme.
  */
 export function createMockHost(): Transport {
@@ -13,6 +12,10 @@ export function createMockHost(): Transport {
 
   let n = 0
   const id = () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`
+  let nextNode = 1
+  const opNode = (op: SceneNode['op'], k: number, children: SceneNode[]): SceneNode => ({
+    id: `N${nextNode++}`, kind: 'operation', name: `N${nextNode - 1}`, op, k, visible: true, locked: false, children,
+  })
   const prim = (sdfType: string, params: Record<string, number>, name?: string): SceneNode => ({
     id: id(), kind: 'primitive', sdfType, name, visible: true, locked: false, params,
   })
@@ -26,20 +29,15 @@ export function createMockHost(): Transport {
     FTorus: () => prim('sdTorus', { 't.x': 2, 't.y': 0.5 }),
   }
 
+  const holes = opNode('union', 0.5, [
+    prim('sdCappedCylinder', { h: 2, r: 0.8 }, 'Bore'),
+    prim('sdEllipsoid', { 'r.x': 1.5, 'r.y': 0.6, 'r.z': 0.6 }),
+  ])
   let scene: SceneNode[] = [
     prim('sdSphere', { s: 2 }),
     prim('sdTorus', { 't.x': 3, 't.y': 0.6 }),
     prim('sdCappedCone', { h: 1.5, r1: 1.2, r2: 0.3 }),
-    {
-      id: id(), kind: 'operation', op: 'subtract', k: 0.25, visible: true, locked: false,
-      children: [
-        prim('sdBox', { 'b.x': 3, 'b.y': 3, 'b.z': 1 }),
-        {
-          id: id(), kind: 'operation', op: 'union', k: 0.5, visible: true, locked: false,
-          children: [prim('sdCappedCylinder', { h: 2, r: 0.8 }, 'Bore'), prim('sdEllipsoid', { 'r.x': 1.5, 'r.y': 0.6, 'r.z': 0.6 })],
-        },
-      ],
-    },
+    opNode('subtract', 0.25, [prim('sdBox', { 'b.x': 3, 'b.y': 3, 'b.z': 1 }), holes]),
     prim('sdPyramid', { h: 2, s: 2.5 }),
   ]
   let selection: string[] = []
@@ -49,6 +47,7 @@ export function createMockHost(): Transport {
 
   const map = (nodes: SceneNode[], fn: (n: SceneNode) => SceneNode): SceneNode[] =>
     nodes.map((x) => fn({ ...x, children: x.children && map(x.children, fn) }))
+  const flat = (nodes: SceneNode[]): SceneNode[] => nodes.flatMap((x) => [x, ...flat(x.children ?? [])])
   const notImplemented = (what: string) => emit({ type: 'notice', level: 'info', text: `${what}: not implemented yet (mock).` })
 
   function handle(m: UiMessage) {
@@ -78,12 +77,30 @@ export function createMockHost(): Transport {
       case 'setParam':
         notImplemented('Editing primitive parameters')
         break
-      case 'applyOperation':
-        notImplemented(`${m.op} (k = ${m.k})`)
+      case 'applyOperation': {
+        const all = flat(scene)
+        const operands = m.operands.map((x) => all.find((y) => y.id === x)).filter((x) => !!x)
+        const node = opNode(m.op, m.k, operands)
+        scene = [...scene.filter((x) => !m.operands.includes(x.id)), node]
+        selection = [node.id]
+        emit({ type: 'scene', scene })
+        emit({ type: 'selection', ids: selection })
         break
+      }
       case 'setOperation':
-        notImplemented(`Editing operation (${m.op}, k = ${m.k})`)
+        scene = map(scene, (x) => (x.id === m.id ? { ...x, op: m.op, k: m.k } : x))
+        emit({ type: 'scene', scene })
         break
+      case 'deleteNodes': {
+        // Only roots can go (nothing references them); their operands become roots again.
+        const roots = scene.filter((x) => m.ids.includes(x.id) && x.kind === 'operation')
+        if (roots.length < m.ids.length) emit({ type: 'notice', level: 'warning', text: 'Not deleted: still used by other nodes (mock).' })
+        scene = [...scene.filter((x) => !roots.includes(x)), ...roots.flatMap((x) => x.children ?? [])]
+        selection = selection.filter((x) => !roots.some((r) => r.id === x))
+        emit({ type: 'scene', scene })
+        emit({ type: 'selection', ids: selection })
+        break
+      }
     }
   }
 

@@ -9,7 +9,7 @@ namespace Freppuccino.Shaders;
 /// Structure (prim kinds, tree shape) is baked into the source; parameters (camera, prims, per-node blend k) are uniforms,
 /// so moving primitives or editing blends never recompiles.
 /// map(): one local per prim, one per node (creation order = topological, so shared DAG nodes evaluate once),
-/// then hard min over parentless prims/nodes. Missing leaves (hidden/deleted/over budget) are dropped at codegen:
+/// then hard min over parentless prims/nodes. Missing leaves (hidden prims or nodes/deleted/over budget) are dropped at codegen:
 /// union skips them, intersect becomes empty, difference with missing base becomes empty.
 public static class FrepShaderGen
 {
@@ -77,6 +77,11 @@ public static class FrepShaderGen
 
         foreach (var n in tree.Nodes)
         {
+            if (n.Hidden)
+            {
+                nodeVar[n.Id] = null;
+                continue;
+            }
             var terms = n.Operands.Select(Var).ToList();
             List<string>? live = n.Op switch
             {

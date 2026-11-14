@@ -5,7 +5,6 @@ using Freppuccino.Sdf;
 using Freppuccino.Scene;
 using Freppuccino.Shaders;
 using Freppuccino.Ui;
-using Freppuccino.UI;
 using Rhino;
 using Rhino.FileIO;
 using Rhino.PlugIns;
@@ -30,7 +29,6 @@ public class FreppuccinoPlugin : PlugIn
         SdfTransformWatcher.Install();
         FrepScene.Install();
         FrepTrees.Install();
-        Panels.RegisterPanel(this, typeof(FrepTreePanel), FrepTreePanel.Caption, GetType().Assembly, "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.PerDoc);
         Conduit = new ShaderConduit { Enabled = true };
         Panels.RegisterPanel(this, typeof(FrepPanel), FrepPanel.Caption, GetType().Assembly,
             "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.System);

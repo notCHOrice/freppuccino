@@ -20,9 +20,9 @@ public static class UiProtocol
 
 public static class SceneNodeKind
 {
-    /// A Rhino object carrying SDF.* user text (FBox, FSphere, ...). Id = Rhino object id.
+    /// A Rhino object carrying SDF.* user text (FBox, FSphere, ...). Id = Rhino object id ("D" format).
     public const string Primitive = "primitive";
-    /// A CSG operation over its children (future, see docs/side-panel.md). Id = graph node id.
+    /// A CSG node (Csg/FrepTree). Id = node name, e.g. "N3".
     public const string Operation = "operation";
 }
 
@@ -36,11 +36,11 @@ public static class OperationKind
 }
 
 /// <summary>
-/// One row in the browser tree. Primitives are leaves; operations nest their operands as children,
-/// so the same shape covers today's flat list and the future CSG tree.
+/// One row in the browser tree. Primitives are leaves; operations nest their operands as children.
+/// The CSG graph is a DAG, so a shared operand appears under each parent.
 /// </summary>
 public sealed record SceneNode(
-    Guid Id,
+    string Id,
     string Kind,
     string? Name,
     bool Visible,
@@ -49,7 +49,8 @@ public sealed record SceneNode(
     IReadOnlyDictionary<string, double>? Params = null,
     string? Op = null,
     double? K = null,
-    IReadOnlyList<SceneNode>? Children = null);
+    IReadOnlyList<SceneNode>? Children = null,
+    bool? Missing = null);
 
 public sealed record UiSettings(string Units);
 
@@ -61,7 +62,7 @@ public abstract record HostMessage
 }
 
 /// Full snapshot; sent in reply to "ready" and when the active document changes.
-public sealed record StateMessage(IReadOnlyList<SceneNode> Scene, IReadOnlyList<Guid> Selection, UiSettings Settings, string Theme) : HostMessage
+public sealed record StateMessage(IReadOnlyList<SceneNode> Scene, IReadOnlyList<string> Selection, UiSettings Settings, string Theme) : HostMessage
 {
     public override string Type => "state";
 }
@@ -71,8 +72,8 @@ public sealed record SceneMessage(IReadOnlyList<SceneNode> Scene) : HostMessage
     public override string Type => "scene";
 }
 
-/// Ids of the selected F-rep objects (primitives now, operation nodes later).
-public sealed record SelectionMessage(IReadOnlyList<Guid> Ids) : HostMessage
+/// Ids of the selected primitives (Rhino selection) and operation nodes (panel selection).
+public sealed record SelectionMessage(IReadOnlyList<string> Ids) : HostMessage
 {
     public override string Type => "selection";
 }
@@ -87,18 +88,22 @@ public sealed record NoticeMessage(string Level, string Text) : HostMessage
 // Incoming messages are dispatched on "type" in UiController.Handle.
 
 /// mode: "replace" | "add" | "toggle"
-public sealed record SelectRequest(Guid[] Ids, string Mode = "replace");
+public sealed record SelectRequest(string[] Ids, string Mode = "replace");
 
-public sealed record SetVisibleRequest(Guid Id, bool Visible);
+/// Primitive: Rhino show/hide. Operation node: FrepNode.Hidden (undoable).
+public sealed record SetVisibleRequest(string Id, bool Visible);
 
 /// Only commands in UiController.AllowedCommands run.
 public sealed record RunCommandRequest(string Command);
 
 /// STUB: edit one SDF parameter of a primitive, e.g. { id, name: "s", value: 2 }.
-public sealed record SetParamRequest(Guid Id, string Name, double Value);
+public sealed record SetParamRequest(string Id, string Name, double Value);
 
-/// STUB: combine A and B. For subtract, A is the target and B the tool.
-public sealed record ApplyOperationRequest(Guid A, Guid B, string Op, double K);
+/// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
+public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);
 
-/// STUB: edit an existing operation node (selected in the tree).
-public sealed record SetOperationRequest(Guid Id, string Op, double K);
+/// Edit an existing operation node. Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
+public sealed record SetOperationRequest(string Id, string Op, double K, bool Preview = false);
+
+/// Delete operation nodes nothing else uses.
+public sealed record DeleteNodesRequest(string[] Ids);

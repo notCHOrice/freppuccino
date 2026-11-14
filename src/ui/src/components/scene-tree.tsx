@@ -2,22 +2,23 @@ import { ChevronRight, Eye, EyeOff, Lock } from 'lucide-react'
 import { useState, type MouseEvent } from 'react'
 import { cn } from '@/lib/utils'
 import { NodeIcon } from '@/components/brand-icon'
-import type { Guid, SceneNode, SelectMode } from '@/bridge/protocol'
+import type { Id, SceneNode, SelectMode } from '@/bridge/protocol'
 
 /**
  * Browser tree (Fusion 360 browser / CATIA spec tree). Primitives are leaves; operation nodes
  * nest their operands. Click selects, Ctrl/Cmd+click toggles, Shift+click adds.
+ * Shared operands (DAG) show under each parent and expand/collapse together.
  */
 export function SceneTree(props: {
   nodes: SceneNode[]
   labels: Map<string, string>
-  selection: Set<Guid>
-  onSelect: (ids: Guid[], mode: SelectMode) => void
-  onSetVisible: (id: Guid, visible: boolean) => void
+  selection: Set<Id>
+  onSelect: (ids: Id[], mode: SelectMode) => void
+  onSetVisible: (id: Id, visible: boolean) => void
 }) {
   // Collapsed rather than expanded, so new operation nodes start open.
-  const [collapsed, setCollapsed] = useState<Set<Guid>>(new Set())
-  const toggle = (id: Guid) =>
+  const [collapsed, setCollapsed] = useState<Set<Id>>(new Set())
+  const toggle = (id: Id) =>
     setCollapsed((prev) => {
       const next = new Set(prev)
       if (!next.delete(id)) next.add(id)
@@ -40,11 +41,11 @@ function TreeRow(props: {
   node: SceneNode
   depth: number
   labels: Map<string, string>
-  selection: Set<Guid>
-  collapsed: Set<Guid>
-  onToggle: (id: Guid) => void
-  onSelect: (ids: Guid[], mode: SelectMode) => void
-  onSetVisible: (id: Guid, visible: boolean) => void
+  selection: Set<Id>
+  collapsed: Set<Id>
+  onToggle: (id: Id) => void
+  onSelect: (ids: Id[], mode: SelectMode) => void
+  onSetVisible: (id: Id, visible: boolean) => void
   /** subtract operands after the first are tools */
   role?: 'tool'
 }) {
@@ -66,6 +67,7 @@ function TreeRow(props: {
           'group mx-2 flex h-7 cursor-default items-center gap-1.5 rounded-sm pr-1 select-none hover:bg-accent/50',
           selected && 'bg-accent font-bold hover:bg-accent',
           !node.visible && 'text-muted-foreground [&_[data-slot=brand-icon]]:opacity-40',
+          node.missing && 'italic line-through',
         )}
         style={{ paddingLeft: 4 + depth * 16 }}
       >
@@ -85,7 +87,7 @@ function TreeRow(props: {
         </span>
         <span className="ml-auto flex items-center gap-0.5">
           {node.locked && <Lock className="size-3.5 text-muted-foreground" />}
-          <button
+          {!node.missing && <button
             type="button"
             aria-label={node.visible ? 'Hide' : 'Show'}
             onClick={(e) => (e.stopPropagation(), props.onSetVisible(node.id, !node.visible))}
@@ -95,14 +97,14 @@ function TreeRow(props: {
             )}
           >
             {node.visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
-          </button>
+          </button>}
         </span>
       </div>
       {open && (
         <ul role="group">
           {node.children!.map((child, i) => (
             <TreeRow
-              key={child.id}
+              key={`${i}:${child.id}`}
               {...props}
               node={child}
               depth={depth + 1}

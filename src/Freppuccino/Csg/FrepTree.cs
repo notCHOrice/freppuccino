@@ -17,7 +17,8 @@ public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
 }
 
 /// Difference: Operands[0] − Operands[1..]. K = smooth blend distance (model units, 0 = hard).
-public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands)
+/// Hidden: dropped like a hidden primitive (a missing leaf for its parents; not drawn as a root).
+public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false)
 {
     public string Name => FrepTree.NodeName(Id);
 }
@@ -49,16 +50,22 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         return (new FrepTree(Nodes.Add(node), NextId + 1), node);
     }
 
-    public FrepTree WithK(int id, double k)
+    public FrepTree WithK(int id, double k) => Edit(id, n => n with { K = k });
+
+    public FrepTree WithOp(int id, FrepOp op, double k) => Edit(id, n => n with { Op = op, K = k });
+
+    public FrepTree WithHidden(int id, bool hidden) => Edit(id, n => n with { Hidden = hidden });
+
+    FrepTree Edit(int id, Func<FrepNode, FrepNode> f)
     {
         var i = Nodes.FindIndex(n => n.Id == id);
-        return i < 0 ? this : this with { Nodes = Nodes.SetItem(i, Nodes[i] with { K = k }) };
+        return i < 0 ? this : this with { Nodes = Nodes.SetItem(i, f(Nodes[i])) };
     }
 
     /// Caller ensures nothing references it.
     public FrepTree Remove(int id) => this with { Nodes = Nodes.RemoveAll(n => n.Id == id) };
 
-    const int Major = 1, Minor = 0;
+    const int Major = 1, Minor = 1; // 1.1: per-node Hidden
 
     public void Write(BinaryArchiveWriter w)
     {
@@ -77,11 +84,12 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
                 w.WriteGuid(o.ObjectId);
             }
         }
+        foreach (var n in Nodes) w.WriteBool(n.Hidden);
     }
 
     public static FrepTree Read(BinaryArchiveReader r)
     {
-        r.Read3dmChunkVersion(out var major, out _);
+        r.Read3dmChunkVersion(out var major, out var minor);
         if (major != Major) throw new InvalidDataException($"F-rep tree version {major} unsupported");
         int nextId = r.ReadInt();
         int count = r.ReadInt();
@@ -97,23 +105,40 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
                 ops.Add(new FrepOperand(r.ReadInt(), r.ReadGuid()));
             nodes.Add(new FrepNode(id, op, k, ops.MoveToImmutable()));
         }
+        if (minor >= 1)
+            for (int i = 0; i < count; i++)
+                nodes[i] = nodes[i] with { Hidden = r.ReadBool() };
         return new FrepTree(nodes.ToImmutable(), nextId);
     }
 }
 
-/// Per-document trees (persisted via plugin Write/ReadDocument). All edits go through <see cref="Set"/> so they're undoable.
+/// Per-document trees (persisted via plugin Write/ReadDocument). All edits go through <see cref="Set"/> (or
+/// <see cref="Preview"/> + <see cref="Commit"/>) so they're undoable.
 public static class FrepTrees
 {
     static readonly Dictionary<uint, FrepTree> trees = [];
+    /// Open live-edit gesture per doc: the tree to undo back to.
+    static readonly Dictionary<uint, (FrepTree Before, string Description)> previews = [];
 
     /// Raised on the UI thread after any change (edit, undo/redo, file open).
     public static event Action<RhinoDoc>? Changed;
 
     public static void Install()
     {
-        RhinoDoc.CloseDocument += (_, e) => trees.Remove(e.Document.RuntimeSerialNumber);
+        RhinoDoc.CloseDocument += (_, e) =>
+        {
+            trees.Remove(e.Document.RuntimeSerialNumber);
+            previews.Remove(e.Document.RuntimeSerialNumber);
+        };
         // Open (not merge/import) replaces the doc's contents; ReadDocument then fills the tree back in.
-        RhinoDoc.BeginOpenDocument += (_, e) => { if (!e.Merge && !e.Reference) Apply(e.Document, FrepTree.Empty); };
+        RhinoDoc.BeginOpenDocument += (_, e) =>
+        {
+            if (e.Merge || e.Reference) return;
+            previews.Remove(e.Document.RuntimeSerialNumber);
+            Apply(e.Document, FrepTree.Empty);
+        };
+        // Any command (incl. Undo/Redo) ends a live gesture whose commit never came.
+        Command.BeginCommand += (_, _) => CommitAll();
     }
 
     public static FrepTree Get(RhinoDoc doc) => trees.GetValueOrDefault(doc.RuntimeSerialNumber, FrepTree.Empty);
@@ -121,12 +146,45 @@ public static class FrepTrees
     /// Replaces the doc's tree with an undo step. Opens its own undo record if none is active (e.g. panel edits).
     public static void Set(RhinoDoc doc, FrepTree tree, string description)
     {
+        Commit(doc);
         var old = Get(doc);
         if (ReferenceEquals(old, tree)) return;
+        Record(doc, old, description);
+        Apply(doc, tree);
+    }
+
+    /// Live edit (slider drag): applies without undo; the first call of a gesture remembers the tree to undo to.
+    /// A different description starts a new gesture (commits the open one). End with <see cref="Commit"/>.
+    public static void Preview(RhinoDoc doc, FrepTree tree, string description)
+    {
+        var key = doc.RuntimeSerialNumber;
+        if (previews.TryGetValue(key, out var p) && p.Description != description) Commit(doc);
+        if (!previews.ContainsKey(key)) previews[key] = (Get(doc), description);
+        if (!ReferenceEquals(Get(doc), tree)) Apply(doc, tree);
+    }
+
+    /// Ends the doc's open gesture as one undo step (none if it ended where it started).
+    public static void Commit(RhinoDoc doc)
+    {
+        if (!previews.Remove(doc.RuntimeSerialNumber, out var p)) return;
+        var now = Get(doc);
+        if (p.Before.NextId == now.NextId && p.Before.Nodes.SequenceEqual(now.Nodes)) return;
+        Record(doc, p.Before, p.Description);
+    }
+
+    public static void CommitAll()
+    {
+        foreach (var serial in previews.Keys.ToList())
+            if (RhinoDoc.FromRuntimeSerialNumber(serial) is { } doc) Commit(doc);
+            else previews.Remove(serial);
+    }
+
+    /// Undo step back to <paramref name="old"/>; the current tree is the redo state.
+    static void Record(RhinoDoc doc, FrepTree old, string description)
+    {
         uint record = doc.UndoRecordingIsActive ? 0 : doc.BeginUndoRecord(description);
         doc.AddCustomUndoEvent(description, OnUndo, old);
         if (record != 0) doc.EndUndoRecord(record);
-        Apply(doc, tree);
     }
 
     /// Swap in the tagged tree and register the inverse (Rhino's custom undo pattern: redo is registered from the undo handler).
@@ -138,7 +196,7 @@ public static class FrepTrees
         Apply(doc, (FrepTree)e.Tag);
     }
 
-    /// No undo; for file load.
+    /// No undo; for file load and previews.
     public static void Apply(RhinoDoc doc, FrepTree tree)
     {
         trees[doc.RuntimeSerialNumber] = tree;
