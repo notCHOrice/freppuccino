@@ -15,11 +15,10 @@ namespace Freppuccino.Meshing;
 ///
 /// Fold-overs: letting a vertex leave its cell keeps creases sharp but can fold a triangle over its
 /// neighbour, which shows up as a self-intersection. Quads are split along the diagonal that does not
-/// fold, and merges whose vertex still ends up in a folded triangle are undone.
+/// fold, and merges or sharp vertex placements that still end up in a folded triangle are undone.
 ///
-/// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed
-/// and seams where primitives meet nearly tangent are only as good as the resolution. Self-intersection
-/// is not ruled out, only what the fold test catches.
+/// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed.
+/// Self-intersection is not ruled out, only what the fold test catches.
 ///
 /// Tunnel faces: when both cells sharing a four-crossing face route all four crossings through one
 /// sheet, the surface passes through that face as two strips joining the same two cell vertices, so
@@ -35,8 +34,11 @@ public static class DualContour
     /// How far a vertex may sit outside its cell, in finest cells (see CellVertex).
     public static double Slack = 1.0;
 
-    /// Eigenvalues of the fit below this fraction of the largest are treated as zero (see Qef.Solve).
+    /// Eigenvalues of the fit below this fraction of the largest are treated as zero (see Place).
     public static double Cutoff = 0.1;
+
+    /// Cutoff for the sharper second attempt in Place; 0 disables it.
+    public static double SharpCutoff = 1e-3;
 
     /// Counts topology defects in a result: edges not shared by exactly two triangles, and vertices whose
     /// surrounding triangles do not form a single closed fan (a pinched vertex passes the edge count).
@@ -118,7 +120,7 @@ public static class DualContour
 
         /// Minimiser, solved about the mass point. Small eigenvalues are dropped, so on a flat or gently
         /// curved patch the vertex stays near the mass point instead of flying off.
-        public readonly V3 Solve()
+        public readonly V3 Solve(double cutoff)
         {
             var m = mass * (1.0 / N);
             var rhs = new V3(bx, by, bz) - Times(m);
@@ -129,7 +131,7 @@ public static class DualContour
             double max = Math.Max(val[0], Math.Max(val[1], val[2]));
             var x = m;
             for (int e = 0; e < 3; e++)
-                if (val[e] > Cutoff * max)
+                if (val[e] > cutoff * max)
                     x += vec[e] * (V3.Dot(vec[e], rhs) / val[e]);
             return x;
         }
@@ -185,12 +187,13 @@ public static class DualContour
 
         // 2. One vertex per surface sheet in each cell that has a sign change.
         //    Packed = 2 bits per cell edge: which of the cell's vertices that edge's polygon uses.
-        var slabs = new (List<(int Cell, int Packed, int Count)> Cells, List<V3> Points, List<Qef> Qefs)[nz];
+        var slabs = new (List<(int Cell, int Packed, int Count)> Cells, List<V3> Points, List<Qef> Qefs, List<V3?> Stable)[nz];
         Parallel.For(0, nz, k =>
         {
             var cells = new List<(int, int, int)>();
             var points = new List<V3>();
             var qefs = new List<Qef>();
+            var stables = new List<V3?>();
             Span<bool> s = stackalloc bool[8];
             Span<int> sheet = stackalloc int[12];
             for (int j = 0; j < ny; j++)
@@ -208,18 +211,21 @@ public static class DualContour
                         if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
                     for (int c = 0; c < count; c++)
                     {
-                        points.Add(CellVertex(g, i, j, k, s, sheet, c, out var q));
+                        points.Add(CellVertex(g, i, j, k, s, sheet, c, out var q, out var stable));
                         qefs.Add(q);
+                        stables.Add(stable);
                     }
                     cells.Add((g.Cell(i, j, k), packed, count));
                 }
-            slabs[k] = (cells, points, qefs);
+            slabs[k] = (cells, points, qefs, stables);
         });
 
         var vertices = new List<V3>();
         var quadrics = new List<Qef>();
         var index = new Dictionary<int, (int Base, int Packed, int Count)>();
-        foreach (var (cells, points, qefs) in slabs)
+        // Vertices placed by the sharp solve (see Place), with the stable position to fall back to.
+        var fallback = new Dictionary<int, V3>();
+        foreach (var (cells, points, qefs, stables) in slabs)
         {
             int at = vertices.Count;
             foreach (var (cell, packed, count) in cells)
@@ -227,6 +233,8 @@ public static class DualContour
                 index[cell] = (at, packed, count);
                 at += count;
             }
+            for (int v = 0; v < stables.Count; v++)
+                if (stables[v] is { } stable) fallback[vertices.Count + v] = stable;
             vertices.AddRange(points);
             quadrics.AddRange(qefs);
         }
@@ -234,12 +242,13 @@ public static class DualContour
         // 3. Polygons.
         var tris = new List<int>();
         var sources = new List<long>(); // per triangle: the finest grid edge its polygon was built around, or -1
-        var octree = new Octree(g, index, vertices, quadrics, tris, sources);
+        var octree = new Octree(g, index, vertices, quadrics, fallback, tris, sources);
         octree.Build(simplify * h);
         octree.Contour();
         // A merged cell's one vertex can fold the triangles that join it to finer neighbours along a
-        // crease. Undo those merges and contour again; a few rounds settle it.
-        for (int round = 0; round < 8 && simplify > 0 && octree.UnmergeFolded() > 0; round++)
+        // crease, and so can a vertex the sharp solve moved. Undo those and contour again; a few rounds
+        // settle it.
+        for (int round = 0; round < 8 && octree.UndoFolded() > 0; round++)
         {
             tris.Clear();
             sources.Clear();
@@ -262,7 +271,7 @@ public static class DualContour
 
     /// Octree over the grid's cells. A node at level L covers 2^L cells per side; level 0 nodes are the
     /// grid cells themselves. Only merged cells are stored: everything else is derived from the grid.
-    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, List<int> tris, List<long> sources)
+    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<int> tris, List<long> sources)
     {
         readonly record struct Node(int L, int I, int J, int K)
         {
@@ -300,8 +309,9 @@ public static class DualContour
                 {
                     occupied.Add(n.Key);
                     if (l < levels) parents.Add(n.Parent);
-                    if (tolerance <= 0 || !TryMerge(n, tolerance, corner, sheet, out var x, out var q)) continue;
+                    if (tolerance <= 0 || !TryMerge(n, tolerance, corner, sheet, out var x, out var q, out var stable)) continue;
                     merged[n.Key] = vertices.Count;
+                    if (stable is { } s) fallback[vertices.Count] = s;
                     vertices.Add(x);
                     quadrics.Add(q);
                 }
@@ -309,10 +319,11 @@ public static class DualContour
             }
         }
 
-        bool TryMerge(Node n, double tolerance, Span<bool> corner, Span<int> sheet, out V3 x, out Qef q)
+        bool TryMerge(Node n, double tolerance, Span<bool> corner, Span<int> sheet, out V3 x, out Qef q, out V3? stable)
         {
             x = default;
             q = default;
+            stable = null;
             // Every child must be empty or a single-vertex leaf.
             for (int c = 0; c < 8; c++)
             {
@@ -353,9 +364,10 @@ public static class DualContour
             if (BoundaryLoops(i0, j0, k0, size) != 1) return false;
 
             var lo = new V3(i0 * g.H, j0 * g.H, k0 * g.H);
-            x = Clamp(q.Solve(), lo, size * g.H, g.H);
+            x = Place(g, q, lo, size * g.H, out stable);
             if (q.Rms(x) > tolerance) return false;
             x += g.Origin;
+            if (stable is { } s) stable = s + g.Origin;
             return true;
         }
 
@@ -412,24 +424,36 @@ public static class DualContour
             return loops;
         }
 
-        /// Undoes every merge whose vertex is part of a folded triangle (normal against the field's
-        /// gradient). Returns how many merges were undone; the caller contours again.
-        public int UnmergeFolded()
+        /// For every folded triangle (normal against the field's gradient): undoes the merges whose
+        /// vertices it uses, and moves its sharp-placed vertices back to their stable positions.
+        /// Returns how many changes were made; the caller contours again.
+        public int UndoFolded()
         {
+            if (merged.Count == 0 && fallback.Count == 0) return 0;
             var owner = new Dictionary<int, long>();
             foreach (var (key, vertex) in merged) owner[vertex] = key;
-            var undo = new HashSet<long>();
+            var unmerge = new HashSet<long>();
+            var restore = new HashSet<int>();
+            Span<int> corner = stackalloc int[3];
             for (int t = 0; t < tris.Count; t += 3)
             {
-                int a = tris[t], b = tris[t + 1], c = tris[t + 2];
-                bool ma = owner.ContainsKey(a), mb = owner.ContainsKey(b), mc = owner.ContainsKey(c);
-                if (!(ma || mb || mc) || Facing(a, b, c) >= 0) continue;
-                if (ma) undo.Add(owner[a]);
-                if (mb) undo.Add(owner[b]);
-                if (mc) undo.Add(owner[c]);
+                corner[0] = tris[t]; corner[1] = tris[t + 1]; corner[2] = tris[t + 2];
+                bool suspect = false;
+                foreach (int v in corner) suspect |= owner.ContainsKey(v) || fallback.ContainsKey(v);
+                if (!suspect || Facing(corner[0], corner[1], corner[2]) >= 0) continue;
+                foreach (int v in corner)
+                {
+                    if (owner.TryGetValue(v, out long key)) unmerge.Add(key);
+                    if (fallback.ContainsKey(v)) restore.Add(v);
+                }
             }
-            foreach (long key in undo) merged.Remove(key);
-            return undo.Count;
+            foreach (long key in unmerge) merged.Remove(key);
+            foreach (int v in restore)
+            {
+                vertices[v] = fallback[v];
+                fallback.Remove(v);
+            }
+            return unmerge.Count + restore.Count;
         }
 
         public void Contour() => CellProc(new Node(levels, 0, 0, 0));
@@ -768,7 +792,7 @@ public static class DualContour
     }
 
     /// The vertex for sheet number <paramref name="which"/> of cell (i, j, k), and the quadric it minimises.
-    static V3 CellVertex(Grid g, int i, int j, int k, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which, out Qef q)
+    static V3 CellVertex(Grid g, int i, int j, int k, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which, out Qef q, out V3? stable)
     {
         var cellMin = g.P(i, j, k);
         double h = g.H;
@@ -789,7 +813,32 @@ public static class DualContour
             var p = (pin + pout) * 0.5;
             q.Add(g.Field.Gradient(p, 1e-5 * h).Normalized(), p - g.Origin);
         }
-        return Clamp(q.Solve(), cellMin - g.Origin, h, h) + g.Origin;
+        var x = Place(g, q, cellMin - g.Origin, h, out stable) + g.Origin;
+        if (stable is { } s) stable = s + g.Origin;
+        return x;
+    }
+
+    /// Vertex position (relative to the grid origin) for a cell at <paramref name="min"/> of side
+    /// <paramref name="size"/>.
+    ///
+    /// Dropping small eigenvalues keeps the vertex stable on smooth patches, but it also flattens a
+    /// shallow crease: two surfaces meeting nearly tangent give a second eigenvalue far below the first,
+    /// and the vertex then sits between them instead of on the seam. So when the stable answer is
+    /// noticeably off the surface, also solve keeping nearly all eigenvalues and take that answer if the
+    /// field says it is at least twice as close. The field, not the fit, is the judge, so a sharp solve
+    /// that slid away on a smooth patch is never preferred. When the sharp answer is taken,
+    /// <paramref name="stable"/> returns the other one, to fall back to if the vertex folds a triangle.
+    static V3 Place(Grid g, in Qef q, V3 min, double size, out V3? stable)
+    {
+        stable = null;
+        var safe = Clamp(q.Solve(Cutoff), min, size, g.H);
+        if (SharpCutoff <= 0) return safe;
+        double off = Math.Abs(g.Field.Value(safe + g.Origin));
+        if (off <= 0.02 * g.H) return safe;
+        var sharp = Clamp(q.Solve(SharpCutoff), min, size, g.H);
+        if (Math.Abs(g.Field.Value(sharp + g.Origin)) >= 0.5 * off) return safe;
+        stable = safe;
+        return sharp;
     }
 
     /// A crease can clip a cell without passing through it (its crossings then lie on both sides of a

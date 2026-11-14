@@ -28,7 +28,9 @@ Programs:
 
 ### Scene uniform layout
 
-Header (7 vec4 rows, `HeaderRows`): camPos, camX, camY, camZ, frustum, params, bound. Then data rows in `Compile()` order: prims (sphere 1 row, others 3), prim colors (4 per row), warp rows (one block per live warp, tree order), node k's (4 per row). `PrimRowBudget(tree)` = data rows − k rows − warp rows (prims + their color rows must fit); prims past it are dropped.
+FZebra (`Commands/FZebraCommand.cs`, window `Ui/ZebraOptionsForm.cs`, session-only `FrepSettings.Zebra*`): like Rhino's Zebra, the command opens a modeless "Zebra Options" window (stripe direction vertical/horizontal, stripe size thin↔thick, two stripe colors, all live); zebra is on while it is open, closing it (or `FZebraOff`) turns it off. Header row `zebraCfg` = (stripe count, 0 = off; 1 vertical / 0 horizontal; color 1; color 2 as packed 0xRRGGBB). `sceneColor()` also flags hits within the pixel tolerance of any FUnion node's surface (fillets included); those pixels are drawn unlit in bands of the reflected view direction's angle from the camera's right (vertical) or up (horizontal) axis. Uniforms only, so changing options never recompiles.
+
+Header (8 vec4 rows, `HeaderRows`): camPos, camX, camY, camZ, frustum, params, bound, zebraCfg. Then data rows in `Compile()` order: prims (sphere 1 row, others 3), prim colors (4 per row), warp rows (one block per live warp, tree order), node k's (4 per row). `PrimRowBudget(tree)` = data rows − k rows − warp rows (prims + their color rows must fit); prims past it are dropped.
 
 ### Warps (FTwist / FBend / FRepeat)
 
