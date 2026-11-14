@@ -13,6 +13,9 @@ public sealed class ShaderConduit : DisplayConduit
 {
     const string Badge = "FREP MODE";
     const int BadgeTextHeight = 11, BadgeMargin = 10, BadgePadX = 9, BadgePadY = 5;
+    /// Rhino draws the viewport title (view name, e.g. "Perspective" or a restored named view) in the top-left corner;
+    /// the badge sits just below it so long names never run into it. Logical px, y down.
+    const int TitleClearance = 28;
     bool loggedFailure, loggedCap;
 
     protected override void PostDrawObjects(DrawEventArgs e)
@@ -49,17 +52,37 @@ public sealed class ShaderConduit : DisplayConduit
     protected override void DrawForeground(DrawEventArgs e)
     {
         var dp = e.Display;
-        if (!FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
-        var (r, _) = BadgeRect(dp);
-        dp.Draw2dText(Badge, System.Drawing.Color.FromArgb(30, 30, 30), new Point2d((r.Left + r.Right) * 0.5, (r.Top + r.Bottom) * 0.5), true, BadgeTextHeight, "Arial");
+        if (dp == null || !FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
+        try
+        {
+            var (r, _) = BadgeRect(dp);
+            dp.Draw2dText(Badge, System.Drawing.Color.FromArgb(30, 30, 30), new Point2d((r.Left + r.Right) * 0.5, (r.Top + r.Bottom) * 0.5), true, BadgeTextHeight, "Arial");
+        }
+        catch (Exception ex)
+        {
+            // Offscreen pipelines (view capture, named-view thumbnails) may lack text/viewport state.
+            if (!loggedFailure) RhinoApp.WriteLine("Freppuccino: " + ex);
+            loggedFailure = true;
+        }
     }
 
-    /// Badge rect in Rhino 2D screen coords (y down), sized from the measured text.
+    /// Badge rect in Rhino 2D screen coords (y down), sized from the measured text, offset below Rhino's viewport title.
+    /// Falls back to an estimated size when measuring isn't available (e.g. offscreen capture pipelines).
     static (System.Drawing.RectangleF rect, System.Drawing.Size view) BadgeRect(DisplayPipeline dp)
     {
-        var size = dp.Viewport.Size;
-        var t = dp.Measure2dText(Badge, new Point2d(0, 0), false, 0, BadgeTextHeight, "Arial");
-        float w = Math.Abs(t.Width) + 2 * BadgePadX, h = Math.Abs(t.Height) + 2 * BadgePadY; // Height comes back negative (y-up rect)
-        return (new System.Drawing.RectangleF(BadgeMargin, BadgeMargin, w, h), size);
+        var size = dp.Viewport?.Size ?? System.Drawing.Size.Empty;
+        float tw, th;
+        try
+        {
+            var t = dp.Measure2dText(Badge, new Point2d(0, 0), false, 0, BadgeTextHeight, "Arial");
+            tw = Math.Abs(t.Width); th = Math.Abs(t.Height); // Height comes back negative (y-up rect)
+        }
+        catch (NullReferenceException)
+        {
+            tw = 0; th = 0;
+        }
+        if (tw <= 0 || th <= 0) { tw = Badge.Length * BadgeTextHeight * 0.65f; th = BadgeTextHeight; }
+        float w = tw + 2 * BadgePadX, h = th + 2 * BadgePadY;
+        return (new System.Drawing.RectangleF(BadgeMargin, TitleClearance, w, h), size);
     }
 }

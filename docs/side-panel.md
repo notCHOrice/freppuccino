@@ -69,6 +69,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `runCommand {command}` | ✅ whitelist only: `FBox`, `FSphere`, `FCylinder`, `FCone`, `FPyramid`, `FEllipsoid`, `FTorus`, `Freppuccino` |
 | `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
+| `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
 
@@ -83,11 +84,12 @@ Live edits: the inspector has no Update button. An op click sends one `setOperat
 ```
 SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
             sdfType?, params?,          // primitive
-            op?, k?, children? }        // operation: children are operands, in order
+            op?, k?, children?,         // operation: children are operands, in order
+            ref?, refMissing? }         // twist|bend|repeat: params = {angle} / {angle, direction} / {x, y, z}; ref = line/box id
 ```
 
 `UiController.BuildScene` walks the doc's `FrepTree` (Csg/FrepTree.cs, stored as plugin document data): roots are nodes nothing references, then primitives no node uses. The tree is a DAG, so a shared operand is listed under each parent. Deleted operands show as `missing`.
 
-Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
+Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect (and FTwist/FBend/FRepeat, single node) take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
 
 Inspector: one primitive → its parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).

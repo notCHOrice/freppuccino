@@ -97,9 +97,8 @@ public class FEllipsoidCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame and rescales r. Works for any transform that keeps the ellipsoid axes perpendicular:
-    /// move, rotate, mirror, uniform scale, and non-uniform scale along the ellipsoid's own axes.
-    /// Other transforms tilt the principal axes off the frame, which this parameterization can't express, so they are rejected.
+    /// Moves the frame and rescales r. Any affine transform of an ellipsoid is an ellipsoid, so this handles
+    /// move, rotate, mirror, any scale (on or off its axes) and shear; only a flattening transform is rejected.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -127,13 +126,10 @@ public class FEllipsoidCommand : Command
     /// <summary>Pure version of <see cref="TransformSdf"/>; also usable for a live gumball preview.</summary>
     public static bool TryTransform(Plane frame, Vector3d r, Transform xform, out Plane newFrame, out Vector3d newR, out string? reason)
     {
+        if (SdfTransforms.TryTransformEllipsoid(frame, r, xform, out newFrame, out newR, out reason))
+            return true;
         newR = r;
-        if (!SdfTransforms.TryTransformFrame(frame, xform, out newFrame, out var scale, out reason))
-        {
-            if (reason != null) reason += "; sdEllipsoid can't represent it";
-            return false;
-        }
-        newR = new Vector3d(r.X * scale.X, r.Y * scale.Y, r.Z * scale.Z);
-        return true;
+        if (reason != null) reason += "; sdEllipsoid can't represent it";
+        return false;
     }
 }

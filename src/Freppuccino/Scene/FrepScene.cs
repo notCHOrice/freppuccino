@@ -21,10 +21,22 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P);
 
-/// Program == null: nothing to draw. Primitives/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
-public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<double> Ks, int Dropped)
+/// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
+/// Extent: child's max distance from the axis (Lipschitz bound clamp). Anchor: child bbox center (Repeat lattice origin).
+public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P);
+
+/// Program == null: nothing to draw. Primitives/Colors/Warps/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
+/// Colors parallel to Primitives: each owner's Rhino display color (object/layer/material/parent source resolved).
+public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<System.Drawing.Color> Colors,
+    IReadOnlyList<SdWarp> Warps, IReadOnlyList<double> Ks, int Dropped)
 {
-    public static readonly FrepSceneData Empty = new(null, [], [], 0);
+    public static readonly FrepSceneData Empty = new(null, [], [], [], [], 0);
+    /// Rhino object ids, parallel to Primitives (what the CSG tree's leaves refer to).
+    public IReadOnlyList<Guid> Ids { get; init; } = [];
+    /// Tree node ids, parallel to Warps.
+    public IReadOnlyList<int> WarpIds { get; init; } = [];
+    /// The tree this was compiled from.
+    public FrepTree Tree { get; init; } = FrepTree.Empty;
     public int Count => Primitives.Count;
 }
 
@@ -37,6 +49,9 @@ public static class FrepScene
     static FrepSceneData scene = FrepSceneData.Empty;
     // Parallel to scene.Primitives; safe since any delete/replace sets dirty.
     static List<RhinoObject> owners = [];
+    // Parallel to scene.Warps: the referenced line/box objects.
+    static List<RhinoObject> warpOwners = [];
+    static FrepTree tree = FrepTree.Empty; // the one scene was compiled from
     static uint docSerial;
     static bool dirty = true;
 
@@ -60,6 +75,7 @@ public static class FrepScene
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
         List<SdPrimitive>? prims = null;
+        bool reshaped = false;
         for (int i = 0; i < owners.Count; i++)
         {
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
@@ -67,8 +83,33 @@ public static class FrepScene
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
+            reshaped |= moved.Kind != scene.Primitives[i].Kind;
         }
-        return prims == null ? scene : scene with { Primitives = prims };
+        List<SdWarp>? warps = null;
+        for (int i = 0; i < warpOwners.Count; i++)
+        {
+            if (!warpOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            var w = scene.Warps[i];
+            var axis = w.Axis;
+            var region = w.Region;
+            if (!(w.Op == FrepOp.Repeat ? region.Transform(xf) : axis.Transform(xf))) continue;
+            warps ??= [.. scene.Warps];
+            warps[i] = w with { Axis = axis, Region = region };
+        }
+        if (prims == null && warps == null) return scene;
+        var next = scene with { Primitives = prims ?? scene.Primitives, Warps = warps ?? scene.Warps };
+        if (!reshaped || prims == null) return next;
+
+        // A sphere stretched into an ellipsoid changes the shader's structure, so recompile (cached by source, so once
+        // per gesture). If the extra rows don't fit, preview those prims unchanged; the commit still converts them.
+        if (prims.Sum(p => FrepShaderGen.Rows(p.Kind)) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
+        {
+            for (int i = 0; i < prims.Count; i++)
+                if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
+            return next;
+        }
+        var (program, ks, _) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
+        return next with { Program = program, Ks = ks };
     }
 
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
@@ -81,9 +122,15 @@ public static class FrepScene
         switch (p.Kind)
         {
             case SdKind.Sphere:
-                ok = FSphereCommand.TryTransform(p.Frame, v.X, xf, out f, out var s, out _);
-                v = new Vector3d(s, 0, 0);
-                break;
+                if (FSphereCommand.TryTransform(p.Frame, v.X, xf, out f, out var s, out _))
+                {
+                    result = p with { Frame = f, P = new Vector3d(s, 0, 0) };
+                    return true;
+                }
+                // Non-uniform: becomes an ellipsoid, same as the commit in FSphereCommand.TransformSdf.
+                if (!FSphereCommand.TryTransformToEllipsoid(p.Frame, v.X, xf, out f, out var er, out _)) return false;
+                result = new SdPrimitive(SdKind.Ellipsoid, f, er);
+                return true;
             case SdKind.Box:
                 ok = FBoxCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
                 break;
@@ -118,28 +165,74 @@ public static class FrepScene
     {
         dirty = false;
         docSerial = doc.RuntimeSerialNumber;
-        var tree = FrepTrees.Get(doc);
+        tree = FrepTrees.Get(doc);
 
-        // Prims first, so uniform rows for blend values are reserved up front; prims past the budget are dropped (= missing leaves).
-        int budget = FrepShaderGen.PrimRowBudget(tree.Nodes.Count), rows = 0, dropped = 0;
+        // Prims first, so uniform rows for blends/warps are reserved up front; prims past the budget are dropped (= missing leaves).
+        int budget = FrepShaderGen.PrimRowBudget(tree), rows = 0, dropped = 0;
         var prims = new List<SdPrimitive>();
+        var colors = new List<System.Drawing.Color>();
         var newOwners = new List<RhinoObject>();
-        var ids = new List<Guid>();
+        var newIds = new List<Guid>();
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false };
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
             if (!TryRead(obj.Attributes, out var prim)) continue;
             int r = FrepShaderGen.Rows(prim.Kind);
-            if (rows + r > budget) { dropped++; continue; }
+            // Each prim also takes a color slot (4 per row).
+            if (rows + r + FrepShaderGen.ColorRows(prims.Count + 1) > budget) { dropped++; continue; }
             rows += r;
-            ids.Add(obj.Id);
+            newIds.Add(obj.Id);
             prims.Add(prim);
+            colors.Add(obj.Attributes.DrawColor(doc));
             newOwners.Add(obj);
         }
 
-        var (program, ks) = FrepShaderGen.Compile(prims, ids, tree);
-        scene = new FrepSceneData(program, prims, ks, dropped);
+        // Warp reference objects may be hidden (axis lines usually are); deleted = missing.
+        var refs = new Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)>();
+        foreach (var n in tree.Nodes)
+            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region)) refs[n.Id] = (obj!, axis, region);
+
+        var (program, ks, warpIds) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
+        var bounds = new Bounds(doc, tree, refs);
+        var warps = new List<SdWarp>();
+        var newWarpOwners = new List<RhinoObject>();
+        foreach (var id in warpIds)
+        {
+            var n = tree.Find(id)!;
+            var (obj, axis, region) = refs[id];
+            warps.Add(FrepWarpMath.Make(n, axis, region, bounds.Of(n.Operands[0])));
+            newWarpOwners.Add(obj);
+        }
+
+        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree };
         owners = newOwners;
+        warpOwners = newWarpOwners;
+    }
+
+    /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
+    public static BoundingBox BoundsOf(RhinoDoc doc, FrepOperand o) => new Bounds(doc, FrepTrees.Get(doc), []).Of(o);
+
+    /// World bounding box of an operand's result, from leaf objects' Rhino geometry; live warps grown like the shader bound.
+    sealed class Bounds(RhinoDoc doc, FrepTree tree, Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)> refs)
+    {
+        readonly Dictionary<FrepOperand, BoundingBox> memo = [];
+
+        public BoundingBox Of(FrepOperand o)
+        {
+            if (memo.TryGetValue(o, out var b)) return b;
+            b = BoundingBox.Empty;
+            if (!o.IsNode)
+            {
+                if (doc.Objects.FindId(o.ObjectId) is { IsDeleted: false } obj) b = obj.Geometry.GetBoundingBox(true);
+            }
+            else if (tree.Find(o.NodeId) is { } n)
+            {
+                if (n.Op == FrepOp.Difference && n.Operands.Length > 0) b = Of(n.Operands[0]);
+                else foreach (var c in n.Operands) b.Union(Of(c));
+                if (b.IsValid && refs.TryGetValue(n.Id, out var r)) b = FrepShaderGen.Warped(b, FrepWarpMath.Make(n, r.Axis, r.Region, b));
+            }
+            return memo[o] = b;
+        }
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).

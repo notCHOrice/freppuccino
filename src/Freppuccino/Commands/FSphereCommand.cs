@@ -129,7 +129,8 @@ public class FSphereCommand : Command
 
     /// <summary>
     /// Moves the frame and rescales s. Works for move, rotate, mirror and uniform scale.
-    /// Non-uniform scale makes an ellipsoid, which sdSphere can't represent, so it is rejected.
+    /// Anything else (non-uniform scale in any direction, shear) makes an ellipsoid, so the object is
+    /// rewritten as sdEllipsoid (SDF.s replaced by SDF.r.*).
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -139,13 +140,27 @@ public class FSphereCommand : Command
             return false;
         }
 
-        if (!TryTransform(frame, s, xform, out frame, out s, out reason))
+        if (TryTransform(frame, s, xform, out var newFrame, out var newS, out _))
+        {
+            SdfUserText.WriteFrame(attributes, newFrame);
+            SdfUserText.WriteFloat(attributes, "s", newS);
+            reason = null;
+            return true;
+        }
+
+        if (!TryTransformToEllipsoid(frame, s, xform, out newFrame, out var r, out reason))
             return false;
 
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteFloat(attributes, "s", s);
+        attributes.DeleteUserString(SdfUserText.Prefix + "s");
+        attributes.SetUserString(SdfUserText.TypeKey, FEllipsoidCommand.SdfType);
+        SdfUserText.WriteFrame(attributes, newFrame);
+        SdfUserText.WriteVec3(attributes, "r", r.X, r.Y, r.Z);
         return true;
     }
+
+    /// <summary>The ellipsoid a sphere becomes under a non-uniform transform; fails only if it flattens.</summary>
+    public static bool TryTransformToEllipsoid(Plane frame, double s, Transform xform, out Plane newFrame, out Vector3d r, out string? reason) =>
+        SdfTransforms.TryTransformEllipsoid(frame, new Vector3d(s, s, s), xform, out newFrame, out r, out reason);
 
     /// <summary>Reads the frame (origin = sphere center) and radius s.</summary>
     public static bool TryRead(ObjectAttributes attributes, out Plane frame, out double s)
@@ -169,7 +184,7 @@ public class FSphereCommand : Command
         const double uniformTolerance = 1e-6;
         if (max - min > uniformTolerance * max)
         {
-            reason = "non-uniform scale turns the sphere into an ellipsoid; sdSphere can't represent it";
+            reason = "non-uniform scale turns the sphere into an ellipsoid";
             return false;
         }
 
