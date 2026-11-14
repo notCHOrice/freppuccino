@@ -52,13 +52,14 @@ export type UiMessage =
   | { type: 'ready' }
   /** While an F-CSG command waits for operands, the host feeds clicked nodes to it instead of selecting. */
   | { type: 'select'; ids: Id[]; mode: SelectMode }
-  /** primitives only */
+  /** primitive: Rhino show/hide; operation: hides the node's result (undoable) */
   | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
   /** STUB on the host */
   | { type: 'setParam'; id: Id; name: string; value: number }
   /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
-  | { type: 'setOperation'; id: Id; op: OperationKind; k: number }
+  /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step. */
+  | { type: 'setOperation'; id: Id; op: OperationKind; k: number; preview?: boolean }
   /** Nodes still used by other nodes are kept (host sends a notice). */
   | { type: 'deleteNodes'; ids: Id[] }

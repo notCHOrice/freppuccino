@@ -87,7 +87,7 @@ function TreeRow(props: {
         </span>
         <span className="ml-auto flex items-center gap-0.5">
           {node.locked && <Lock className="size-3 text-muted-foreground" />}
-          {node.kind === 'primitive' && !node.missing && <button
+          {!node.missing && <button
             type="button"
             aria-label={node.visible ? 'Hide' : 'Show'}
             onClick={(e) => (e.stopPropagation(), props.onSetVisible(node.id, !node.visible))}

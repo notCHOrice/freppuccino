@@ -56,6 +56,7 @@ public sealed class UiController : IDisposable
         FrepTrees.Changed += OnTreeChanged;
         NodeSelectionChanged += OnNodeSelectionChanged;
         RhinoApp.Idle += OnIdle;
+        RhinoApp.EscapeKeyPressed += OnEscape;
     }
 
     public void Dispose()
@@ -72,6 +73,8 @@ public sealed class UiController : IDisposable
         FrepTrees.Changed -= OnTreeChanged;
         NodeSelectionChanged -= OnNodeSelectionChanged;
         RhinoApp.Idle -= OnIdle;
+        RhinoApp.EscapeKeyPressed -= OnEscape;
+        FrepTrees.CommitAll();
     }
 
     // ─────────────── Rhino → page ───────────────
@@ -81,6 +84,17 @@ public sealed class UiController : IDisposable
     void OnReplaceObject(object? sender, RhinoReplaceObjectEventArgs e) => sceneDirty = true;
     void OnModifyAttributes(object? sender, RhinoModifyObjectAttributesEventArgs e) => sceneDirty = true;
     void OnNodeSelectionChanged() => selectionDirty = true;
+
+    // Rhino only raises DeselectAllObjects when Rhino objects were selected, so Esc with just nodes selected needs this.
+    void OnEscape(object? sender, EventArgs e)
+    {
+        if (RhinoDoc.ActiveDoc is { } doc) ClearNodes(doc);
+    }
+
+    static void ClearNodes(RhinoDoc doc)
+    {
+        if (selectedNodes.Remove(doc.RuntimeSerialNumber, out var ids) && ids.Count > 0) NodeSelectionChanged?.Invoke();
+    }
 
     // Deselect-all (Esc, click on empty space, end of an F-CSG command) also clears node selection.
     void OnDeselectAll(object? sender, RhinoDeselectAllObjectsEventArgs e)
@@ -121,6 +135,7 @@ public sealed class UiController : IDisposable
 
     void SendState(RhinoDoc doc)
     {
+        FrepTrees.CommitAll(); // page reload / doc switch mid-drag
         sentDocSerial = doc.RuntimeSerialNumber;
         sceneDirty = selectionDirty = false;
         var theme = Rhino.Runtime.HostUtils.RunningInDarkMode ? "dark" : "light";
@@ -176,7 +191,7 @@ public sealed class UiController : IDisposable
                 ? (tree.Find(o.NodeId) is { } child ? Node(child) : Missing(NodeKey(o.NodeId)))
                 : Primitive(doc, o.ObjectId)).ToList();
             return built[n.Id] = new SceneNode(
-                Id: NodeKey(n.Id), Kind: SceneNodeKind.Operation, Name: n.Name, Visible: true, Locked: false,
+                Id: NodeKey(n.Id), Kind: SceneNodeKind.Operation, Name: n.Name, Visible: !n.Hidden, Locked: false,
                 Op: ToKind(n.Op), K: n.K, Children: children);
         }
 
@@ -250,6 +265,8 @@ public sealed class UiController : IDisposable
     {
         var doc = RhinoDoc.ActiveDoc;
         if (doc == null) return;
+        // Anything but setOperation ends a live edit whose commit never came.
+        if (type != "setOperation") FrepTrees.Commit(doc);
         try
         {
             switch (type)
@@ -306,7 +323,11 @@ public sealed class UiController : IDisposable
             return;
         }
 
-        if (request.Mode == "replace") doc.Objects.UnselectAll(); // also clears node selection (OnDeselectAll)
+        if (request.Mode == "replace")
+        {
+            doc.Objects.UnselectAll();
+            ClearNodes(doc); // OnDeselectAll doesn't fire if no Rhino object was selected
+        }
         var nodes = NodesOf(doc);
         foreach (var n in nodeIds)
         {
@@ -327,6 +348,13 @@ public sealed class UiController : IDisposable
 
     static void SetVisible(RhinoDoc doc, SetVisibleRequest request)
     {
+        var tree = FrepTrees.Get(doc);
+        if (TryNode(tree, request.Id, out var n))
+        {
+            if (tree.Find(n)!.Hidden == !request.Visible) return;
+            FrepTrees.Set(doc, tree.WithHidden(n, !request.Visible), $"{(request.Visible ? "Show" : "Hide")} {FrepTree.NodeName(n)}");
+            return;
+        }
         if (!Guid.TryParse(request.Id, out var id)) return;
         if (request.Visible) doc.Objects.Show(id, true);
         else doc.Objects.Hide(id, true);
@@ -358,8 +386,9 @@ public sealed class UiController : IDisposable
         var tree = FrepTrees.Get(doc);
         if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node) return;
         var k = Math.Max(0, request.K);
-        if (node.Op == op && node.K == k) return;
-        FrepTrees.Set(doc, tree.WithOp(id, op, k), $"Edit {node.Name}");
+        // Previews apply live; the final message records the whole gesture as one undo step.
+        if (node.Op != op || node.K != k) FrepTrees.Preview(doc, tree.WithOp(id, op, k), $"Edit {node.Name}");
+        if (!request.Preview) FrepTrees.Commit(doc);
     }
 
     /// Deletes nodes that nothing else references (nodes being deleted together count as going away).

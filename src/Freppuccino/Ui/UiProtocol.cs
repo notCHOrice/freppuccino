@@ -90,7 +90,7 @@ public sealed record NoticeMessage(string Level, string Text) : HostMessage
 /// mode: "replace" | "add" | "toggle"
 public sealed record SelectRequest(string[] Ids, string Mode = "replace");
 
-/// Primitives only.
+/// Primitive: Rhino show/hide. Operation node: FrepNode.Hidden (undoable).
 public sealed record SetVisibleRequest(string Id, bool Visible);
 
 /// Only commands in UiController.AllowedCommands run.
@@ -102,8 +102,8 @@ public sealed record SetParamRequest(string Id, string Name, double Value);
 /// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);
 
-/// Edit an existing operation node.
-public sealed record SetOperationRequest(string Id, string Op, double K);
+/// Edit an existing operation node. Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
+public sealed record SetOperationRequest(string Id, string Op, double K, bool Preview = false);
 
 /// Delete operation nodes nothing else uses.
 public sealed record DeleteNodesRequest(string[] Ids);

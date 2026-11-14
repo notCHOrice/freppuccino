@@ -1,5 +1,5 @@
 import { ArrowUpDown, Box, Circle, Sparkles, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -92,25 +92,64 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
   const [swapped, setSwapped] = useState(false)
   const [op, setOp] = useState<OperationKind>(existing?.op ?? 'union')
   const [k, setK] = useState(existing?.k ?? 0)
+
   // Host values win when they change (undo, another edit); unrelated scene updates keep local edits.
+  // Not mid-drag, and not until the host has caught up with our last edit (stale echoes would yank the slider back).
+  const [dragging, setDragging] = useState(false)
+  const [pending, setPending] = useState<{ op: OperationKind; k: number } | null>(null)
   const [synced, setSynced] = useState({ op: existing?.op, k: existing?.k })
-  if (existing && (existing.op !== synced.op || existing.k !== synced.k)) {
+  const caughtUp = !pending || (existing?.op === pending.op && existing?.k === pending.k)
+  if (existing && !dragging && caughtUp && (pending || existing.op !== synced.op || existing.k !== synced.k)) {
+    setPending(null)
     setSynced({ op: existing.op, k: existing.k })
     if (existing.op) setOp(existing.op)
     if (existing.k !== undefined) setK(existing.k)
   }
+
+  // Live edits of an existing node. Blend previews are throttled; release sends the final value (= one undo step).
+  const live = useRef({ timer: 0, k: 0, sent: null as { op: OperationKind; k: number } | null, previewed: false })
+  const edit = (next: { op: OperationKind; k: number }, preview: boolean) => {
+    if (!existing) return
+    live.current.sent = next
+    setPending(next)
+    send({ type: 'setOperation', id: existing.id, ...next, preview })
+  }
+  const previewK = (v: number) => {
+    const l = live.current
+    l.k = v
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      if (l.k === (l.previewed ? l.sent?.k : existing?.k)) return
+      l.previewed = true
+      edit({ op, k: l.k }, true)
+    }, PREVIEW_MS)
+  }
+  const commitK = (v: number) => {
+    const l = live.current
+    clearTimeout(l.timer)
+    l.timer = 0
+    setK(v)
+    setDragging(false)
+    // Final message closes the host's gesture, so send it even if the drag ended where it started.
+    if (l.previewed || v !== existing?.k) edit({ op, k: v }, false)
+    l.previewed = false
+  }
+  // Unmounted mid-drag (selection changed): close the gesture.
+  const id = existing?.id
+  useEffect(() => {
+    const l = live.current
+    return () => {
+      clearTimeout(l.timer)
+      if (id && l.previewed && l.sent) send({ type: 'setOperation', id, ...l.sent, k: l.k })
+    }
+  }, [id])
 
   // Swapping only makes sense for two new operands; otherwise pick order decides the subtract target.
   const canSwap = !existing && props.operands.length === 2
   const operands = canSwap && swapped ? [...props.operands].reverse() : props.operands
   const ordered = op === 'subtract'
   const role = (i: number) => (ordered ? (i === 0 ? 'Target' : 'Tool') : `#${i + 1}`)
-  const dirty = !existing || op !== existing.op || k !== existing.k
-
-  const apply = () =>
-    existing
-      ? send({ type: 'setOperation', id: existing.id, op, k })
-      : send({ type: 'applyOperation', operands: operands.map((o) => o.id), op, k })
 
   return (
     <Section title={existing ? labels.get(existing.id) ?? 'Operation' : 'Combine'} badge={existing ? 'Operation' : `${operands.length} operands`}>
@@ -132,7 +171,11 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         variant="outline"
         spacing={0}
         value={op}
-        onValueChange={(v) => v && setOp(v as OperationKind)}
+        onValueChange={(v) => {
+          if (!v || v === op) return
+          setOp(v as OperationKind)
+          edit({ op: v as OperationKind, k }, false)
+        }}
         className="w-full"
       >
         {(Object.keys(OPERATIONS) as OperationKind[]).map((kind) => {
@@ -145,21 +188,35 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         })}
       </ToggleGroup>
 
-      <ParamSlider label="Blend" hint={k === 0 ? 'sharp' : units} value={k} max={5} onChange={setK} />
+      <ParamSlider
+        label="Blend"
+        hint={k === 0 ? 'sharp' : units}
+        value={k}
+        max={5}
+        onChange={(v) => {
+          setK(v)
+          if (!existing) return
+          setDragging(true)
+          previewK(v)
+        }}
+        onCommit={existing ? commitK : setK}
+      />
 
-      <div className="flex gap-2">
-        <Button className="flex-1" disabled={!dirty} onClick={apply}>
-          {existing ? 'Update' : `Apply ${OPERATIONS[op].label.toLowerCase()}`}
+      {existing ? (
+        <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
+          <Trash2 /> Delete
         </Button>
-        {existing && (
-          <Button variant="outline" aria-label="Delete" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
-            <Trash2 />
-          </Button>
-        )}
-      </div>
+      ) : (
+        <Button onClick={() => send({ type: 'applyOperation', operands: operands.map((o) => o.id), op, k })}>
+          Apply {OPERATIONS[op].label.toLowerCase()}
+        </Button>
+      )}
     </Section>
   )
 }
+
+/** Live blend previews: at most one per this many ms (~30 Hz); the final value always follows on release. */
+const PREVIEW_MS = 33
 
 function Operand(props: { node: SceneNode; label?: string; role: string }) {
   return (

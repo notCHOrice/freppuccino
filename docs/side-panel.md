@@ -54,12 +54,14 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 |---|---|
 | `ready` | ✅ |
 | `select {ids, mode: replace\|add\|toggle}` | ✅ primitives → Rhino selection; nodes → panel node selection. While FUnion/FIntersect/FDifference wait for operands, a node click is sent to the command line instead |
-| `setVisible {id, visible}` | ✅ primitives only |
+| `setVisible {id, visible}` | ✅ primitive: Rhino show/hide; node: `FrepNode.Hidden`, dropped from the shader like a hidden primitive (undoable) |
 | `runCommand {command}` | ✅ whitelist only: `FBox`, `FSphere`, `Freppuccino` |
 | `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
-| `setOperation {id, op, k}` | ✅ edit a node (undoable) |
+| `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
+
+Live edits: the inspector has no Update button. An op click sends one `setOperation`; a Blend drag sends `preview` ticks (≤ ~30 Hz, trailing) then a final one on release. The host (`FrepTrees.Preview`/`Commit`) remembers the tree from before the gesture and records one undo step back to it. A gesture whose final message never arrives is committed by any other page message, any Rhino command (incl. Undo), a page reload / doc switch, or panel close. The page ignores host snapshots for the node while dragging and until the host echoes its last sent value, so stale snapshots can't yank the slider.
 
 `op` ∈ `union | subtract | intersect` (`FrepOp.Difference` = subtract). Every op takes a blend `k` (0 = sharp, > 0 = smooth). For subtract, operands[0] / children[0] is the target and the rest are tools.
 
@@ -77,4 +79,4 @@ SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
 
 Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
 
-Inspector: one primitive → its parameters; one node → edit op / k, delete; ≥ 2 selected → combine them (pick order; first = subtract target).
+Inspector: one primitive → its parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).

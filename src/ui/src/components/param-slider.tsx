@@ -1,11 +1,12 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 
 /**
  * Label + numeric field + slider. onChange fires while dragging (use for cheap live updates),
- * onCommit on release / Enter / blur (use for anything that writes to the document).
+ * onCommit on release / Enter / blur (use for anything that writes to the document); every drag that fired
+ * onChange ends with one onCommit, even if it ends where it started. Typed values only fire onCommit.
  * Typed values may exceed the slider range.
  */
 export function ParamSlider(props: {
@@ -31,16 +32,22 @@ export function ParamSlider(props: {
     setText(format(props.value))
   }
 
-  const update = (v: number) => {
+  /** value of an uncommitted drag */
+  const dragged = useRef<number | null>(null)
+
+  const show = (v: number) => {
     setValue(v)
     setText(format(v))
-    props.onChange?.(v)
+  }
+  const commit = (v: number) => {
+    dragged.current = null
+    props.onCommit?.(v)
   }
   const commitText = () => {
     const v = Number(text)
     if (!Number.isFinite(v) || v < min || v === value) return setText(format(value))
-    update(v)
-    props.onCommit?.(v)
+    show(v)
+    commit(v)
   }
 
   return (
@@ -67,8 +74,19 @@ export function ParamSlider(props: {
         step={step}
         value={[value]}
         disabled={props.disabled}
-        onValueChange={([v]) => update(v)}
-        onValueCommit={([v]) => props.onCommit?.(v)}
+        onValueChange={([v]) => {
+          show(v)
+          dragged.current = v
+          props.onChange?.(v)
+        }}
+        // Deferred: on keys Radix commits before onValueChange.
+        onValueCommit={([v]) => queueMicrotask(() => commit(v))}
+        // Radix skips onValueCommit when a drag ends where it started; close the gesture anyway.
+        onPointerUp={() =>
+          setTimeout(() => {
+            if (dragged.current !== null) commit(dragged.current)
+          })
+        }
       />
     </div>
   )

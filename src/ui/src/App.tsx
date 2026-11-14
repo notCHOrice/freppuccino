@@ -21,6 +21,16 @@ export default function App() {
     document.documentElement.classList.toggle('dark', theme === 'dark')
   }, [theme])
 
+  // Esc in the panel deselects like Esc in the viewport (inputs keep Esc for themselves).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || (e.target as HTMLElement | null)?.closest('input, textarea')) return
+      send({ type: 'select', ids: [], mode: 'replace' })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const labels = useMemo(() => labelNodes(scene), [scene])
   const byId = useMemo(() => indexNodes(scene), [scene])
   const selectedSet = useMemo(() => new Set(selection), [selection])
