@@ -14,7 +14,8 @@ namespace Freppuccino.Commands;
 /// Bakes every visible F-rep in the document into one mesh: the same primitives and CSG tree the
 /// Freppuccino display mode shows, meshed with <see cref="DualContour"/>. Resolution sets
 /// the finest cell size; the simplification tolerance merges cells where the surface is flat or gently
-/// curved, so triangle density adapts to the shape.
+/// curved, so triangle density adapts to the shape. Optionally the result is passed through Rhino's
+/// QuadRemesh for an even quad layout.
 /// The F-rep objects are left in place.
 /// </summary>
 [Guid("3f6b1c82-9a4e-4d57-b1c3-7e2a5d9f0c46")]
@@ -25,6 +26,7 @@ public class FrepMeshCommand : Command
     // Remembered between runs, like Rhino's own commands.
     static int resolution = 128;
     static double simplify = 0.03;
+    static bool quads;
 
     public override string EnglishName => "FrepMesh";
 
@@ -46,6 +48,8 @@ public class FrepMeshCommand : Command
         var rc = RhinoGet.GetInteger("Mesh resolution (cells along the longest side)", true, ref resolution, MinResolution, MaxResolution);
         if (rc != Result.Success) return rc;
         rc = RhinoGet.GetNumber("Simplification tolerance in cells (0 = uniform density)", true, ref simplify, 0, 1);
+        if (rc != Result.Success) return rc;
+        rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
 
         var watch = Stopwatch.StartNew();
@@ -71,6 +75,31 @@ public class FrepMeshCommand : Command
         // Split vertex normals across sharp edges so creases shade crisp, as Rhino's own meshes do.
         mesh.Unweld(RhinoMath.ToRadians(30), true);
 
+        // Optional second pass: Rhino's QuadRemesh lays out even quads over the triangles, keeping the
+        // creases we just unwelded as hard edges. It works from the triangle mesh, so it cannot be more
+        // accurate than it, and it decides its own topology, so report what Rhino says about the result.
+        string faces = $"{mesh.Faces.Count} triangles", quality =
+            $"{(closed ? "closed" : "OPEN")}, " +
+            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
+        if (quads)
+        {
+            var parameters = new QuadRemeshParameters
+            {
+                TargetQuadCount = Math.Max(200, mesh.Faces.Count / 2),
+                AdaptiveQuadCount = true,
+                AdaptiveSize = 50,
+                DetectHardEdges = true,
+            };
+            var remeshed = mesh.QuadRemesh(parameters);
+            if (remeshed != null && remeshed.Faces.Count > 0)
+            {
+                faces += $" -> {remeshed.Faces.Count} faces ({remeshed.Faces.QuadCount} quads) after QuadRemesh";
+                mesh = remeshed;
+                quality = $"{(mesh.IsClosed ? "closed" : "OPEN")}, {(mesh.IsManifold(true, out _, out _) ? "manifold" : "NON-MANIFOLD")} per Rhino";
+            }
+            else RhinoApp.WriteLine("FrepMesh: QuadRemesh produced nothing; keeping the triangle mesh.");
+        }
+
         var attributes = doc.CreateDefaultAttributes();
         attributes.Name = "FrepMesh";
         var id = doc.Objects.AddMesh(mesh, attributes);
@@ -85,10 +114,8 @@ public class FrepMeshCommand : Command
         doc.Objects.Select(id);
         doc.Views.Redraw();
         RhinoApp.WriteLine(
-            $"FrepMesh: {scene.Count} F-rep(s) -> {mesh.Faces.Count} triangles, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
-            $"{(closed ? "closed" : "OPEN")}, " +
-            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)") +
-            $", {watch.ElapsedMilliseconds} ms.");
+            $"FrepMesh: {scene.Count} F-rep(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
+            $"{quality}, {watch.ElapsedMilliseconds} ms.");
         return Result.Success;
     }
 
