@@ -294,11 +294,70 @@ public static class DualContour
                 if (!agrees) return false;
             }
 
+            // The merged cell's one vertex joins every polygon whose edge lies on the cell's boundary, so
+            // the surface must cross that boundary in a single closed loop. The sign test above does not
+            // guarantee it (a crease can make the surface leave and re-enter through one face), and two
+            // loops would pinch two fans of triangles together at the vertex.
+            if (BoundaryLoops(i0, j0, k0, size) != 1) return false;
+
             var lo = new V3(i0 * g.H, j0 * g.H, k0 * g.H);
             x = Clamp(q.Solve(), lo, size * g.H, g.H);
             if (q.Rms(x) > tolerance) return false;
             x += g.Origin;
             return true;
+        }
+
+        /// Number of closed loops in which the surface crosses the boundary of the cube of
+        /// <paramref name="size"/> cells at sample (i0, j0, k0), traced over the finest grid squares.
+        int BoundaryLoops(int i0, int j0, int k0, int size)
+        {
+            var parent = new Dictionary<long, long>();
+            long Find(long e)
+            {
+                if (!parent.TryGetValue(e, out long up)) { parent[e] = e; return e; }
+                if (up == e) return e;
+                return parent[e] = Find(up);
+            }
+            Span<int> at = stackalloc int[3];
+            Span<long> edge = stackalloc long[4];
+            Span<bool> sign = stackalloc bool[4];
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int p = P(axis), q = Q(axis);
+                for (int side = 0; side <= size; side += size)
+                    for (int u = 0; u < size; u++)
+                        for (int v = 0; v < size; v++)
+                        {
+                            // Corners in cyclic order (u,v), (u+1,v), (u+1,v+1), (u,v+1); edge n joins corner n to n+1.
+                            for (int n = 0; n < 4; n++)
+                            {
+                                at[0] = i0; at[1] = j0; at[2] = k0;
+                                at[axis] += side; at[p] += u + (n is 1 or 2 ? 1 : 0); at[q] += v + (n >= 2 ? 1 : 0);
+                                sign[n] = g.In(at[0], at[1], at[2]);
+                                // An edge is named by its lower sample and its direction.
+                                if (n == 2) at[p]--;
+                                if (n == 3) at[q]--;
+                                edge[n] = (((long)at[2] * g.Sy + at[1]) * g.Sx + at[0]) * 3 + (n is 0 or 2 ? p : q);
+                            }
+                            int crossings = 0;
+                            for (int n = 0; n < 4; n++) if (sign[n] != sign[(n + 1) % 4]) crossings++;
+                            if (crossings == 2)
+                            {
+                                long first = -1;
+                                for (int n = 0; n < 4; n++)
+                                {
+                                    if (sign[n] == sign[(n + 1) % 4]) continue;
+                                    if (first < 0) first = Find(edge[n]); else parent[Find(edge[n])] = first;
+                                }
+                            }
+                            else if (crossings == 4)
+                                for (int n = 0; n < 4; n++)
+                                    if (sign[n]) parent[Find(edge[n])] = Find(edge[(n + 3) % 4]);
+                        }
+            }
+            int loops = 0;
+            foreach (var (e, up) in parent) if (e == up) loops++;
+            return loops;
         }
 
         public void Contour() => CellProc(new Node(levels, 0, 0, 0));
