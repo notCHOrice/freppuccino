@@ -20,9 +20,9 @@ namespace Freppuccino.Shaders;
 /// the smin/smax weight (a smooth union's fillet fades between them); difference keeps the base's color; warps keep the child's.
 public static class FrepShaderGen
 {
-    /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, prim colors packed 4 per row,
+    /// Uniform header = 8 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, prim colors packed 4 per row,
     /// warp rows, then blend k's packed 4 per row.
-    const int HeaderRows = 7;
+    const int HeaderRows = 8;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
@@ -190,6 +190,8 @@ public static class FrepShaderGen
                     _ => $"    {v} = csub({v}, {t}, {k});\n",
                 });
             }
+            // FZebra: the hit point lies on this union's surface (incl. its blend fillets).
+            if (n.Op == FrepOp.Union) color.Append($"    zeb = max(zeb, 1.0 - step(tol, abs({v}.w)));\n");
             return v;
         }
 
@@ -229,6 +231,7 @@ public static class FrepShaderGen
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
             vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
+            vec4 zebraCfg;   // FZebra on unions: x = stripe count (0 = off), y = 1 vertical / 0 horizontal, z/w = colors (0xRRGGBB)
             // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
             // then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
@@ -387,9 +390,20 @@ public static class FrepShaderGen
         {{map}}    return d;
         }
         // Only evaluated once per hit pixel, so the hot march loop stays float-only.
-        vec3 sceneColor(vec3 p)
+        // zeb = 1 if p is within tol of a union node's surface (FZebra), else 0.
+        vec3 sceneColor(vec3 p, float tol, out float zeb)
         {
+            zeb = 0.0;
         {{color}}    return c.rgb;
+        }
+        // FZebra (Rhino-style): bands of the reflected view direction, measured in the camera frame so the stripes
+        // follow the view. Vertical stripes vary with the reflection's left/right component, horizontal with up/down.
+        vec3 zebra(vec3 rd, vec3 n)
+        {
+            vec3 r = reflect(rd, n);
+            float s = u.zebraCfg.y > 0.5 ? dot(r, u.camX.xyz) : dot(r, u.camY.xyz);
+            float a = acos(clamp(s, -1.0, 1.0)) / 3.14159265 * u.zebraCfg.x;
+            return step(0.5, fract(a)) > 0.5 ? unpackColor(u.zebraCfg.w) : unpackColor(u.zebraCfg.z);
         }
 
         void main()
@@ -438,7 +452,12 @@ public static class FrepShaderGen
             vec3 n = normalize(k.xyy * map(p + k.xyy * eps) + k.yyx * map(p + k.yyx * eps) +
                                k.yxy * map(p + k.yxy * eps) + k.xxx * map(p + k.xxx * eps));
             // Object display color, lit as before: world +Z up = full color, -Z down = GREY x color.
-            outColor = vec4(sceneColor(p) * mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0);
+            // The hit sits up to ~(1 + 2 x inset) eps inside the true surface; tol covers that with margin.
+            float zeb;
+            vec3 col = sceneColor(p, eps * (4.0 + 2.0 * u.params.x), zeb);
+            // Zebra stripes are unlit (like Rhino's), so their edges read cleanly.
+            if (u.zebraCfg.x > 0.0 && zeb > 0.5) { outColor = vec4(zebra(rd, n), 1.0); return; }
+            outColor = vec4(col * mix(GREY, vec3(1.0), n.z * 0.5 + 0.5), 1.0);
         }
         """;
 
@@ -458,6 +477,9 @@ public static class FrepShaderGen
             .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
+        u.Vec4(Display.FrepSettings.Zebra ? Math.Max(1, Display.FrepSettings.ZebraStripes) : 0,
+            Display.FrepSettings.ZebraVertical ? 1 : 0,
+            PackColor(Display.FrepSettings.ZebraColor1), PackColor(Display.FrepSettings.ZebraColor2));
         // Same order as Compile(): prim rows, colors, warp rows, then k's.
         foreach (var (kind, f, v) in scene.Primitives)
         {
