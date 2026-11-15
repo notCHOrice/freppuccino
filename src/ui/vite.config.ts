@@ -21,11 +21,14 @@ function classicScripts(): Plugin {
   }
 }
 
+const root = import.meta.dirname.replace(/^[a-z]:/, (d) => d.toUpperCase())
+
 export default defineConfig({
+  root,
   base: './',
   plugins: [react(), tailwindcss(), classicScripts()],
   resolve: {
-    alias: { '@': path.resolve(import.meta.dirname, './src') },
+    alias: { '@': path.resolve(root, './src') },
   },
   build: {
     modulePreload: false,

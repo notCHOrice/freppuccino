@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { AiPanel } from '@/components/ai-panel'
+import { BrandIcon } from '@/components/brand-icon'
 import { Inspector } from '@/components/inspector'
 import { ScriptPanel } from '@/components/script-panel'
 import { SceneTree } from '@/components/scene-tree'
@@ -24,6 +25,7 @@ export default function App() {
   const scene = useHost((s) => s.scene)
   const selection = useHost((s) => s.selection)
   const theme = useHost((s) => s.theme)
+  const frepMode = useHost((s) => s.frepMode)
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
@@ -78,6 +80,15 @@ export default function App() {
           </ToggleGroup>
         </span>
       </header>
+
+      {synced && !frepMode && (
+        <div className="flex shrink-0 items-center gap-2 border-b bg-secondary px-4 py-2">
+          <span className="type-small flex-1 text-secondary-foreground">This view isn't showing F-reps.</span>
+          <Button size="sm" onClick={() => send({ type: 'showFrepMode' })}>
+            <BrandIcon name="preview" /> F-rep display mode
+          </Button>
+        </div>
+      )}
 
       {/* Both stay mounted so switching keeps scroll position and the chat draft. */}
       <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'scene' && 'hidden')}>
