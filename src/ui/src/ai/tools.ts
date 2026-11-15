@@ -31,7 +31,7 @@ const SHAPE_FIELDS = {
   base_center: vec3('pyramid: center of the square base'),
   height: { type: 'number', description: 'pyramid: height from base to apex' },
   base_size: { type: 'number', description: 'pyramid: side length of the square base' },
-  color: { type: 'string', description: 'display color, "#RRGGBB" or a color name; blends mix colors smoothly' },
+  color: { type: 'string', description: 'shader color, "#RRGGBB" or a color name; blends mix colors smoothly. Default white' },
 }
 
 // Deform (warp) fields: create with deform, change with edit_operation, read back from get_scene.
@@ -142,6 +142,26 @@ export const TOOLS: ToolDef[] = [
     { refs: refs('refs to delete'), recursive: { type: 'boolean' } },
     ['refs'],
   ),
+  tool(
+    'set_color',
+    'Recolors primitives without changing their shape (one undo step). A node ref colors every primitive under it. ' +
+      'Either refs + color (same color for all), or colors: [{ref, color}, ...] to paint several parts differently in one call. ' +
+      'Colors show in capture_views: use them to match a reference image and to tell parts apart.',
+    {
+      refs: refs('primitives or nodes to give the same color'),
+      color: SHAPE_FIELDS.color,
+      colors: {
+        type: 'array',
+        minItems: 1,
+        description: 'per-ref colors, applied in order (later entries win)',
+        items: {
+          type: 'object',
+          properties: { ref: { type: 'string' }, color: SHAPE_FIELDS.color },
+          required: ['ref', 'color'],
+        },
+      },
+    },
+  ),
   tool('set_visible', 'Shows or hides primitives / operation nodes (hidden ones are not drawn).', {
     refs: refs('refs'),
     visible: { type: 'boolean' },
@@ -237,6 +257,12 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
     case 'transform':
       return ((result.transformed as string[]) ?? []).join(', ')
+    case 'set_color': {
+      const colored = Object.entries((result.colored as Record<string, string>) ?? {})
+      return colored.length > 3
+        ? `${colored.length} primitives`
+        : colored.map(([ref, color]) => `${ref} ${color}`).join(', ') || 'nothing'
+    }
     default:
       return 'done'
   }
