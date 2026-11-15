@@ -294,7 +294,8 @@ public static class SdfTransforms
         var c2 = basis.Z;
         double det = c0 * Vector3d.CrossProduct(c1, c2);
         double volume = c0.Length * c1.Length * c2.Length;
-        if (!(Math.Abs(det) > 1e-12 * Math.Max(volume, 1e-30))) return false;
+        // Scale-relative: the determinant of the normalized columns (no absolute floor, so a healthy map of any size passes).
+        if (!(volume > 0 && double.IsFinite(det / volume) && Math.Abs(det / volume) > 1e-12)) return false;
         double invDet = 1.0 / det;
         r0 = Vector3d.CrossProduct(c1, c2) * invDet;
         r1 = Vector3d.CrossProduct(c2, c0) * invDet;

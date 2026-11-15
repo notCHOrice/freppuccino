@@ -77,16 +77,52 @@ public static class FrepScene
     }
 
     public static void MarkDirty() => dirty = true;
+
+    /// Node ids in a node's subtree (itself included).
+    static IEnumerable<int> SubtreeNodes(FrepTree tree, int id)
+    {
+        var seen = new HashSet<int>();
+        var stack = new Stack<int>([id]);
+        while (stack.Count > 0)
+        {
+            var cur = stack.Pop();
+            if (!seen.Add(cur) || tree.Find(cur) is not { } n) continue;
+            foreach (var o in n.Operands) if (o.IsNode) stack.Push(o.NodeId);
+        }
+        return seen;
+    }
     static void Dirty(object? sender, RhinoObjectEventArgs e) => dirty = true;
 
     public static FrepSceneData Get(RhinoDoc doc)
     {
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
+        // Blend carriers under a drag: their roots' matrices preview as drag × M (the tree is only written on commit).
+        // Like the commit, a root wins over its descendants: leaves and warp references reachable from a dragged root
+        // get no canonical preview of their own, even when they are selected (and so dragged) too.
+        var previewTree = tree;
+        var movingRoots = new HashSet<int>();
+        foreach (var o in doc.Objects.GetSelectedObjects(false, false))
+        {
+            if (Selection.FrepCarriers.NodeOf(o) is not { } id || !o.GetDynamicTransform(out var cx) || cx.IsIdentity) continue;
+            if (previewTree.Find(id) is not { } n || !Placement.IsUsable(cx * n.M)) continue;
+            previewTree = previewTree.WithM(id, cx * n.M);
+            movingRoots.Add(id);
+        }
+        var underMoving = new HashSet<Guid>();
+        var warpsUnderMoving = new HashSet<int>();
+        if (movingRoots.Count > 0)
+        {
+            foreach (var inst in Selection.FrepInstances.Compute(tree, scene.Ids).Instances)
+                if (inst.Root.IsNode && movingRoots.Contains(inst.Root.NodeId)) underMoving.Add(inst.Object);
+            foreach (var id in movingRoots) warpsUnderMoving.UnionWith(SubtreeNodes(tree, id));
+        }
+
         List<SdPrimitive>? prims = null;
         bool reshaped = false;
         for (int i = 0; i < owners.Count; i++)
         {
+            if (underMoving.Contains(owners[i].Id)) continue;
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
             // Under transformed roots the leaf sits at T × canonical: the drag is T⁻¹ X T on its values.
             if (Selection.FrepSelection.InstanceOf(doc, owners[i].Id, tree, scene.Ids) is { } inst && !inst.T.IsIdentity && inst.T.TryGetInverse(out var ti))
@@ -100,6 +136,7 @@ public static class FrepScene
         List<SdWarp>? warps = null;
         for (int i = 0; i < warpOwners.Count; i++)
         {
+            if (warpsUnderMoving.Contains(scene.WarpIds[i])) continue;
             if (!warpOwners[i].GetDynamicTransform(out var world) || world.IsIdentity) continue;
             // The drag moves the real object (A × canonical); in canonical space that is A⁻¹ × drag × A.
             var a = warpApplied[i];
@@ -110,13 +147,6 @@ public static class FrepScene
             if (!(w.Op == FrepOp.Repeat ? region.Transform(xf) : axis.Transform(xf))) continue;
             warps ??= [.. scene.Warps];
             warps[i] = w with { Axis = axis, Region = region };
-        }
-        // Blend carriers under a drag: preview their roots' matrices as drag × M (the tree is only written on commit).
-        var previewTree = tree;
-        foreach (var o in doc.Objects.GetSelectedObjects(false, false))
-        {
-            if (Selection.FrepCarriers.NodeOf(o) is not { } id || !o.GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
-            if (previewTree.Find(id) is { } n && Placement.IsUsable(xf * n.M)) previewTree = previewTree.WithM(id, xf * n.M);
         }
         if (!ReferenceEquals(previewTree, tree))
         {

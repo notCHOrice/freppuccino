@@ -92,10 +92,11 @@ public sealed class FrepField
     public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V3? z = null, double lip = 1)
     {
         var zz = z ?? V3.Cross(x, y);
+        // Callers drop invalid maps upstream (SdfTransforms.IsUsableBasis, same test); a silent fallback here would be
+        // a wrong field nobody notices.
         if (!InverseRows(x, y, zz, out var ix, out var iy, out var iz))
-        {
-            ix = x; iy = y; iz = zz;
-        }
+            throw new ArgumentException("singular or degenerate primitive map");
+        if (!(lip > 0) || !double.IsFinite(lip)) throw new ArgumentException("primitive map scale must be finite and positive", nameof(lip));
         prims.Add(new Prim(kind, origin, x, y, zz, p, lip, ix, iy, iz));
         return prims.Count - 1;
     }
@@ -104,7 +105,8 @@ public sealed class FrepField
     {
         double det = V3.Dot(x, V3.Cross(y, z));
         double volume = x.Length * y.Length * z.Length;
-        if (!(Math.Abs(det) > 1e-12 * Math.Max(volume, 1e-30)))
+        // Same scale-relative test as SdfTransforms.TryMetrics (normalized columns, no absolute floor).
+        if (!(volume > 0 && double.IsFinite(det / volume) && Math.Abs(det / volume) > 1e-12))
         {
             r0 = r1 = r2 = default;
             return false;
@@ -607,7 +609,7 @@ public sealed class FrepField
     static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
     {
         // Field value is σ_min · local distance, so {field <= t} is a local offset of t / σ_min.
-        double grow = s.Lip > 1e-12 ? t / s.Lip : t;
+        double grow = t / s.Lip; // Lip is validated finite and positive in AddPrimitive, however small
         V3 lo, hi;
         switch (s.Kind)
         {
