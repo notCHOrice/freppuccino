@@ -172,6 +172,12 @@ public static class DualContour
         /// Deep samples, (StepB + 1)³ per fine cell given extra depth or next to one, on the C lattice.
         public readonly ConcurrentDictionary<long, float[]> Deep = new();
 
+        /// Fine cells built for a refined base cell without deep cells, reused by later builds (same samples, same result).
+        public readonly ConcurrentDictionary<int, (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad)> FineCellCache = new();
+
+        /// Base cells already accepted as interface cells by Close (see InterfaceOk); kept across closures.
+        public readonly HashSet<int> InterfaceAccepted = [];
+
         public Grid(FrepField field, V3 origin, double hb, int k, int e, int nbx, int nby, int nbz)
         {
             Field = field;
@@ -821,7 +827,8 @@ public static class DualContour
     {
         int side = g.PerBase + 1, per = g.PerBase;
         long blockBytes = (long)side * side * side * 4;
-        var checkedOk = new HashSet<int>();
+        // Interface verdicts depend only on a cell's own samples and face decisions, so they hold across calls.
+        var checkedOk = g.InterfaceAccepted;
         while (true)
         {
             // Interface cells of the current set.
@@ -1043,6 +1050,24 @@ public static class DualContour
             Parallel.For(0, list.Length, (n, state) =>
             {
                 var (bi, bj, bk) = g.BaseCoords(list[n]);
+                // A base cell without deep cells gives the same fine cells every build: reuse them.
+                bool anyDeep = false;
+                if (deep.Count > 0)
+                    for (int fk = bk * per; fk < (bk + 1) * per && !anyDeep; fk++)
+                        for (int fj = bj * per; fj < (bj + 1) * per && !anyDeep; fj++)
+                            for (int fi = bi * per; fi < (bi + 1) * per && !anyDeep; fi++)
+                                anyDeep = deep.Contains(g.FineCell(fi, fj, fk));
+                if (!anyDeep && g.FineCellCache.TryGetValue(list[n], out var cached))
+                {
+                    cellsOf[n] = cached;
+                    long sum = Interlocked.Add(ref made, cached.Cells.Count);
+                    if (sum > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + sum * 400 + g.CentreMemory + reserved > MemoryBudget)
+                    {
+                        overBudget = true;
+                        state.Stop();
+                    }
+                    return;
+                }
                 var cells = new List<(long, int, int)>();
                 var points = new List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)>();
                 int bad = 0;
@@ -1101,6 +1126,7 @@ public static class DualContour
                             cells.Add((new Octree.Node(g.E, fi, fj, fk).Key, packed, count));
                         }
                 cellsOf[n] = (cells, points, bad);
+                if (!anyDeep) g.FineCellCache[list[n]] = cellsOf[n];
                 long total = Interlocked.Add(ref made, cells.Count);
                 if (total > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + total * 400 + g.CentreMemory + reserved > MemoryBudget)
                 {
