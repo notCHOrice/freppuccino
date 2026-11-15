@@ -91,6 +91,10 @@ public static class DualContour
     /// before a stable one), instead of all six; vertices already on their feature are not moved for a neighbour.
     public static bool GentleDemotion = true;
 
+    /// Resolve faces crossed four times by the field at the face centre (see FaceCentreInside), instead of always
+    /// pairing the crossings around the inside corners.
+    public static bool FaceCentres = true;
+
     /// Optional progress and timing messages (for test harnesses).
     public static Action<string>? Trace;
     static readonly System.Diagnostics.Stopwatch clock = new();
@@ -193,6 +197,15 @@ public static class DualContour
         public int BaseCell(int bi, int bj, int bk) => (bk * Nby + bj) * Nbx + bi;
         public bool HasBaseCell(int bi, int bj, int bk) => (uint)bi < (uint)Nbx && (uint)bj < (uint)Nby && (uint)bk < (uint)Nbz;
         public (int, int, int) BaseCoords(int cell) => (cell % Nbx, cell / Nbx % Nby, cell / (Nbx * Nby));
+
+        readonly ConcurrentDictionary<(int, int, int), bool> centres = new();
+
+        /// Inside test at a point given in doubled finest-lattice coordinates (so face centres are integers). One
+        /// formula and one cache for every caller, so every consumer of a face decides it the same way. A value of
+        /// exactly 0 counts as outside, as at the samples.
+        public bool InsideDoubled(int x2, int y2, int z2) =>
+            centres.GetOrAdd((x2, y2, z2), key => Field.Value(new V3(
+                Origin.X + key.Item1 * (H * 0.5), Origin.Y + key.Item2 * (H * 0.5), Origin.Z + key.Item3 * (H * 0.5))) < 0);
 
         /// Evaluates the (Step + 1)³ samples of base cell (bi, bj, bk).
         public float[] Sample(int bi, int bj, int bk)
@@ -461,7 +474,7 @@ public static class DualContour
                         if (s[c]) inside++;
                     }
                     if (inside == 0 || inside == 8) continue;
-                    int count = Sheets(s, sheet), packed = 0;
+                    int count = Sheets(s, sheet, g, bi * step, bj * step, bk * step, step), packed = 0;
                     for (int e = 0; e < 12; e++)
                         if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
                     bool unresolved = count > 1 || FourCrossingFace(s);
@@ -605,7 +618,7 @@ public static class DualContour
             return true;
         }
         Span<int> sheet = stackalloc int[12];
-        if (Sheets(corner, sheet) != 1) return false;
+        if (Sheets(corner, sheet, g, i0, j0, k0, step) != 1) return false;
         return Octree.BoundaryLoops(g, i0, j0, k0, step, 1) == 1;
     }
 
@@ -687,7 +700,7 @@ public static class DualContour
                                 if (s[c]) inside++;
                             }
                             if (inside == 0 || inside == 8) continue;
-                            int count = Sheets(s, sheet), packed = 0;
+                            int count = Sheets(s, sheet, g, i, j, kk, 1), packed = 0;
                             for (int e = 0; e < 12; e++)
                                 if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
                             for (int c = 0; c < count; c++)
@@ -1054,7 +1067,7 @@ public static class DualContour
             // the corners of that edge, face or cell, so no sign feature is lost between the corners.
             int size = 1 << n.L, half = size >> 1, i0 = n.I * size, j0 = n.J * size, k0 = n.K * size;
             for (int c = 0; c < 8; c++) corner[c] = g.In(i0 + (c & 1) * size, j0 + ((c >> 1) & 1) * size, k0 + (c >> 2) * size);
-            if (Sheets(corner, sheet) != 1) return false;
+            if (Sheets(corner, sheet, g, i0, j0, k0, size) != 1) return false;
             for (int m = 0; m < 27; m++)
             {
                 int mx = m % 3, my = m / 3 % 3, mz = m / 9;
@@ -1127,8 +1140,13 @@ public static class DualContour
                                 }
                             }
                             else if (crossings == 4)
+                            {
+                                at[0] = i0; at[1] = j0; at[2] = k0;
+                                at[axis] += side; at[p] += u; at[q] += v;
+                                bool around = !FaceCentreInside(g, axis, at[0], at[1], at[2], step);
                                 for (int n = 0; n < 4; n++)
-                                    if (sign[n]) parent[Find(edge[n])] = Find(edge[(n + 3) % 4]);
+                                    if (sign[n] == around) parent[Find(edge[n])] = Find(edge[(n + 3) % 4]);
+                            }
                         }
             }
             int loops = 0;
@@ -1537,8 +1555,10 @@ public static class DualContour
             }
             bool c00 = Inside(0, 0), c10 = Inside(1, 0), c11 = Inside(1, 1), c01 = Inside(0, 1);
             if (c00 == c10 || c10 == c11 || c11 == c01) continue; // not an alternating square
-            // The strip at the inside corner (cornerA, 0): the side along A at B-offset 0 and the side along B at A-offset cornerA.
-            int cornerA = c00 ? 0 : 1;
+            // The strip at a pairing corner (cornerA, 0): the side along A at B-offset 0 and the side along B at
+            // A-offset cornerA. The square pairs around its inside corners, or its outside ones if its centre is inside.
+            bool centreIn = FaceCentreInside(g, normal, lo[0], lo[1], lo[2], 1);
+            int cornerA = c00 != centreIn ? 0 : 1;
             int t1 = Side(axisA, 0), t2 = Side(axisB, cornerA);
             if (t1 < 0 || t2 < 0 || t1 == t2) continue;
 
@@ -1601,11 +1621,23 @@ public static class DualContour
     static readonly int[][] FaceEdges = [.. FaceCorners.Select(f => Enumerable.Range(0, 4).Select(i =>
         Array.FindIndex(Edges, e => (e.A, e.B) == (f[i], f[(i + 1) % 4]) || (e.B, e.A) == (f[i], f[(i + 1) % 4]))).ToArray())];
 
+    /// Is the centre of the square face normal to <paramref name="axis"/> with minimum corner (i, j, k) and side
+    /// <paramref name="size"/> (finest cells) inside? A face crossed four times is ambiguous from its corners: inside,
+    /// the inside corners are joined across the face, so its crossings pair around the outside corners; outside (or
+    /// without FaceCentres), around the inside corners. Every consumer asks this for the same face the same way.
+    static bool FaceCentreInside(Grid g, int axis, int i, int j, int k, int size)
+    {
+        if (!FaceCentres) return false;
+        int x2 = 2 * i + (axis != 0 ? size : 0), y2 = 2 * j + (axis != 1 ? size : 0), z2 = 2 * k + (axis != 2 ? size : 0);
+        return g.InsideDoubled(x2, y2, z2);
+    }
+
     /// Groups the cell's sign-changing edges into surface sheets: two crossings on the same face belong
-    /// to the same sheet. On a face with four crossings the two edges at each inside corner are paired;
-    /// the rule depends only on the face's corner signs, so the neighbouring cell agrees.
+    /// to the same sheet. On a face with four crossings the crossings pair around the inside corners, or around
+    /// the outside corners if the face centre is inside (FaceCentreInside); the decision belongs to the face, so
+    /// the neighbouring cell agrees. The cell is at finest sample (i, j, k) and <paramref name="size"/> wide.
     /// Writes a sheet number (or -1) per edge and returns the sheet count (at most 4).
-    static int Sheets(ReadOnlySpan<bool> inside, Span<int> sheet)
+    static int Sheets(ReadOnlySpan<bool> inside, Span<int> sheet, Grid g, int ci, int cj, int ck, int size)
     {
         Span<int> parent = stackalloc int[12];
         for (int e = 0; e < 12; e++) parent[e] = e;
@@ -1619,8 +1651,13 @@ public static class DualContour
                 if (inside[c[i]] != inside[c[(i + 1) % 4]]) crossing[n++] = fe[i];
             if (n == 2) parent[Find(parent, crossing[0])] = Find(parent, crossing[1]);
             else if (n == 4)
+            {
+                int axis = f / 2, far = f % 2;
+                bool around = !FaceCentreInside(g, axis, ci + (axis == 0 ? far * size : 0), cj + (axis == 1 ? far * size : 0),
+                    ck + (axis == 2 ? far * size : 0), size);
                 for (int i = 0; i < 4; i++)
-                    if (inside[c[i]]) parent[Find(parent, fe[i])] = Find(parent, fe[(i + 3) % 4]);
+                    if (inside[c[i]] == around) parent[Find(parent, fe[i])] = Find(parent, fe[(i + 3) % 4]);
+            }
         }
 
         int count = 0;
