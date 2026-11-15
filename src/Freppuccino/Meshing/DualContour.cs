@@ -610,6 +610,7 @@ public static class DualContour
         var (fi, fj, fk) = g.FineCoords(cell);
         int sb = g.StepB, side = sb + 1, i0 = fi * sb, j0 = fj * sb, k0 = fk * sb;
         var block = g.Deep[cell];
+        if (!SignComponentsOk(block, side)) return false;
         bool At(int i, int j, int k) => block[(k * side + j) * side + i] < 0;
         Span<bool> corner = stackalloc bool[8];
         int inside = 0;
@@ -853,6 +854,50 @@ public static class DualContour
         }
     }
 
+    /// The samples of a cube <paramref name="side"/> samples wide (x fastest): at most one 6-connected set of inside
+    /// samples and one of outside samples, each containing a corner of the cube with its sign. An interface cell must
+    /// pass this to stay empty or one vertex: otherwise it holds sampled surface (an island or a void) its corners
+    /// don't show. A conservative filter (sol #357-#362): it may promote a cell whose sets join only diagonally.
+    static bool SignComponentsOk(float[] block, int side)
+    {
+        int n = side * side * side;
+        var label = new int[n];
+        var stack = new Stack<int>();
+        int insideSets = 0, outsideSets = 0;
+        int last = side - 1;
+        for (int start = 0; start < n; start++)
+        {
+            if (label[start] != 0) continue;
+            bool sign = block[start] < 0;
+            bool hasCorner = false;
+            label[start] = 1;
+            stack.Push(start);
+            while (stack.Count > 0)
+            {
+                int at = stack.Pop();
+                int x = at % side, y = at / side % side, z = at / (side * side);
+                if ((x == 0 || x == last) && (y == 0 || y == last) && (z == 0 || z == last)) hasCorner = true;
+                if (x > 0) Visit(at - 1);
+                if (x < last) Visit(at + 1);
+                if (y > 0) Visit(at - side);
+                if (y < last) Visit(at + side);
+                if (z > 0) Visit(at - side * side);
+                if (z < last) Visit(at + side * side);
+            }
+            if (!hasCorner) return false;
+            if (sign) insideSets++; else outsideSets++;
+            if (insideSets > 1 || outsideSets > 1) return false;
+
+            void Visit(int m)
+            {
+                if (label[m] != 0 || (block[m] < 0) != sign) return;
+                label[m] = 1;
+                stack.Push(m);
+            }
+        }
+        return true;
+    }
+
     /// Can interface cell <paramref name="cell"/> stay one base vertex next to refined cells (see Close)?
     static bool InterfaceOk(Grid g, int cell)
     {
@@ -860,6 +905,7 @@ public static class DualContour
         // Block-local indices are on the fine lattice (step = fine cells per base edge); positions passed on are finest.
         int step = g.PerBase, side = step + 1, i0 = bi * g.Step, j0 = bj * g.Step, k0 = bk * g.Step;
         var block = g.Blocks[cell];
+        if (!SignComponentsOk(block, side)) return false;
         bool At(int i, int j, int k) => block[(k * side + j) * side + i] < 0;
         Span<bool> corner = stackalloc bool[8];
         int inside = 0;
