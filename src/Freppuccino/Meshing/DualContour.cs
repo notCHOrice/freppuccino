@@ -38,11 +38,11 @@ public static class DualContour
     /// of the whole output; 0 unless the repair in Mesh ran out of vertices to demote or of rounds.
     /// Demoted: vertex placements the repair stepped down.
     /// Refine: extra levels actually used (lowered from the request when over budget or below the minimum cell size).
-    /// RefinedCells: base cells sampled finer. Unresolved: finest-level vertices whose placement fell back to
-    /// their in-cell point (features thinner than MinCellSize). UnsafeSamples: base samples whose sign changed when
+    /// RefinedCells: base cells sampled finer. Unresolved: finest-level vertices in the output at their in-cell point,
+    /// placed there or demoted there by the crossing repair (features thinner than MinCellSize). UnsafeSamples: base samples whose sign changed when
     /// evaluated again (the field changed faster than its Lipschitz bound, so skipping samples was unsafe there).
-    /// Fragments: separate pieces of the mesh no more than 4 finest cells across, often bits of a feature thinner
-    /// than the finest cell whose links to the rest were too thin to sample. They are kept, only counted.
+    /// Fragments: small disconnected components, no more than 4 finest cells across. Often these are bits of a
+    /// feature thinner than the finest cell whose links were too thin to sample, but not always. Kept, only counted.
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
         double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0);
 
@@ -534,7 +534,8 @@ public static class DualContour
         var cellSide = new List<double>();
         var coarse = new Dictionary<long, int>();      // level-k node of an unrefined base cell -> its vertex
         var coarseCell = new Dictionary<int, int>();   // that vertex -> its base cell
-        int unresolved = 0;
+        // Finest-cell vertices at their in-cell point (placed there, or demoted there by the repair).
+        var atInCell = new HashSet<int>();
 
         void Add(V3 point, Qef q, V3? stable, V3 min, double sideLength)
         {
@@ -558,7 +559,7 @@ public static class DualContour
         else
         {
             // 4. Fine cells inside the refined set.
-            var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3)> Points, int Bad)[refined.Count];
+            var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool)> Points, int Bad)[refined.Count];
             var list = refined.OrderBy(c => c).ToArray();
             // The budget is checked on the cells actually made, as they are made: an oscillating field can make far
             // more than an estimate from the refined set's size.
@@ -569,7 +570,7 @@ public static class DualContour
             {
                 var (bi, bj, bk) = g.BaseCoords(list[n]);
                 var cells = new List<(long, int, int)>();
-                var points = new List<(V3, Qef, V3?, V3)>();
+                var points = new List<(V3, Qef, V3?, V3, bool)>();
                 int bad = 0;
                 Span<bool> s = stackalloc bool[8];
                 Span<int> sheet = stackalloc int[12];
@@ -591,7 +592,7 @@ public static class DualContour
                             {
                                 var x = CellVertex(g, i, j, kk, 1, g.H, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack);
                                 if (fellBack) bad++;
-                                points.Add((x, q, stable, g.P(i, j, kk)));
+                                points.Add((x, q, stable, g.P(i, j, kk), fellBack));
                             }
                             cells.Add((g.Cell(i, j, kk), packed, count));
                         }
@@ -617,8 +618,11 @@ public static class DualContour
                     index[cell] = (at, packed, count);
                     at += count;
                 }
-                foreach (var (x, q, stable, min) in points) Add(x, q, stable, min, g.H);
-                unresolved += bad;
+                foreach (var (x, q, stable, min, fellBack) in points)
+                {
+                    if (fellBack) atInCell.Add(vertices.Count);
+                    Add(x, q, stable, min, g.H);
+                }
             }
             // Coarse leaves: unrefined base cells with a sign change (one sheet, or they would be refined).
             foreach (var (cell, info) in bases.OrderBy(e => e.Key))
@@ -647,7 +651,7 @@ public static class DualContour
             var node = new Octree.Node(k, bi, bj, bk);
             for (int l = k + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
         }
-        var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources);
+        var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell);
         octree.Build(tolerance);
         Mark("octree");
         void ContourAll()
@@ -726,6 +730,9 @@ public static class DualContour
                     foreach (int v in new[] { tris[3 * ta + c], tris[3 * tb + c] })
                         if (coarseCell.TryGetValue(v, out int cell) && octree.AtBottom(v)) stuck.Add(cell);
 
+        // Finest cells in the output that ended at their in-cell point: features thinner than the finest cell.
+        int unresolved = k == 0 ? 0 : tris.Distinct().Count(v => atInCell.Contains(v) && v < cellSide.Count && cellSide[v] == g.H);
+
         // Merging leaves the vertices of merged cells unused.
         var remap = new int[vertices.Count];
         Array.Fill(remap, -1);
@@ -781,7 +788,8 @@ public static class DualContour
     /// Octree over the grid's cells. A node at level L covers 2^L cells per side; level 0 nodes are the
     /// grid cells themselves. Only merged cells are stored: everything else is derived from the grid.
     sealed class Octree(Grid g, Dictionary<long, (int Base, int Packed, int Count)> cells, Dictionary<long, int> coarse, HashSet<long> noMerge,
-        List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<V3> cellMin, List<double> cellSide, List<int> tris, List<long> sources)
+        List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<V3> cellMin, List<double> cellSide, List<int> tris, List<long> sources,
+        HashSet<int> atInCell)
     {
         public readonly record struct Node(int L, int I, int J, int K)
         {
@@ -1012,7 +1020,7 @@ public static class DualContour
                 if (v >= cellMin.Count) continue;
                 if (owner.TryGetValue(v, out long key)) merged.Remove(key);
                 else if (fallback.Remove(v, out var stable)) Move(v, stable);
-                else if (!AtBottom(v)) Move(v, InCellOf(v));
+                else if (!AtBottom(v)) { Move(v, InCellOf(v)); atInCell.Add(v); }
                 else { bottom.Add(v); continue; }
                 changed++;
             }
