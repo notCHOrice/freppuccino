@@ -134,9 +134,10 @@ public sealed class FrepPicker : MouseCallback
             {
                 if (!index.TryGetValue(inst.Object, out var i)) continue;
                 var prim = s.Primitives[i];
-                // T × P as the leaf's placement (T = identity until root transforms).
-                Transform? place = inst.T.IsIdentity ? prim.Place : inst.T * (prim.Place ?? Transform.Identity);
-                var f = FrepFieldBuilder.Single(prim with { Place = place });
+                // The leaf under its instance's root transforms T, by the same rules as a gumball edit of the leaf
+                // (rigid parts fold into the values, the rest into SDF.Linear's basis).
+                if (!inst.T.IsIdentity && !FrepScene.TryTransform(prim, inst.T, out prim)) continue;
+                var f = FrepFieldBuilder.Single(prim);
                 result.Add((inst, f, f.Bounds()));
             }
             return result;

@@ -19,10 +19,11 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
 ///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
-/// Place: optional general affine placement (see <see cref="Placement"/>); world shape = Place × (Frame, P) shape. Null = identity.
+/// Basis, when set, is the canonical-to-world map (SDF.Linear.*). The frame axes stay the parameter frame;
+/// the parameters are not pre-scaled by that map.
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 {
-    public Transform? Place { get; init; }
+    public SdfBasis? Basis { get; init; }
 }
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
@@ -30,7 +31,7 @@ public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P);
 
 /// Program == null: nothing to draw. Primitives/Colors/Warps/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
-/// Colors parallel to Primitives: each owner's Rhino display color (object/layer/material/parent source resolved).
+/// Colors parallel to Primitives: each owner's SDF.Color (white if missing).
 public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimitive> Primitives, IReadOnlyList<System.Drawing.Color> Colors,
     IReadOnlyList<SdWarp> Warps, IReadOnlyList<double> Ks, int Dropped)
 {
@@ -90,11 +91,11 @@ public static class FrepScene
             // Under transformed roots the leaf sits at T × canonical: the drag is T⁻¹ X T on its values.
             if (Selection.FrepSelection.InstanceOf(doc, owners[i].Id, tree, scene.Ids) is { } inst && !inst.T.IsIdentity && inst.T.TryGetInverse(out var ti))
                 xf = ti * xf * inst.T;
-            // A transform the SDF type can't represent (e.g. shearing a box) previews at the original position.
+            // A transform that flattens the primitive previews at the original position.
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
             prims[i] = moved;
-            reshaped |= Structure(moved) != Structure(scene.Primitives[i]);
+            reshaped |= moved.Kind != scene.Primitives[i].Kind;
         }
         List<SdWarp>? warps = null;
         for (int i = 0; i < warpOwners.Count; i++)
@@ -123,41 +124,24 @@ public static class FrepScene
             var (program2, ks2, _, roots2) = FrepShaderGen.Compile(p2, scene.Ids, previewTree, scene.WarpIds.ToHashSet());
             return scene with { Primitives = p2, Warps = warps ?? scene.Warps, Tree = previewTree, Program = program2, Ks = ks2, Roots = roots2 };
         }
-
         if (prims == null && warps == null) return scene;
         var next = scene with { Primitives = prims ?? scene.Primitives, Warps = warps ?? scene.Warps };
         if (!reshaped || prims == null) return next;
 
         // A sphere stretched into an ellipsoid changes the shader's structure, so recompile (cached by source, so once
         // per gesture). If the extra rows don't fit, preview those prims unchanged; the commit still converts them.
-        if (prims.Sum(FrepShaderGen.Rows) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
+        if (prims.Sum(p => FrepShaderGen.Rows(p.Kind)) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
         {
             for (int i = 0; i < prims.Count; i++)
-                if (Structure(prims[i]) != Structure(scene.Primitives[i])) prims[i] = scene.Primitives[i];
+                if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
             return next;
         }
         var (program, ks, _, roots) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
         return next with { Program = program, Ks = ks, Roots = roots };
     }
 
-    /// What the shader source depends on per primitive (kind, placed or not).
-    static (SdKind, bool) Structure(SdPrimitive p) => (p.Kind, p.Place != null);
-
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
-    static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
-    {
-        // Placement rules as in SdfTransforms.TryApply: compose into P once set; else handler, falling back to P.
-        if (p.Place is { } place)
-        {
-            result = p with { Place = xf * place };
-            return Placement.TryRows(xf * place, out _);
-        }
-        if (TryTransformValues(p, xf, out result)) return true;
-        result = p with { Place = xf };
-        return Placement.TryRows(xf, out _);
-    }
-
-    static bool TryTransformValues(SdPrimitive p, Transform xf, out SdPrimitive result)
+    internal static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
     {
         result = p;
         var v = p.P;
@@ -176,26 +160,13 @@ public static class FrepScene
                 result = new SdPrimitive(SdKind.Ellipsoid, f, er);
                 return true;
             case SdKind.Box:
-                ok = FBoxCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
-                break;
             case SdKind.Torus:
-                ok = FTorusCommand.TryTransform(p.Frame, new Vector2d(v.X, v.Y), xf, out f, out var t, out _);
-                v = new Vector3d(t.X, t.Y, 0);
-                break;
             case SdKind.Cylinder:
-                ok = FCylinderCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ch, out var cr, out _);
-                v = new Vector3d(ch, cr, 0);
-                break;
             case SdKind.Cone:
-                ok = FConeCommand.TryTransform(p.Frame, v.X, v.Y, v.Z, xf, out f, out var kh, out var r1, out var r2, out _);
-                v = new Vector3d(kh, r1, r2);
-                break;
+            case SdKind.Pyramid:
+                return TryTransformAffine(p, xf, out result);
             case SdKind.Ellipsoid:
                 ok = FEllipsoidCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
-                break;
-            case SdKind.Pyramid:
-                ok = FPyramidCommand.TryTransform(p.Frame, v.X, v.Y, xf, out f, out var ph, out var ps, out _);
-                v = new Vector3d(ph, ps, 0);
                 break;
             default:
                 return false;
@@ -203,6 +174,48 @@ public static class FrepScene
         if (!ok) return false;
         result = p with { Frame = f, P = v };
         return true;
+    }
+
+    /// Rotate/scale along the parameter axes folds into P. Anything else is carried on <see cref="SdPrimitive.Basis"/>.
+    static bool TryTransformAffine(SdPrimitive p, Transform xf, out SdPrimitive result)
+    {
+        result = p;
+        var current = p.Basis ?? SdfBasis.FromPlane(p.Frame);
+        if (!SdfTransforms.TryAdvance(p.Frame, current, xf, out var origin, out var factored, out var next, out var scale, out var rigid, out _))
+            return false;
+        if (rigid && TryAbsorb(p.Kind, p.P, scale, out var np))
+        {
+            result = new SdPrimitive(p.Kind, factored, np);
+            return true;
+        }
+        var frozen = new Plane(origin, p.Frame.XAxis, p.Frame.YAxis);
+        result = new SdPrimitive(p.Kind, frozen, p.P) { Basis = next.Matches(frozen) ? null : next };
+        return true;
+    }
+
+    static bool TryAbsorb(SdKind kind, Vector3d p, Vector3d scale, out Vector3d np)
+    {
+        np = p;
+        switch (kind)
+        {
+            case SdKind.Box when FBoxCommand.TryAbsorbScale(p, scale, out var b):
+                np = b;
+                return true;
+            case SdKind.Torus when FTorusCommand.TryAbsorbScale(new Vector2d(p.X, p.Y), scale, out var t):
+                np = new Vector3d(t.X, t.Y, 0);
+                return true;
+            case SdKind.Cylinder when FCylinderCommand.TryAbsorbScale(p.X, p.Y, scale, out var h, out var r):
+                np = new Vector3d(h, r, 0);
+                return true;
+            case SdKind.Cone when FConeCommand.TryAbsorbScale(p.X, p.Y, p.Z, scale, out var ch, out var r1, out var r2):
+                np = new Vector3d(ch, r1, r2);
+                return true;
+            case SdKind.Pyramid when FPyramidCommand.TryAbsorbScale(p.X, p.Y, scale, out var ph, out var ps):
+                np = new Vector3d(ph, ps, 0);
+                return true;
+            default:
+                return false;
+        }
     }
 
     static void Rebuild(RhinoDoc doc)
@@ -221,13 +234,14 @@ public static class FrepScene
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
             if (!TryRead(obj.Attributes, out var prim)) continue;
-            int r = FrepShaderGen.Rows(prim);
+            int r = FrepShaderGen.Rows(prim.Kind);
             // Each prim also takes a color slot (4 per row).
             if (rows + r + FrepShaderGen.ColorRows(prims.Count + 1) > budget) { dropped++; continue; }
             rows += r;
             newIds.Add(obj.Id);
             prims.Add(prim);
-            colors.Add(obj.Attributes.DrawColor(doc));
+            // SDF.Color metadata (set from the panel); objects without it draw white.
+            colors.Add(SdfUserText.ReadColorOrDefault(obj.Attributes));
             newOwners.Add(obj);
         }
 
@@ -264,9 +278,19 @@ public static class FrepScene
     /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
     public static BoundingBox BoundsOf(RhinoDoc doc, FrepOperand o) => new Bounds(doc, FrepTrees.Get(doc), []).Of(o);
 
-    /// Bounding box of an operand's result in its parent's space: leaves from their Rhino geometry mapped back by their
-    /// primary instance's root transforms T (the real object sits at T × canonical), live warps grown like the shader
-    /// bound, node transforms applied.
+    /// <see cref="Bounds"/> with live warps applied (Repeat copies, bent / twisted extents); for framing views (AI screenshots).
+    public static BoundingBox WarpedBoundsOf(RhinoDoc doc, FrepOperand o)
+    {
+        var tree = FrepTrees.Get(doc);
+        var refs = new Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)>();
+        foreach (var n in tree.Nodes)
+            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region)) refs[n.Id] = (obj!, axis, region);
+        return new Bounds(doc, tree, refs).Of(o);
+    }
+
+    /// Bounding box of an operand's result in its parent's space (world for a root): leaves from their Rhino geometry
+    /// mapped back by their primary instance's root transforms T (the real object sits at T × canonical), live warps
+    /// grown like the shader bound, node transforms applied.
     sealed class Bounds(RhinoDoc doc, FrepTree tree, Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)> refs)
     {
         readonly Dictionary<FrepOperand, BoundingBox> memo = [];
@@ -309,51 +333,55 @@ public static class FrepScene
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
-    static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
+    public static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
     {
-        if (!TryReadValues(a, out prim)) return false;
-        switch (Placement.ReadLeaf(a, out var place))
+        // An unreadable or degenerate SDF.Linear makes the primitive degenerate (like a zero radius), never unsheared.
+        if (SdfUserText.ReadLinear(a, out _, out _, out _) == SdfUserText.LinearState.Invalid)
         {
-            case Placement.Stored.Valid:
-                prim = prim with { Place = place };
-                return true;
-            case Placement.Stored.Invalid:
-                return false; // degenerate, like a zero radius; never silently unplaced
-            default:
-                return true;
+            prim = default;
+            return false;
         }
+        return TryReadCore(a, out prim);
     }
 
-    static bool TryReadValues(ObjectAttributes a, out SdPrimitive prim)
+    static bool TryReadCore(ObjectAttributes a, out SdPrimitive prim)
     {
         prim = default;
         switch (SdfUserText.ReadType(a))
         {
             case FSphereCommand.SdfType when FSphereCommand.TryRead(a, out var f, out var s) && s > 0:
-                prim = new(SdKind.Sphere, f, new Vector3d(s, 0, 0));
+                prim = Mapped(a, SdKind.Sphere, f, new Vector3d(s, 0, 0));
                 return true;
             case FBoxCommand.SdfType when FBoxCommand.TryRead(a, out var f, out var b) && b.X > 0 && b.Y > 0 && b.Z > 0:
-                prim = new(SdKind.Box, f, b);
+                prim = Mapped(a, SdKind.Box, f, b);
                 return true;
             case FTorusCommand.SdfType when FTorusCommand.TryRead(a, out var f, out var t) && t.X > 0 && t.Y > 0:
-                prim = new(SdKind.Torus, f, new Vector3d(t.X, t.Y, 0));
+                prim = Mapped(a, SdKind.Torus, f, new Vector3d(t.X, t.Y, 0));
                 return true;
             case FCylinderCommand.SdfType when FCylinderCommand.TryRead(a, out var f, out var h, out var r) && h > 0 && r > 0:
-                prim = new(SdKind.Cylinder, f, new Vector3d(h, r, 0));
+                prim = Mapped(a, SdKind.Cylinder, f, new Vector3d(h, r, 0));
                 return true;
             case FConeCommand.SdfType when FConeCommand.TryRead(a, out var f, out var h, out var r1, out var r2) &&
                                            h > 0 && r1 >= 0 && r2 >= 0 && r1 + r2 > 0:
-                prim = new(SdKind.Cone, f, new Vector3d(h, r1, r2));
+                prim = Mapped(a, SdKind.Cone, f, new Vector3d(h, r1, r2));
                 return true;
             case FEllipsoidCommand.SdfType when FEllipsoidCommand.TryRead(a, out var f, out var r) && r.X > 0 && r.Y > 0 && r.Z > 0:
-                prim = new(SdKind.Ellipsoid, f, r);
+                prim = Mapped(a, SdKind.Ellipsoid, f, r);
                 return true;
             case FPyramidCommand.SdfType when FPyramidCommand.TryRead(a, out var f, out var h, out var s) && h > 0 && s > 0:
-                prim = new(SdKind.Pyramid, f, new Vector3d(h, s, 0));
+                prim = Mapped(a, SdKind.Pyramid, f, new Vector3d(h, s, 0));
                 return true;
             default:
                 return false;
         }
+    }
+
+    static SdPrimitive Mapped(ObjectAttributes attributes, SdKind kind, Plane frame, Vector3d p)
+    {
+        var prim = new SdPrimitive(kind, frame, p);
+        if (SdfUserText.ReadLinear(attributes, out var x, out var y, out var z) == SdfUserText.LinearState.Valid)
+            prim = prim with { Basis = new SdfBasis(x, y, z) };
+        return prim;
     }
 }
 

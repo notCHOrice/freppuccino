@@ -5,35 +5,29 @@ using Rhino.Geometry;
 
 namespace Freppuccino.Scene;
 
-/// General affine placements, stored as user text (12 numbers, the top three rows of the 4x4, row-major).
+/// General affine transforms for root nodes and warp references, stored as 12 numbers (top three rows of the 4x4,
+/// row-major). Leaf primitives carry theirs as SDF.Linear.* (main's SdfTransforms.CommitAffine), not here.
 ///
-/// Leaf placement P (SDF.Place): the leaf's field is sd(P⁻¹ p) · s(P), s = smallest singular value of P's linear part,
-/// so it still changes by at most 1 per unit distance. Absent = identity. The per-type transform handlers keep simple
-/// edits in the readable SDF.* values; whatever they can't represent (shear, off-axis non-uniform scale) goes into P.
+/// Node transform M (FrepNode.Matrix): field = node(M⁻¹ p) · s(M), s = smallest singular value, so it still changes by
+/// at most 1 per unit distance. Shader / FrepField rows: <see cref="TryRows"/>.
 ///
 /// Applied root transforms A (FREP.Applied) on a warp reference object (axis line / repeat box): the accumulated root
 /// transforms Rhino has applied to that object's real geometry. Its canonical geometry is A⁻¹ × geometry. Absent = identity.
 public static class Placement
 {
-    public const string LeafKey = "SDF.Place";
     public const string AppliedKey = "FREP.Applied";
 
-    /// Rows a placed primitive adds to the shader data (and FrepField takes): 3 rows of P⁻¹ (xyz linear row, w translation),
-    /// then (s(P), 0, 0, 0).
+    /// Rows a transformed node adds to the shader data (and FrepField takes): 3 rows of M⁻¹ (xyz linear row,
+    /// w translation), then (s(M), 0, 0, 0).
     public const int ShaderRows = 4;
 
     public enum Stored { Absent, Valid, Invalid }
 
-    /// Absent = identity. Invalid = present but unparsable or not <see cref="IsUsable"/>: callers treat the primitive as
-    /// degenerate rather than unplaced.
-    public static Stored ReadLeaf(ObjectAttributes a, out Transform place) => Read(a.GetUserString(LeafKey), out place);
+    /// Absent = identity. Invalid = present but unparsable or not <see cref="IsUsable"/>: the reference counts as missing.
     public static Stored ReadApplied(ObjectAttributes a, out Transform applied) => Read(a.GetUserString(AppliedKey), out applied);
-
-    public static bool TryReadLeaf(ObjectAttributes a, out Transform place) => ReadLeaf(a, out place) == Stored.Valid;
     public static bool TryReadApplied(ObjectAttributes a, out Transform applied) => ReadApplied(a, out applied) == Stored.Valid;
 
     /// Identity (or null) removes the key. Callers write only <see cref="IsUsable"/> transforms.
-    public static void WriteLeaf(ObjectAttributes a, Transform? place) => Write(a, LeafKey, place);
     public static void WriteApplied(ObjectAttributes a, Transform? applied) => Write(a, AppliedKey, applied);
 
     /// Largest condition number (largest / smallest stretch) accepted. Scale-relative, so a well-shaped placement of any

@@ -5,13 +5,14 @@ import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { BrandIcon, NodeIcon, type BrandIconName } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
+import { ColorField } from '@/components/color-field'
 import { send, useHost } from '@/bridge/host'
 import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
-export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string> }) {
-  const { labels } = props
+export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string>; roots: Set<string> }) {
+  const { labels, roots } = props
   const selected = props.selected.filter((n) => !n.missing)
   if (selected.length === 0) return <CreateSection />
   const one = selected[0]
@@ -21,14 +22,20 @@ export function Inspector(props: { selected: SceneNode[]; labels: Map<string, st
         {one.kind === 'primitive' ? (
           <PrimitiveSection key={one.id} node={one} labels={labels} />
         ) : isDeform(one.op) ? (
-          <DeformSection key={one.id} node={one} labels={labels} />
+          <DeformSection key={one.id} node={one} labels={labels} roots={roots} />
         ) : (
-          <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} />
+          <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} roots={roots} />
         )}
         <DeformButtons />
       </>
     )
-  return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
+  const canCombine = selected.length === 2 && selected.every((n) => roots.has(n.id))
+  if (canCombine) return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} roots={roots} />
+  return (
+    <Section title="Combine">
+      <p className="type-small text-muted-foreground">Select exactly two top-level nodes to combine them.</p>
+    </Section>
+  )
 }
 
 function Section(props: { title: string; badge?: string; children: React.ReactNode; icon?: React.ReactNode }) {
@@ -55,13 +62,10 @@ function CreateSection() {
             <CommandTile key={p.command} label={p.label} icon={p.icon} command={p.command} />
           ))}
         </div>
-        <p className="type-small text-muted-foreground">
-          Runs the Rhino command, e.g. <span className="type-command text-caramel-ink">FTorus</span>.
-        </p>
       </Section>
       <div className="mx-4 h-px bg-border" />
       <Section title="View">
-        <p className="type-small text-muted-foreground">Select two or more objects or nodes to combine them; blend is per operation.</p>
+        <p className="type-small text-muted-foreground">Select exactly two top-level nodes to combine them; blend is per operation.</p>
         <Button variant="secondary" onClick={() => send({ type: 'runCommand', command: 'Freppuccino' })}>
           <BrandIcon name="preview" /> F-rep display mode
         </Button>
@@ -75,22 +79,101 @@ function CreateSection() {
 function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> }) {
   const { node } = props
   const units = useHost((s) => s.settings.units)
+  const notice = useHost((s) => s.notice)
   const params = displayParams(node)
   // Slider range is fixed per object (the section is keyed by id) so it doesn't move while dragging.
   const [max] = useState(() => Math.max(1, ...params.map((p) => p.value * 3)))
+  // Host echoes are ignored until they catch up, so a stale scene snapshot can't yank the slider.
+  const [drag, setDrag] = useState<{ key: string; value: number } | null>(null)
+  const [pending, setPending] = useState<{ key: string; value: number } | null>(null)
+  const live = useRef({ timer: 0, key: '', value: 0, previewed: false })
+  const hostValue = params.find((p) => p.key === pending?.key)?.value
+  const caughtUp = pending == null || (hostValue !== undefined && Math.abs(hostValue - pending.value) < 1e-6)
+  if (!drag && pending && caughtUp) setPending(null)
+  const [seenNotice, setSeenNotice] = useState(notice?.id)
+  if (notice && notice.id !== seenNotice) {
+    setSeenNotice(notice.id)
+    // A rejected value (zero size, and so on) never lands; show the host's value again.
+    if (notice.level === 'warning' && !drag) setPending(null)
+  }
+
+  const sendParam = (key: string, value: number, preview: boolean) => {
+    setPending({ key, value })
+    send({ type: 'setParam', id: node.id, name: key, value, preview })
+  }
+  const preview = (key: string, value: number) => {
+    const l = live.current
+    l.key = key
+    l.value = value
+    setDrag({ key, value })
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      sendParam(l.key, l.value, true)
+    }, l.previewed ? PREVIEW_MS : 0)
+  }
+  const commit = (key: string, value: number) => {
+    const l = live.current
+    clearTimeout(l.timer)
+    l.timer = 0
+    setDrag(null)
+    const current = params.find((p) => p.key === key)?.value
+    if (l.previewed || current === undefined || Math.abs(current - value) >= 1e-6) sendParam(key, value, false)
+    l.previewed = false
+  }
+  // Unmounted mid-drag (selection changed): close the gesture.
+  useEffect(() => {
+    const l = live.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed || l.timer) send({ type: 'setParam', id: node.id, name: l.key, value: l.value })
+    }
+  }, [node.id])
+
+  const shown = (key: string, value: number) =>
+    drag?.key === key ? drag.value : pending?.key === key ? pending.value : value
+
+  // SDF.Color: throttled previews while the picker is open; the final value is one undo step.
+  const liveColor = useRef({ timer: 0, color: '', previewed: false })
+  const previewColor = (color: string) => {
+    const l = liveColor.current
+    l.color = color
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      send({ type: 'setColor', id: node.id, color: l.color, preview: true })
+    }, PREVIEW_MS)
+  }
+  const commitColor = (color: string) => {
+    const l = liveColor.current
+    clearTimeout(l.timer)
+    Object.assign(l, { timer: 0, previewed: false })
+    send({ type: 'setColor', id: node.id, color })
+  }
+  useEffect(() => {
+    const l = liveColor.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed) send({ type: 'setColor', id: node.id, color: l.color })
+    }
+  }, [node.id])
 
   return (
     <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
-      {params.length === 0 && <p className="text-muted-foreground">No parameters.</p>}
+      <ColorField label="Color" value={node.color ?? '#FCFCFC'} onChange={previewColor} onCommit={commitColor} />
+      {params.length === 0 && !node.custom && <p className="text-muted-foreground">No parameters.</p>}
       {params.map((p) => (
         <ParamSlider
           key={p.key}
           label={p.label}
           units={units}
-          value={p.value}
+          value={shown(p.key, p.value)}
           min={0}
           max={max}
-          onCommit={(v) => send({ type: 'setParam', id: node.id, name: p.key, value: v })}
+          onChange={(v) => preview(p.key, v)}
+          onCommit={(v) => commit(p.key, v)}
         />
       ))}
     </Section>
@@ -99,13 +182,13 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
 
 // ── ≥ 2 objects / nodes: new operation; or one operation node: edit it ──
 
-function CombineSection(props: { operands: SceneNode[]; labels: Map<string, string>; existing?: SceneNode }) {
-  const { labels, existing } = props
+function CombineSection(props: { operands: SceneNode[]; labels: Map<string, string>; roots: Set<string>; existing?: SceneNode }) {
+  const { labels, existing, roots } = props
   const units = useHost((s) => s.settings.units)
   const [swapped, setSwapped] = useState(false)
   const existingOp = isDeform(existing?.op) ? undefined : existing?.op
   const [op, setOp] = useState<OperationKind>(existingOp ?? 'union')
-  const [k, setK] = useState(existing?.k ?? 0)
+  const [k, setK] = useState(existing?.k ?? 5)
 
   // Host values win when they change (undo, another edit); unrelated scene updates keep local edits.
   // Not mid-drag, and not until the host has caught up with our last edit (stale echoes would yank the slider back).
@@ -207,7 +290,7 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         label="Blend radius"
         units={k === 0 ? 'sharp' : units}
         value={k}
-        max={5}
+        max={20}
         onChange={(v) => {
           setK(v)
           if (!existing) return
@@ -218,9 +301,11 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
       />
 
       {existing ? (
-        <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
-          <Trash2 /> Delete
-        </Button>
+        roots.has(existing.id) && (
+          <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
+            <Trash2 /> Delete
+          </Button>
+        )
       ) : (
         <Button onClick={() => send({ type: 'applyOperation', operands: operands.map((o) => o.id), op, k })}>
           Apply {OPERATIONS[op].label.toLowerCase()}
@@ -232,8 +317,8 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
 
 // ── One deform node: its params ──
 
-function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) {
-  const { node, labels } = props
+function DeformSection(props: { node: SceneNode; labels: Map<string, string>; roots: Set<string> }) {
+  const { node, labels, roots } = props
   const units = useHost((s) => s.settings.units)
   const params = displayParams(node)
   const isAngle = node.op !== 'repeat'
@@ -285,9 +370,11 @@ function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) 
           onCommit={(v) => commit(p.key, v)}
         />
       ))}
-      <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [node.id] })}>
-        <Trash2 /> Delete
-      </Button>
+      {roots.has(node.id) && (
+        <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [node.id] })}>
+          <Trash2 /> Delete
+        </Button>
+      )}
     </Section>
   )
 }

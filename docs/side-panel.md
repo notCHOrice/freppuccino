@@ -15,6 +15,7 @@ src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radi
   src/bridge/        host.ts (transport + store + useHost), mock-host.ts (fake Rhino for the browser)
   src/components/    scene-tree.tsx (browser), inspector.tsx (create / primitive / combine), param-slider.tsx
   src/lib/scene.ts   display names, icons, labels per SDF type / operation
+  src/ai/            AI assistant (AI tab): agent loop, tools, skills; see docs/ai.md
 ```
 
 ## Why Eto's WebView and not a raw WebView2 control
@@ -60,6 +61,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `scene {scene}` | object added/deleted/replaced/attributes changed, CSG tree changed (coalesced on Idle) |
 | `selection {ids}` | Rhino selection or panel node selection changed |
 | `notice {level, text}` | feedback, including "not implemented yet" from stubs |
+| `aiToolResult {callId, ok, result?, error?}` | reply to `aiTool` ([ai.md](ai.md)) |
 
 | Page → host | Status |
 |---|---|
@@ -71,7 +73,10 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
+| `setColor {id, color, preview?}` | ✅ write `SDF.Color` (`"#RRGGBB"`) on a primitive; same preview/commit gesture as `setOperation` (one "F-rep color" undo step per picker drag) |
 | `setParam {id, name, value}` | **stub**: edit `SDF.<name>` on a primitive |
+| `aiTool {callId, tool, args}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md) |
+| `aiSaveRun {title, transcript, images}` | ✅ writes an AI run log (`Ai/AiRunLog.cs`) |
 
 Live edits: the inspector has no Update button. An op click sends one `setOperation`; a Blend drag sends `preview` ticks (≤ ~30 Hz, trailing) then a final one on release. The host (`FrepTrees.Preview`/`Commit`) remembers the tree from before the gesture and records one undo step back to it. A gesture whose final message never arrives is committed by any other page message, any Rhino command (incl. Undo), a page reload / doc switch, or panel close. The page ignores host snapshots for the node while dragging and until the host echoes its last sent value, so stale snapshots can't yank the slider.
 
@@ -83,7 +88,7 @@ Live edits: the inspector has no Update button. An op click sends one `setOperat
 
 ```
 SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
-            sdfType?, params?,          // primitive
+            sdfType?, params?, color?,  // primitive; color = SDF.Color "#RRGGBB" (white if missing)
             op?, k?, children?,         // operation: children are operands, in order
             ref?, refMissing? }         // twist|bend|repeat: params = {angle} / {angle, direction} / {x, y, z}; ref = line/box id
 ```
@@ -92,4 +97,4 @@ SceneNode { id, kind: primitive|operation, name?, visible, locked, missing?,
 
 Operation nodes aren't Rhino objects, so their selection is kept by `UiController` (per document). FUnion/FIntersect (and FTwist/FBend/FRepeat, single node) take it as preselection (`UiController.TakeSelectedNodes`); Rhino deselect-all clears it.
 
-Inspector: one primitive → its parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).
+Inspector: one primitive → its color (`SDF.Color`: current-color swatch / picker + hex field; new primitives start white `#FCFCFC`) and parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).

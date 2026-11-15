@@ -58,8 +58,8 @@ public class FConeCommand : Command
     }
 
     /// <summary>
-    /// Moves the frame, scales h along the axis and r1/r2 across it. Works for move, rotate, mirror, uniform scale
-    /// and scale along the axis. Scaling the cross-section non-uniformly makes it elliptical, so it is rejected.
+    /// Moves the frame and scales h, r1, r2 when the cross-section stays round.
+    /// An elliptical or sheared cone is stored as SDF.Linear.*; the parameters stay in the original frame.
     /// </summary>
     public static bool TransformSdf(ObjectAttributes attributes, Transform xform, out string? reason)
     {
@@ -68,15 +68,24 @@ public class FConeCommand : Command
             reason = "missing or unreadable SDF.Frame.* / SDF.h / SDF.r1 / SDF.r2";
             return false;
         }
+        return SdfTransforms.CommitAffine(attributes, frame, xform, scale =>
+        {
+            if (!TryAbsorbScale(h, r1, r2, scale, out var nh, out var nr1, out var nr2)) return false;
+            SdfUserText.WriteFloat(attributes, "h", nh);
+            SdfUserText.WriteFloat(attributes, "r1", nr1);
+            SdfUserText.WriteFloat(attributes, "r2", nr2);
+            return true;
+        }, out reason);
+    }
 
-        if (!TryTransform(frame, h, r1, r2, xform, out frame, out h, out r1, out r2, out reason))
-            return false;
-
-        SdfUserText.WriteFrame(attributes, frame);
-        SdfUserText.WriteFloat(attributes, "h", h);
-        SdfUserText.WriteFloat(attributes, "r1", r1);
-        SdfUserText.WriteFloat(attributes, "r2", r2);
-        return true;
+    /// <summary>Axis scale goes into h, the shared radial scale into both radii. Unequal X/Z scales stay in the linear map.</summary>
+    public static bool TryAbsorbScale(double h, double r1, double r2, Vector3d scale, out double newH, out double newR1, out double newR2)
+    {
+        double radial = (scale.X + scale.Z) * 0.5;
+        newH = h * scale.Y;
+        newR1 = r1 * radial;
+        newR2 = r2 * radial;
+        return SdfTransforms.NearlyEqual(scale.X, scale.Z) && newH > 0 && newR1 >= 0 && newR2 >= 0 && newR1 + newR2 > 0;
     }
 
     /// <summary>Reads the frame (origin = mid-axis, Y = base→top), half height h and radii r1 (base), r2 (top).</summary>

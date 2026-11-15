@@ -45,8 +45,8 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 /// roots declared, all primitives are smooth-unioned in order with <see cref="Blend"/>.
 public sealed class FrepField
 {
-    // Place: leaf placement rows (P⁻¹ as three rows, then (s(P), 0, 0, 0)), as in the shader; Fwd: P itself (for bounds).
-    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, V4[]? Place = null, V4[]? Fwd = null);
+    // X, Y, Z are the canonical-to-world columns (bounds). Ix, Iy, Iz are the rows of the inverse (the dots in PrimValue).
+    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, double Lip, V3 Ix, V3 Iy, V3 Iz);
     // Rows: warp params (null for CSG).
     // Place/Fwd: optional transform M of the node's result, rows as for a placed primitive (M⁻¹ rows + (s(M),0,0,0)).
     readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null, V4[]? Place = null, V4[]? Fwd = null);
@@ -67,16 +67,7 @@ public sealed class FrepField
 
     public int Count => prims.Count;
 
-    /// <paramref name="x"/> and <paramref name="y"/> are unit and perpendicular; Z = X × Y.
-    /// <paramref name="place"/>: optional general affine placement P of the whole primitive, given as the shader's rows
-    /// (Scene.Placement.TryRows: P⁻¹ as three rows, then (s(P), 0, 0, 0)). The field is then sd(P⁻¹ p) · s(P).
-    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V4[]? place = null)
-    {
-        if (place != null && place.Length != 4) throw new ArgumentException("placement needs 4 rows", nameof(place));
-        prims.Add(new Prim(kind, origin, x, y, V3.Cross(x, y), p, place, place == null ? null : Invert(place)));
-        return prims.Count - 1;
-    }
-
+    /// Affine map given by three rows (xyz linear row, w translation): node transforms M (and their inverses).
     static V3 Apply(V4[] rows, V3 p) =>
         new(V3.Dot(rows[0].Xyz, p) + rows[0].W, V3.Dot(rows[1].Xyz, p) + rows[1].W, V3.Dot(rows[2].Xyz, p) + rows[2].W);
 
@@ -95,8 +86,35 @@ public sealed class FrepField
         return [new(r0.X, r0.Y, r0.Z, -V3.Dot(r0, t)), new(r1.X, r1.Y, r1.Z, -V3.Dot(r1, t)), new(r2.X, r2.Y, r2.Z, -V3.Dot(r2, t))];
     }
 
-    static double PlacedValue(in Prim s, V3 world) =>
-        s.Place is { } w ? PrimValue(s, Apply(w, world)) * w[3].X : PrimValue(s, world);
+    /// <paramref name="x"/>, <paramref name="y"/>, <paramref name="z"/> are the columns of the canonical-to-world map
+    /// (the frame axes when the primitive is rigid). <paramref name="lip"/> is σ_min of that map: the local distance is
+    /// multiplied by it so the field stays Lipschitz 1 in world space.
+    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V3? z = null, double lip = 1)
+    {
+        var zz = z ?? V3.Cross(x, y);
+        if (!InverseRows(x, y, zz, out var ix, out var iy, out var iz))
+        {
+            ix = x; iy = y; iz = zz;
+        }
+        prims.Add(new Prim(kind, origin, x, y, zz, p, lip, ix, iy, iz));
+        return prims.Count - 1;
+    }
+
+    static bool InverseRows(V3 x, V3 y, V3 z, out V3 r0, out V3 r1, out V3 r2)
+    {
+        double det = V3.Dot(x, V3.Cross(y, z));
+        double volume = x.Length * y.Length * z.Length;
+        if (!(Math.Abs(det) > 1e-12 * Math.Max(volume, 1e-30)))
+        {
+            r0 = r1 = r2 = default;
+            return false;
+        }
+        double inv = 1.0 / det;
+        r0 = V3.Cross(y, z) * inv;
+        r1 = V3.Cross(z, x) * inv;
+        r2 = V3.Cross(x, y) * inv;
+        return true;
+    }
 
     public int AddSphere(V3 center, double radius) =>
         AddPrimitive(FieldKind.Sphere, center, new V3(1, 0, 0), new V3(0, 1, 0), new V3(radius, 0, 0));
@@ -163,7 +181,7 @@ public sealed class FrepField
     {
         int np = prims.Count, nn = nodes.Count;
         Span<double> v = np + nn <= 256 ? stackalloc double[np + nn] : new double[np + nn];
-        for (int i = 0; i < np; i++) v[i] = PlacedValue(prims[i], p);
+        for (int i = 0; i < np; i++) v[i] = PrimValue(prims[i], p);
         for (int i = 0; i < nn; i++)
         {
             var n = nodes[i];
@@ -199,7 +217,7 @@ public sealed class FrepField
         int slot = ctx + Slot(r);
         double d = memo[slot];
         if (!double.IsNaN(d)) return d;
-        if (!r.IsNode) d = PlacedValue(prims[r.Index], p);
+        if (!r.IsNode) d = PrimValue(prims[r.Index], p);
         else
         {
             var n = nodes[r.Index];
@@ -324,64 +342,74 @@ public sealed class FrepField
     {
         var d = world - s.O;
         if (s.Kind == FieldKind.Sphere) return d.Length - s.P.X;
-        double x = V3.Dot(d, s.X), y = V3.Dot(d, s.Y), z = V3.Dot(d, s.Z);
-        switch (s.Kind)
+        double x = V3.Dot(d, s.Ix), y = V3.Dot(d, s.Iy), z = V3.Dot(d, s.Iz);
+        double value = s.Kind switch
         {
-            case FieldKind.Box:
-            {
-                double qx = Math.Abs(x) - s.P.X, qy = Math.Abs(y) - s.P.Y, qz = Math.Abs(z) - s.P.Z;
-                return Len(Math.Max(qx, 0), Math.Max(qy, 0), Math.Max(qz, 0)) + Math.Min(Math.Max(qx, Math.Max(qy, qz)), 0);
-            }
-            case FieldKind.Torus:
-                return Len(Len(x, z) - s.P.X, y) - s.P.Y;
-            case FieldKind.Cylinder: // P.X = half height, P.Y = radius
-            {
-                double dx = Len(x, z) - s.P.Y, dy = Math.Abs(y) - s.P.X;
-                return Math.Min(Math.Max(dx, dy), 0) + Len(Math.Max(dx, 0), Math.Max(dy, 0));
-            }
-            case FieldKind.Cone: // P.X = half height, P.Y = radius at -h, P.Z = radius at +h
-            {
-                double h = s.P.X, r1 = s.P.Y, r2 = s.P.Z;
-                double qx = Len(x, z), qy = y;
-                double k2x = r2 - r1, k2y = 2 * h;
-                double cax = qx - Math.Min(qx, qy < 0 ? r1 : r2), cay = Math.Abs(qy) - h;
-                double t = Math.Clamp(((r2 - qx) * k2x + (h - qy) * k2y) / (k2x * k2x + k2y * k2y), 0, 1);
-                double cbx = qx - r2 + k2x * t, cby = qy - h + k2y * t;
-                double sign = cbx < 0 && cay < 0 ? -1 : 1;
-                return sign * Math.Sqrt(Math.Min(cax * cax + cay * cay, cbx * cbx + cby * cby));
-            }
-            case FieldKind.Ellipsoid:
-            {
-                // A unit sphere scaled by r, times the smallest semi-axis: exact surface, and it changes by
-                // at most 1 per unit distance. IQ's k0 (k0 - 1) / k1 is a better distance estimate, but
-                // its value at the centre depends on the direction of approach; under a smooth CSG node
-                // that becomes a sign jump.
-                double k0 = Len(x / s.P.X, y / s.P.Y, z / s.P.Z);
-                return (k0 - 1) * Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
-            }
-            case FieldKind.Pyramid: // P.X = height, P.Y = base side; base centred on the origin, apex at +Y
-            {
-                // IQ's sdPyramid for a unit base, scaled by the side, with the shader's two corrections
-                // (see sdPyramid in FrepShaderGen): IQ's measures distance to the slanted faces only, so
-                // below the base use the distance to the base square, and inside let the base count.
-                double side = s.P.Y, h = s.P.X / side;
-                double px = Math.Abs(x / side), py = y / side, pz = Math.Abs(z / side);
-                double m2 = h * h + 0.25;
-                if (pz > px) (px, pz) = (pz, px);
-                px -= 0.5; pz -= 0.5;
-                if (py < 0) return Len(Math.Max(px, 0), py, Math.Max(pz, 0)) * side;
-                double qx = pz, qy = h * py - 0.5 * px, qz = h * px + 0.5 * py;
-                double a0 = Math.Max(-qx, 0);
-                double t = Math.Clamp((qy - 0.5 * pz) / (m2 + 0.25), 0, 1);
-                double a = m2 * (qx + a0) * (qx + a0) + qy * qy;
-                double b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
-                double d2 = Math.Min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.Min(a, b);
-                double signed = Math.Sqrt((d2 + qz * qz) / m2) * Math.Sign(Math.Max(qz, -py));
-                return Math.Max(signed, -py) * side;
-            }
-            default:
-                throw new ArgumentOutOfRangeException(nameof(s));
-        }
+            FieldKind.Box => Box(x, y, z, s.P),
+            FieldKind.Torus => Len(Len(x, z) - s.P.X, y) - s.P.Y,
+            FieldKind.Cylinder => Cylinder(x, y, z, s.P),
+            FieldKind.Cone => Cone(x, y, z, s.P),
+            FieldKind.Ellipsoid => Ellipsoid(x, y, z, s.P),
+            FieldKind.Pyramid => Pyramid(x, y, z, s.P),
+            _ => throw new ArgumentOutOfRangeException(nameof(s)),
+        };
+        // σ_min(A). Ellipsoid already folds its own scale in; its lip is 1.
+        return value * s.Lip;
+    }
+
+    static double Box(double x, double y, double z, V3 b)
+    {
+        double qx = Math.Abs(x) - b.X, qy = Math.Abs(y) - b.Y, qz = Math.Abs(z) - b.Z;
+        return Len(Math.Max(qx, 0), Math.Max(qy, 0), Math.Max(qz, 0)) + Math.Min(Math.Max(qx, Math.Max(qy, qz)), 0);
+    }
+
+    static double Cylinder(double x, double y, double z, V3 p) // P.X = half height, P.Y = radius
+    {
+        double dx = Len(x, z) - p.Y, dy = Math.Abs(y) - p.X;
+        return Math.Min(Math.Max(dx, dy), 0) + Len(Math.Max(dx, 0), Math.Max(dy, 0));
+    }
+
+    static double Cone(double x, double y, double z, V3 p) // P.X = half height, P.Y = radius at -h, P.Z = radius at +h
+    {
+        double h = p.X, r1 = p.Y, r2 = p.Z;
+        double qx = Len(x, z), qy = y;
+        double k2x = r2 - r1, k2y = 2 * h;
+        double cax = qx - Math.Min(qx, qy < 0 ? r1 : r2), cay = Math.Abs(qy) - h;
+        double t = Math.Clamp(((r2 - qx) * k2x + (h - qy) * k2y) / (k2x * k2x + k2y * k2y), 0, 1);
+        double cbx = qx - r2 + k2x * t, cby = qy - h + k2y * t;
+        double sign = cbx < 0 && cay < 0 ? -1 : 1;
+        return sign * Math.Sqrt(Math.Min(cax * cax + cay * cay, cbx * cbx + cby * cby));
+    }
+
+    // A unit sphere scaled by r, times the smallest semi-axis: exact surface, and it changes by at most 1 per unit
+    // distance. IQ's k0 (k0 - 1) / k1 is a better distance estimate, but its value at the centre depends on the
+    // direction of approach; under a smooth CSG node that becomes a sign jump.
+    static double Ellipsoid(double x, double y, double z, V3 r)
+    {
+        double k0 = Len(x / r.X, y / r.Y, z / r.Z);
+        return (k0 - 1) * Math.Min(r.X, Math.Min(r.Y, r.Z));
+    }
+
+    // P.X = height, P.Y = base side; base centred on the origin, apex at +Y.
+    // IQ's sdPyramid for a unit base, scaled by the side, with the shader's two corrections (see sdPyramid in
+    // FrepShaderGen): IQ's measures distance to the slanted faces only, so below the base use the distance to
+    // the base square, and inside let the base count.
+    static double Pyramid(double x, double y, double z, V3 p)
+    {
+        double side = p.Y, h = p.X / side;
+        double px = Math.Abs(x / side), py = y / side, pz = Math.Abs(z / side);
+        double m2 = h * h + 0.25;
+        if (pz > px) (px, pz) = (pz, px);
+        px -= 0.5; pz -= 0.5;
+        if (py < 0) return Len(Math.Max(px, 0), py, Math.Max(pz, 0)) * side;
+        double qx = pz, qy = h * py - 0.5 * px, qz = h * px + 0.5 * py;
+        double a0 = Math.Max(-qx, 0);
+        double t = Math.Clamp((qy - 0.5 * pz) / (m2 + 0.25), 0, 1);
+        double a = m2 * (qx + a0) * (qx + a0) + qy * qy;
+        double b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
+        double d2 = Math.Min(qy, -qx * m2 - qy * 0.5) > 0 ? 0 : Math.Min(a, b);
+        double signed = Math.Sqrt((d2 + qz * qz) / m2) * Math.Sign(Math.Max(qz, -py));
+        return Math.Max(signed, -py) * side;
     }
 
     static double Len(double a, double b) => Math.Sqrt(a * a + b * b);
@@ -563,14 +591,6 @@ public sealed class FrepField
         }
     }
 
-    /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
-    static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
-    {
-        // Placed: {sd(P⁻¹ p) · s <= t} = P × {sd <= t / s}; map the canonical box's corners by P.
-        if (s.Place is not { } w) return CanonicalBounds(s, t);
-        return MapBox(s.Fwd!, CanonicalBounds(s, t / w[3].X));
-    }
-
     /// World box of an affine map of a box (its 8 corners mapped).
     static (V3 Min, V3 Max) MapBox(V4[] fwd, (V3 Min, V3 Max) c)
     {
@@ -583,33 +603,35 @@ public sealed class FrepField
         return box;
     }
 
-    static (V3 Min, V3 Max) CanonicalBounds(in Prim s, double t)
+    /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
+    static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
     {
-        // Local box: low and high corner. Exact distance fields grow by t in every direction.
+        // Field value is σ_min · local distance, so {field <= t} is a local offset of t / σ_min.
+        double grow = s.Lip > 1e-12 ? t / s.Lip : t;
         V3 lo, hi;
         switch (s.Kind)
         {
-            case FieldKind.Sphere: hi = new V3(s.P.X + t, s.P.X + t, s.P.X + t); lo = hi * -1; break;
-            case FieldKind.Box: hi = new V3(s.P.X + t, s.P.Y + t, s.P.Z + t); lo = hi * -1; break;
-            case FieldKind.Torus: hi = new V3(s.P.X + s.P.Y + t, s.P.Y + t, s.P.X + s.P.Y + t); lo = hi * -1; break;
-            case FieldKind.Cylinder: hi = new V3(s.P.Y + t, s.P.X + t, s.P.Y + t); lo = hi * -1; break;
+            case FieldKind.Sphere: hi = new V3(s.P.X + grow, s.P.X + grow, s.P.X + grow); lo = hi * -1; break;
+            case FieldKind.Box: hi = new V3(s.P.X + grow, s.P.Y + grow, s.P.Z + grow); lo = hi * -1; break;
+            case FieldKind.Torus: hi = new V3(s.P.X + s.P.Y + grow, s.P.Y + grow, s.P.X + s.P.Y + grow); lo = hi * -1; break;
+            case FieldKind.Cylinder: hi = new V3(s.P.Y + grow, s.P.X + grow, s.P.Y + grow); lo = hi * -1; break;
             case FieldKind.Cone:
             {
-                double r = Math.Max(s.P.Y, s.P.Z) + t;
-                hi = new V3(r, s.P.X + t, r); lo = hi * -1;
+                double r = Math.Max(s.P.Y, s.P.Z) + grow;
+                hi = new V3(r, s.P.X + grow, r); lo = hi * -1;
                 break;
             }
             case FieldKind.Ellipsoid:
             {
                 // (|p/r| - 1) min(r) <= t  <=>  |p/r| <= 1 + t / min(r): the semi-axes scale.
-                double scale = 1 + t / Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
+                double scale = 1 + grow / Math.Min(s.P.X, Math.Min(s.P.Y, s.P.Z));
                 hi = s.P * scale; lo = hi * -1;
                 break;
             }
             case FieldKind.Pyramid: // an exact distance; local y runs from the base at 0 to the apex at h
             {
                 double b = s.P.Y * 0.5;
-                lo = new V3(-b - t, -t, -b - t); hi = new V3(b + t, s.P.X + t, b + t);
+                lo = new V3(-b - grow, -grow, -b - grow); hi = new V3(b + grow, s.P.X + grow, b + grow);
                 break;
             }
             default: throw new ArgumentOutOfRangeException(nameof(s));

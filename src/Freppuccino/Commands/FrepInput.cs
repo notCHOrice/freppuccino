@@ -114,6 +114,7 @@ internal static class FrepInput
 
         var attributes = doc.CreateDefaultAttributes();
         writeSdf(attributes);
+        Sdf.SdfUserText.WriteDefaultColor(attributes);
 
         if (doc.Objects.AddBrep(brep, attributes) == Guid.Empty)
         {

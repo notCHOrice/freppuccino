@@ -20,7 +20,8 @@ namespace Freppuccino.Sdf;
 ///   command are queued and updated on the next Idle.
 ///   Limitation: that update happens outside the command's undo record, so Redo of a copy restores the
 ///   copies with the source's (stale) SDF values.
-/// Transforms an SDF type can't represent (e.g. shearing a box) leave the values unchanged and log a warning.
+/// A transform that flattens the primitive leaves the values unchanged and logs a warning.
+/// Shear and off-axis scale are stored as SDF.Linear.*.
 /// Grip (control point) edits are not handled.
 /// </summary>
 public static class SdfTransformWatcher

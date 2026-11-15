@@ -88,8 +88,19 @@ public static class FrepFieldBuilder
     static int Add(FrepField field, SdPrimitive prim)
     {
         var (kind, frame, p) = prim;
-        V4[]? place = null;
-        if (prim.Place is { } pl && Placement.TryRows(pl, out var rows)) place = rows;
+        // SDF.Linear (gumball shear / off-axis scale): the canonical-to-world columns replace the frame axes; the local
+        // distance is scaled by σ_min so the field stays Lipschitz 1 (same as the shader).
+        var x = frame.XAxis;
+        var y = frame.YAxis;
+        var z = frame.ZAxis;
+        double lip = 1;
+        if (kind is not (SdKind.Sphere or SdKind.Ellipsoid) && prim.Basis is { } basis)
+        {
+            x = basis.X;
+            y = basis.Y;
+            z = basis.Z;
+            if (Sdf.SdfTransforms.TryMetrics(basis, out _, out _, out _, out var sigmaMin, out _)) lip = sigmaMin;
+        }
         var fieldKind = kind switch
         {
             SdKind.Sphere => FieldKind.Sphere,
@@ -101,7 +112,7 @@ public static class FrepFieldBuilder
             SdKind.Pyramid => FieldKind.Pyramid,
             _ => throw new NotSupportedException($"no CPU field for {kind} yet"),
         };
-        return field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p), place);
+        return field.AddPrimitive(fieldKind, V(frame.Origin), V(x), V(y), V(p), V(z), lip);
     }
 
     static V3 V(Point3d p) => new(p.X, p.Y, p.Z);

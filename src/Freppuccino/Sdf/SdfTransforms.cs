@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Freppuccino.Commands;
 using Rhino.DocObjects;
 using Rhino.Geometry;
@@ -9,8 +8,10 @@ namespace Freppuccino.Sdf;
 
 /// <summary>
 /// Rewrites a primitive's SDF.* values so they describe the primitive after <paramref name="xform"/>.
-/// Return false (with a reason) if the transformed shape can no longer be expressed by this SDF type,
-/// e.g. a box that has been sheared. <paramref name="attributes"/> is a copy; only commit it on success.
+/// A rotate, mirror, or scale along the primitive's own axes is folded into the frame and parameters.
+/// Anything else (shear, scale off those axes) is kept as <see cref="SdfUserText.LinearXKey"/> and the parameters
+/// stay in the original frame. Fails only if the map flattens the primitive.
+/// <paramref name="attributes"/> is a copy; only commit it on success.
 /// </summary>
 public delegate bool SdfTransformHandler(ObjectAttributes attributes, Transform xform, out string? reason);
 
@@ -184,32 +185,149 @@ public static class SdfTransforms
             return false;
         }
 
-        // Leaf placement P (Scene.Placement): once P is set, the transform composes into it and the SDF values stay put
-        // (feeding it to the handler would compose in the wrong space). Otherwise the handler first; whatever it can't
-        // represent (shear, non-uniform scale off the frame axes) becomes P instead of being rejected.
-        switch (Scene.Placement.ReadLeaf(attributes, out var place))
-        {
-            case Scene.Placement.Stored.Valid:
-                return TryPlace(attributes, xform * place, out reason);
-            case Scene.Placement.Stored.Invalid:
-                reason = "unreadable or degenerate " + Scene.Placement.LeafKey;
-                return false;
-        }
-        // As before placements existed: the handler edits the attributes in place, and only on success.
-        if (handler(attributes, xform, out reason)) return true;
-        return TryPlace(attributes, xform, out reason);
+        return handler(attributes, xform, out reason);
     }
 
-    static bool TryPlace(ObjectAttributes attributes, Transform place, out string? reason)
+    /// <summary>
+    /// Applies <paramref name="xform"/> to the primitive's canonical-to-world map.
+    /// When <paramref name="absorb"/> accepts <paramref name="scale"/>, the frame becomes that rigid pose and the linear map is cleared
+    /// (the callback writes the scaled parameters). Otherwise the frame axes stay put, the origin moves, and the full map is stored.
+    /// </summary>
+    public static bool CommitAffine(ObjectAttributes attributes, Plane frame, Transform xform, Func<Vector3d, bool> absorb, out string? reason)
     {
-        if (!Scene.Placement.TryRows(place, out _))
+        SdfBasis current;
+        switch (SdfUserText.ReadLinear(attributes, out var lx, out var ly, out var lz))
         {
-            reason = "transform flattens the primitive";
-            return false;
+            case SdfUserText.LinearState.Valid:
+                current = new SdfBasis(lx, ly, lz);
+                break;
+            case SdfUserText.LinearState.Invalid:
+                // Never compose onto an unreadable map as if it were the frame axes.
+                reason = "unreadable or degenerate " + SdfUserText.LinearXKey;
+                return false;
+            default:
+                current = SdfBasis.FromPlane(frame);
+                break;
         }
-        Scene.Placement.WriteLeaf(attributes, place);
+        if (!TryAdvance(frame, current, xform, out var origin, out var factored, out var next, out var scale, out var rigid, out reason))
+            return false;
+
+        if (rigid && absorb(scale))
+        {
+            SdfUserText.WriteFrame(attributes, factored);
+            SdfUserText.ClearLinear(attributes);
+            reason = null;
+            return true;
+        }
+
+        var frozen = new Plane(origin, frame.XAxis, frame.YAxis);
+        SdfUserText.WriteFrame(attributes, frozen);
+        if (next.Matches(frozen)) SdfUserText.ClearLinear(attributes);
+        else SdfUserText.WriteLinear(attributes, next.X, next.Y, next.Z);
         reason = null;
         return true;
     }
 
+    /// <summary>
+    /// The one validity test for a primitive's canonical-to-world map, on write (<see cref="TryAdvance"/>) and on read
+    /// (<see cref="SdfUserText.ReadLinear"/>): invertible with condition number below 1e9. Scale-relative, so a healthy
+    /// map of any absolute size passes.
+    /// </summary>
+    public static bool IsUsableBasis(SdfBasis basis) =>
+        TryMetrics(basis, out _, out _, out _, out var sigmaMin, out var sigmaMax) && sigmaMin > 1e-9 * Math.Max(sigmaMax, 1e-300);
+
+    /// <summary>
+    /// <paramref name="next"/> is the map's columns after <paramref name="xform"/>.
+    /// <paramref name="rigid"/> means those columns are perpendicular, so <paramref name="scale"/> is their lengths
+    /// and <paramref name="factored"/> is the unit frame. <paramref name="origin"/> is the transformed frame origin either way.
+    /// </summary>
+    public static bool TryAdvance(Plane frame, SdfBasis current, Transform xform, out Point3d origin, out Plane factored, out SdfBasis next, out Vector3d scale, out bool rigid, out string? reason)
+    {
+        origin = frame.Origin;
+        origin.Transform(xform);
+        next = current.Apply(xform);
+        factored = Plane.Unset;
+        scale = Vector3d.Unset;
+        rigid = false;
+        if (!IsUsableBasis(next))
+        {
+            reason = "transform flattens the primitive";
+            return false;
+        }
+        rigid = TryFactor(next, origin, out factored, out scale);
+        reason = null;
+        return true;
+    }
+
+    /// <summary>Perpendicular columns: <paramref name="scale"/> is their lengths, <paramref name="pose"/> their unit directions.</summary>
+    public static bool TryFactor(SdfBasis basis, Point3d origin, out Plane pose, out Vector3d scale)
+    {
+        pose = Plane.Unset;
+        scale = Vector3d.Unset;
+        double sx = basis.X.Length, sy = basis.Y.Length, sz = basis.Z.Length;
+        const double degenerate = 1e-12;
+        if (sx < degenerate || sy < degenerate || sz < degenerate) return false;
+        var x = basis.X / sx;
+        var y = basis.Y / sy;
+        var z = basis.Z / sz;
+        const double perpendicularTolerance = 1e-6;
+        if (Math.Abs(x * y) > perpendicularTolerance ||
+            Math.Abs(y * z) > perpendicularTolerance ||
+            Math.Abs(z * x) > perpendicularTolerance)
+            return false;
+        pose = new Plane(origin, x, y);
+        scale = new Vector3d(sx, sy, sz);
+        // A reflection has perpendicular columns but the opposite Z. Baking it would drop the mirror.
+        return pose.IsValid && pose.ZAxis * z > 1 - perpendicularTolerance;
+    }
+
+    /// <summary>
+    /// Rows of the inverse (what the shader dots with) and the singular values of <paramref name="basis"/>.
+    /// <paramref name="sigmaMin"/> keeps an affine-transformed distance conservative: sd(A⁻¹p) · σ_min changes by at most 1 per world unit.
+    /// </summary>
+    public static bool TryMetrics(SdfBasis basis, out Vector3d r0, out Vector3d r1, out Vector3d r2, out double sigmaMin, out double sigmaMax)
+    {
+        r0 = r1 = r2 = Vector3d.Unset;
+        sigmaMin = sigmaMax = 0;
+        var c0 = basis.X;
+        var c1 = basis.Y;
+        var c2 = basis.Z;
+        double det = c0 * Vector3d.CrossProduct(c1, c2);
+        double volume = c0.Length * c1.Length * c2.Length;
+        if (!(Math.Abs(det) > 1e-12 * Math.Max(volume, 1e-30))) return false;
+        double invDet = 1.0 / det;
+        r0 = Vector3d.CrossProduct(c1, c2) * invDet;
+        r1 = Vector3d.CrossProduct(c2, c0) * invDet;
+        r2 = Vector3d.CrossProduct(c0, c1) * invDet;
+
+        var m = new double[3, 3];
+        Vector3d[] cols = [c0, c1, c2];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                m[i, j] = cols[i] * cols[j];
+        SymmetricEigen(m, out var w, out _);
+        sigmaMin = Math.Sqrt(Math.Max(0, Math.Min(w[0], Math.Min(w[1], w[2]))));
+        sigmaMax = Math.Sqrt(Math.Max(0, Math.Max(w[0], Math.Max(w[1], w[2]))));
+        return sigmaMin > 0 && sigmaMax > 0;
+    }
+}
+
+/// <summary>Columns of a primitive's canonical-to-world linear map. The frame axes when no gumball residual is stored.</summary>
+public readonly record struct SdfBasis(Vector3d X, Vector3d Y, Vector3d Z)
+{
+    public static SdfBasis FromPlane(Plane frame) => new(frame.XAxis, frame.YAxis, frame.ZAxis);
+
+    public SdfBasis Apply(Transform xform)
+    {
+        var x = X; x.Transform(xform);
+        var y = Y; y.Transform(xform);
+        var z = Z; z.Transform(xform);
+        return new SdfBasis(x, y, z);
+    }
+
+    public bool Matches(Plane frame)
+    {
+        const double tol = 1e-6;
+        return (X - frame.XAxis).Length <= tol && (Y - frame.YAxis).Length <= tol && (Z - frame.ZAxis).Length <= tol;
+    }
 }

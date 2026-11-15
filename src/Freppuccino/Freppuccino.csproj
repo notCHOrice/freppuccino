@@ -37,7 +37,7 @@
     <UiBuildOutput Condition="'$(Configuration)' == 'Release'">$(UiDist).always-rebuild</UiBuildOutput>
   </PropertyGroup>
   <ItemGroup>
-    <UiSources Include="$(UiDir)src/**/*;$(UiDir)index.html;$(UiDir)package.json;$(UiDir)package-lock.json;$(UiDir)vite.config.ts;$(UiDir)tsconfig*.json;$(UiDir)components.json" />
+    <UiSources Include="$(UiDir)src/**/*;$(UiDir)index.html;$(UiDir)package.json;$(UiDir)package-lock.json;$(UiDir)vite.config.ts;$(UiDir)tsconfig*.json;$(UiDir)components.json;$(UiDir).env*" />
   </ItemGroup>
   <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true'" Inputs="@(UiSources)" Outputs="$(UiBuildOutput)">
     <Exec Command="npm ci" WorkingDirectory="$(UiDir)" Condition="!Exists('$(UiDir)node_modules')" ContinueOnError="WarnAndContinue" />
@@ -64,11 +64,11 @@
   <!-- `dotnet run` launches Rhino 9 w/ RHINO_PACKAGE_DIRS pointing at the build output, so the .rhp auto-loads. -->
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
     <RunCommand>/usr/bin/env</RunCommand>
-    <RunArguments>FREPPUCCINO_AUTOSTART=1 RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
+    <RunArguments>FREPPUCCINO_AUTOSTART=1 FREPPUCCINO_AI_RUNS_DIR="$(MSBuildProjectDirectory)/../../ai-runs" RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
   </PropertyGroup>
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <RunCommand>cmd.exe</RunCommand>
-    <RunArguments>/c "set FREPPUCCINO_AUTOSTART=1&amp;&amp; set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
+    <RunArguments>/c "set FREPPUCCINO_AUTOSTART=1&amp;&amp; set FREPPUCCINO_AI_RUNS_DIR=$(MSBuildProjectDirectory)\..\..\ai-runs&amp;&amp; set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
   </PropertyGroup>
 
 </Project>

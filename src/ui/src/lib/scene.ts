@@ -51,24 +51,32 @@ export function typeLabel(node: SceneNode): string {
   return (node.sdfType && PRIMITIVES[node.sdfType]?.label) || node.sdfType || 'Primitive'
 }
 
-/** Params with display labels: known ones in catalogue order, then any others (raw key). */
+/** Params with display labels: known ones in catalogue order, then any others (raw key). None once the primitive is custom. */
 export function displayParams(node: SceneNode): { key: string; label: string; value: number }[] {
+  if (node.custom) return []
   const values = node.params ?? {}
   const known = (isDeform(node.op) ? DEFORMS[node.op].params : node.sdfType && PRIMITIVES[node.sdfType]?.params) || {}
   const ordered = [...Object.keys(known).filter((k) => k in values), ...Object.keys(values).filter((k) => !(k in known))]
   return ordered.map((key) => ({ key, label: known[key] ?? key, value: values[key] }))
 }
 
-/** Display labels for every node: the Rhino name if set, else "Sphere 1", "Union 2", ... in tree order. */
+/** "Box", or "Custom Box-based FRep" once a gumball transform no longer fits the parameters. */
+function nameStem(node: SceneNode): string {
+  const type = typeLabel(node)
+  return node.kind === 'primitive' && node.custom ? `Custom ${type}-based FRep` : type
+}
+
+/** Display labels for every node: the Rhino name if set, else "Sphere 1", "Union 2", ... in tree order.
+ *  A custom primitive is always "Custom Box-based FRep 1", numbered among that stem. */
 export function labelNodes(scene: SceneNode[]): Map<string, string> {
   const labels = new Map<string, string>()
   const counters = new Map<string, number>()
   const walk = (nodes: SceneNode[]) => {
     for (const node of nodes) {
-      const type = typeLabel(node)
-      const i = (counters.get(type) ?? 0) + 1
-      counters.set(type, i)
-      labels.set(node.id, node.name ?? `${type} ${i}`)
+      const stem = nameStem(node)
+      const i = (counters.get(stem) ?? 0) + 1
+      counters.set(stem, i)
+      labels.set(node.id, node.custom ? `${stem} ${i}` : (node.name ?? `${stem} ${i}`))
       if (node.children) walk(node.children)
     }
   }
