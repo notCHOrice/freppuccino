@@ -36,17 +36,44 @@ Encode settings used so far (the edit window should catch the change, not the ha
 | 2 primitives pop | `clip02-pop.cs` | 4 s | `EDIT_START=0.25 EDIT_LEN=3` |
 | 3 scoop | `clip03-scoop.cs` | 4.5 s | `EDIT_START=1.0 EDIT_LEN=3` |
 | 4 colour seam | `clip04-seam.cs` | 4.5 s | `EDIT_START=0.9 EDIT_LEN=3` |
+| 5 blend styles (gyroid branch) | `clip05-styles.cs` | 4.5 s | `EDIT_START=0.5 EDIT_LEN=4 SUPER_TEXT="Every blend, your way." SUPER_IN=1.2` |
 | 6 zebra | `clip06-zebra.cs` | 4.5 s | `EDIT_START=0.5 EDIT_LEN=3` |
 | 7 twist | `clip07-twist.cs` | 5 s | `EDIT_START=0.5 EDIT_LEN=4 SUPER_TEXT="Twist. Bend. Repeat."` |
 | 8 colonnade | `clip08-colonnade.cs` | 5 s | `EDIT_START=0.5 EDIT_LEN=4` |
 | 11 gyroid (FFunction, Espresso) | `clip11-gyroid.cs` after `open-3dm` gyroid.3dm\|#e0954a | 5.5 s | `THEME=espresso EDIT_START=0.3 EDIT_LEN=5 SUPER_TEXT="Lattices, live." SUPER_IN=1.5` |
+| 12 pipe (gyroid branch, Espresso) | `clip12-pipe.cs` | 4 s | `THEME=espresso EDIT_START=0.3 EDIT_LEN=3` |
 | 13 code (FFunction) | `clip13-code.cs` after `open-3dm` scherk_tower.3dm\|#e0954a | 4 s | `encode-code.sh` (encode + super + code card) |
 | 13b gallery (FFunction) | `clip13b-nautilus/vase/tet.cs`, each after its `open-3dm` | 3 s each | each `EDIT_START=1.0 EDIT_LEN=1`, then concatenated |
 | 16 mesh | `clip16-mesh.cs` | 4.5 s | `encode-mesh.sh c16_mesh` (two passes + wipe) |
 | 17 end card | no Rhino | 3 s | `end-card.sh` |
 
+**v2 (after the user's review, 2026-11-15).** Clips 4, 5, 8 and 12 are dropped. The revised clips have new clip ids
+and scripts (the v1 ones above are kept), and deliver to `~/Downloads/freppuccino-sizzle/v2/<clip-id>/`; `reel.sh`
+builds the v2 reel from there (11 and 16 are copied over unchanged).
+
+| Clip | Script | Take | Encode (out dir `$V2/<clip-id>`) |
+| --- | --- | --- | --- |
+| 1 hook, 45-degree orbit | `clip01-orbit.cs` | 7 s | `FADE_IN=0.5 EDIT_START=0.5 EDIT_LEN=4 SUPER_TEXT="Implicit geometry. Live in Rhino."` |
+| 2 pop, then fly together into a cup and fuse | `clip02-build.cs` | 6.8 s | `EDIT_START=0.25 EDIT_LEN=6` |
+| 3 one boolean: union / difference / intersection | `clip03-booleans.cs` | 6 s | `encode-booleans.sh` (op labels as supers, switching with the op) |
+| 6 zebra on a soft-serve swirl | `clip06-zebra-swirl.cs` | 4.5 s | `EDIT_START=0.5 EDIT_LEN=3.5` |
+| 7 rope: combine, twist, bend | `clip07-rope.cs` | 6 s | `EDIT_START=0.3 EDIT_LEN=5.4 SUPER_TEXT="Combine. Twist. Bend." SUPER_IN=1.2` |
+| 13 code, slowed down | `clip13-code-slow.cs` after `open-3dm` scherk_tower.3dm\|#e0954a | 6.5 s (3 passes) | `encode-code-slow.sh` (dissolves between the wings 2/3/4 passes + code cards) |
+| 13b gallery, slowed down | no Rhino (re-cuts the v1 takes in `$WORK/c13b_parts`) | | `encode-gallery-slow.sh` (1.9 s each, dissolves, file-name labels) |
+| 17 end card, new logo | no Rhino | 3 s | `end-card.sh` (art/logo.svg + "FReppuccino" in Fredoka, Latte only) |
+
 Not scriptable: clips 14 and 15 (the AI agent and Image to AI) need the AI panel on screen and an OpenRouter key;
-screen-record them. Clips 5, 9, 10, 12 need the gyroid / displacements branches (`BADGE_MASK=1` there).
+screen-record them. Clips 5 and 12 need the gyroid branch (merged up to main on 2026-11-14, so it has CleanCapture:
+no `BADGE_MASK`); 9 and 10 need displacements (`BADGE_MASK=1` unless it has been brought up to main too).
+
+**The whole reel:** `sh $S/reel.sh` joins every clip edit that exists, in shot-list order (hard cuts, a 0.5 s fade
+into the end card), into `~/Downloads/freppuccino-sizzle/reel/`: `sizzle_reel.mp4`, `sizzle_reel_review.mp4` (clip
+number + running time in the corner) and `sizzle_reel_clips.txt` (the cut list). It lists the clips still missing.
+Missing clips are skipped, so the reel is shorter until they exist. No music yet. Edit files must be named
+`<folder>/sizzle_<clip-id>_edit.mp4` as in its ORDER list (clip 1's folder is `c01`, the others `<clip-id>`).
+
+Supers vs subjects: a super sits bottom-left. When a match cut forces the framing (clip 5 starts on clip 4's last
+frame), ease the camera after the cut so the subject slides right before the super fades in (clip 5's `clear`).
 
 Look at `%LOCALAPPDATA%/freppuccino-sizzle/<clip>/frames/f0000_0.png` after a test run and at `<clip>/contact.png`
 after encoding (6 frames of the edit) before calling a clip done. Clip 01 is the worked example:
@@ -64,6 +91,7 @@ after encoding (6 frames of the edit) before calling a clip done. Clip 01 is the
 | `code-card.sh` + `code-card.html`, `encode-code.sh` | Clip 13's brand-styled code panel (the real `param` lines, the animated one highlighted) laid over the left 40%, switching with the param. Stands in for the panel's code view. |
 | `encode-mesh.sh` | Clip 16: shader pass + wireframe pass, wiped left to right. |
 | `end-card.sh` + `end-card.html` | Clip 17: lockup on Latte, cross-fade to Espresso, slow push in. No Rhino. |
+| `reel.sh` | Joins all existing clip edits into the reel (clean + review copy + cut list). |
 | `open-3dm.cs` | Opens `$SIZZLE_WORK/open3dm/request.txt` (`<path>[|#colour]`, or `NEW` for an empty document) in its own run. |
 | `check-script.sh` | Compiles a clip script against Rhino's RhinoCommon. `run-clip.sh` calls it. |
 | `run-clip.sh` | check, `rhinocode script <abs path>`, nudge Rhino to the foreground, wait for `done.txt` / `error.txt`. |
@@ -112,6 +140,15 @@ Work files go to `%LOCALAPPDATA%/freppuccino-sizzle/<clip>/` (override with `SIZ
   (clip 06). Meshing: `FrepFieldBuilder.Build` + `DualContour.Mesh` by reflection, then Rhino's `QuadRemesh` (clip 16).
 - A second pass (e.g. wireframe): reassign `framesDir` (the harness's `Capture()` writes wherever it points), hide the
   F-rep objects, switch the viewport's display mode, capture the same camera path again (clip 16).
+- Integer params (FFunction `wings`) can't animate smoothly. Render one pass per value along the same camera path
+  (`framesDir` per pass, inside the frame loop) and dissolve between passes in ffmpeg (`xfade` on trimmed takes;
+  `FRAMES_DIR=... encode.sh` encodes one pass). Clip 13 v2: `clip13-code-slow.cs` + `encode-code-slow.sh`.
+- Shapes flying into place: describe each primitive's spec as a vector of numbers, interpolate popped -> final with
+  `Smooth`, add an arc to the z entries, `update_primitive` every frame (clip 02 v2). The sizes can change on the way
+  (the cone becomes the cup's tapered body).
+- `edit_operation` with `op` switches a boolean between union / difference / intersection in place (clip 03 v2).
+- The brand-kit lockups spell "FRepuccino" (one p) and carry the old icon; the end card sets "FReppuccino" in Fredoka
+  next to `art/logo.svg` (the new logo).
 - Names the harness already uses (a clash is a compile error, caught by `check-script.sh`): `dir`, `work`,
   `framesDir`, `frames`, `doc`, `asm`, `run`, `vp`, `view`, `mode`, `clean`, `jitter`, `Tool`, `N`, `Smooth`,
   `Capture`, `TimeOf`, `shaderError`.

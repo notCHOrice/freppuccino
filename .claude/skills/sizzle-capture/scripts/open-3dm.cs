@@ -28,7 +28,8 @@ try
     if (RhinoDoc.ActiveDoc != null) RhinoDoc.ActiveDoc.Modified = false;   // no "save changes?" prompt
     RhinoApp.RunScript(isNew ? "_-New _None" : $"_-Open \"{path}\"", false);
     var doc = RhinoDoc.ActiveDoc;
-    if (isNew ? !string.IsNullOrEmpty(doc.Path) : !string.Equals(doc.Path, path, StringComparison.OrdinalIgnoreCase))
+    // GetFullPath on both: a request written with forward slashes (C:/...) must still match Rhino's C:\... path.
+    if (isNew ? !string.IsNullOrEmpty(doc.Path) : string.IsNullOrEmpty(doc.Path) || !string.Equals(Path.GetFullPath(doc.Path), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
         throw new Exception($"{(isNew ? "new" : "open")} failed: active doc is {doc.Path}");
     int recoloured = 0;
     if (parts.Length > 1)

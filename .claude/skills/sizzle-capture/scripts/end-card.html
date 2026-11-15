@@ -1,17 +1,22 @@
 <!doctype html>
-<!-- End card frame (clip 17): the brand lockup centred on the theme background. #theme=latte|espresso
-     Rendered by end-card.sh with headless Edge; the logos are copied next to this file by the script. -->
+<!-- End card frame (clip 17): the cup logo (art/logo.svg) and the wordmark "FReppuccino" set live in Fredoka, centred on
+     the theme background. #theme=latte|espresso
+     Rendered by end-card.sh with headless Edge; logo.svg and Fredoka.ttf are copied next to this file by the script.
+     The brand-kit lockups spell "FRepuccino" (one p) and carry the old icon, so they are not used here. -->
 <html><head><meta charset="utf-8">
 <style>
+@font-face { font-family: Fredoka; src: url(Fredoka.ttf); font-weight: 300 700; }
 html, body { margin: 0; padding: 0; overflow: hidden; }
-#wrap { position: relative; width: 1920px; height: 1080px; display: flex; align-items: center; justify-content: center; }
-.latte { background: linear-gradient(#fff8ef, #ead8c3); }
-.espresso { background: linear-gradient(#2a1e19, #160f0d); }
-img { width: 900px; height: auto; display: block; }
+#wrap { position: relative; width: 1920px; height: 1080px; display: flex; align-items: center; justify-content: center; gap: 56px; }
+.latte { background: linear-gradient(#fff8ef, #ead8c3); --rest: #3b2620; }
+.espresso { background: linear-gradient(#2a1e19, #160f0d); --rest: #fff4e6; }
+img { height: 600px; width: auto; display: block; margin-top: -10px; }
+#word { font-family: Fredoka, sans-serif; font-weight: 600; font-size: 178px; letter-spacing: -2px; line-height: 1; padding-bottom: 18px; }
+#word .a { color: #e0954a; }
+#word .b { color: var(--rest); }
 </style></head>
-<body><div id="wrap"><img id="logo" alt="Freppuccino"></div>
+<body><div id="wrap"><img src="logo.svg" alt=""><div id="word"><span class="a">FRep</span><span class="b">puccino</span></div></div>
 <script>
 const theme = new URLSearchParams(location.hash.slice(1)).get('theme') === 'espresso' ? 'espresso' : 'latte';
 document.getElementById('wrap').className = theme;
-document.getElementById('logo').src = theme === 'espresso' ? 'frepuccino-lockup-dark.svg' : 'frepuccino-lockup.svg';
 </script></body></html>

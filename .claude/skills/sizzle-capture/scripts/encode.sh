@@ -21,7 +21,7 @@ WORK="${SIZZLE_WORK:-$(cygpath -m "$LOCALAPPDATA")/freppuccino-sizzle}"
 OUT="${2:-$(cygpath -m "$USERPROFILE")/Downloads/freppuccino-sizzle/$CLIP}"
 FF="${FFMPEG:-$WORK/tools/node_modules/ffmpeg-static/ffmpeg.exe}"
 [ -x "$FF" ] || { echo "ffmpeg not found at $FF; run setup-tools.sh"; exit 1; }
-FR="$WORK/$CLIP/frames"
+FR="${FRAMES_DIR:-$WORK/$CLIP/frames}"   # FRAMES_DIR: another pass of a clip (clip 13 v2 writes frames_w2, _w3, _w4)
 THEME="${THEME:-latte}"; FPS="${FPS:-60}"; EDIT_START="${EDIT_START:-0.5}"; EDIT_LEN="${EDIT_LEN:-4}"; FADE_IN="${FADE_IN:-0}"
 SUPER_IN="${SUPER_IN:-1.0}"; SUPER_OUT="${SUPER_OUT:-$(node -e "console.log($EDIT_LEN - 0.5)")}"
 mkdir -p "$OUT"
