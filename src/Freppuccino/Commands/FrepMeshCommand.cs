@@ -193,6 +193,12 @@ public class FrepMeshCommand : Command
         {
             nodeRef[n.Id] = null;
             if (n.Hidden) continue;
+            if (n.Op == FrepOp.Blend)
+            {
+                if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;
+                nodeRef[n.Id] = FieldRef.Node(field.AddNode(FieldOp.Blend, n.K, [child]));
+                continue;
+            }
             if (n.Op.IsWarp())
             {
                 if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;

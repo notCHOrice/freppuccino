@@ -28,7 +28,7 @@ public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid, 
 public sealed record UserField(UserFnEval Eval, double[] U, double L);
 
 /// Twist/Bend/Repeat: domain warps of one operand (see <see cref="FrepField.AddWarp"/>).
-public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat }
+public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat, Blend }
 
 /// A primitive (by index) or an earlier node (by index).
 public readonly record struct FieldRef(bool IsNode, int Index)
@@ -204,7 +204,16 @@ public sealed class FrepField
         else
         {
             var n = nodes[r.Index];
-            if (n.Rows is { } w)
+            if (n.Op == FieldOp.Blend)
+            {
+                var only = n.Operands[0];
+                // The fillet lives on this node, above the Repeat. The Repeat itself stays a hard nearest-cell warp.
+                if (only.IsNode && nodes[only.Index] is { Op: FieldOp.Repeat, Rows: { } w } rep)
+                    d = RepeatBlend(rep, w, n.K, p, ref memo, ref top, stride);
+                else
+                    d = Eval(only, p, ctx, ref memo, ref top, stride);
+            }
+            else if (n.Rows is { } w)
             {
                 int saved = top;
                 if (n.Op == FieldOp.Repeat)
@@ -298,6 +307,59 @@ public sealed class FrepField
             default:
                 throw new ArgumentOutOfRangeException(nameof(op));
         }
+    }
+
+    /// Smooth union of a Repeat's child, driven by the blend node above it. k = 0 is the nearest cell only.
+    /// k &gt; 0 also folds in the adjacent cells, so every copy blends into its neighbors. Matches the shader.
+    double RepeatBlend(in Node repeat, V4[] w, double k, V3 p, ref double[] memo, ref int top, int stride)
+    {
+        int rad = k > 0 ? 1 : 0;
+        double acc = double.PositiveInfinity;
+        for (int dz = -rad; dz <= rad; dz++)
+            for (int dy = -rad; dy <= rad; dy++)
+                for (int dx = -rad; dx <= rad; dx++)
+                {
+                    // An offset past the box is not clamped back onto a copy already folded in. smin of a
+                    // field with itself is that field minus k/4, which is why the outer copies grew.
+                    if (!TryRepeatCell(w, p, dx, dy, dz, out var q)) continue;
+                    int saved = top;
+                    double child = Eval(repeat.Operands[0], q, Push(ref memo, ref top, stride), ref memo, ref top, stride);
+                    top = saved;
+                    acc = Smin(acc, child, k);
+                }
+        return acc;
+    }
+
+    /// Copy at <paramref name="dx"/>/<paramref name="dy"/>/<paramref name="dz"/> from the nearest cell.
+    /// False when that cell is outside the index range. Same rounding as repeatCell in the shader.
+    static bool TryRepeatCell(V4[] w, V3 p, double dx, double dy, double dz, out V3 q)
+    {
+        V3 o = w[0].Xyz, x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y);
+        var dl = p - o;
+        static bool Axis(double local, double s, double lo, double hi, double delta, out double at)
+        {
+            double id = Math.Clamp(Math.Round(local / Math.Max(s, 1e-9), MidpointRounding.AwayFromZero), lo, hi) + delta;
+            at = id * s;
+            return id >= lo && id <= hi;
+        }
+        bool ok = Axis(V3.Dot(dl, x), w[0].W, w[3].X, w[4].X, dx, out double ix)
+            & Axis(V3.Dot(dl, y), w[1].W, w[3].Y, w[4].Y, dy, out double iy)
+            & Axis(V3.Dot(dl, z), w[2].W, w[3].Z, w[4].Z, dz, out double iz);
+        q = p - x * ix - y * iy - z * iz;
+        return ok;
+    }
+
+    /// Copy at a whole-cell offset from the nearest cell. Same rounding and clamp as opRepeat in the shader.
+    static V3 RepeatAt(V4[] w, V3 p, double dx, double dy, double dz)
+    {
+        V3 o = w[0].Xyz, x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y);
+        var dl = p - o;
+        static double Cell(double local, double s, double lo, double hi, double delta) =>
+            Math.Clamp(Math.Round(local / Math.Max(s, 1e-9), MidpointRounding.AwayFromZero) + delta, lo, hi) * s;
+        double ix = Cell(V3.Dot(dl, x), w[0].W, w[3].X, w[4].X, dx);
+        double iy = Cell(V3.Dot(dl, y), w[1].W, w[3].Y, w[4].Y, dy);
+        double iz = Cell(V3.Dot(dl, z), w[2].W, w[3].Z, w[4].Z, dz);
+        return p - x * ix - y * iy - z * iz;
     }
 
     /// Upper bound of Warp's lip over the child's extent.
@@ -452,6 +514,12 @@ public sealed class FrepField
             if (t == none) continue;
             var n = nodes[i];
             if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
+            // The fillet bulges by up to k past the hard copies, same bound as a many-operand union.
+            if (n.Op == FieldOp.Blend)
+            {
+                foreach (var o in n.Operands) Ask(o, t + Math.Max(n.K, 0));
+                continue;
+            }
             if (n.Rows is { } w) { Ask(n.Operands[0], t * MaxLip(n.Op, w)); continue; }
             double d = n.Op == FieldOp.Union && n.Operands.Length > 1 ? Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25) : 0;
             foreach (var o in n.Operands) Ask(o, t + d);

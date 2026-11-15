@@ -23,9 +23,9 @@ export interface SceneNode {
   sdfType?: string
   /** primitive: SDF.<param> values without the prefix, e.g. { s: 1 } or { "b.x": 1, "b.y": 2, "b.z": 3 } */
   params?: Record<string, number>
-  /** operation */
-  op?: OperationKind | DeformKind
-  /** operation: blend distance in model units, 0 = sharp */
+  /** operation. 'blend' is a node above a repeat; its k fillets every copy. */
+  op?: OperationKind | DeformKind | 'blend'
+  /** operation: blend distance in model units, 0 = sharp. On a blend node, fillets every copy of the repeat below it. */
   k?: number
   children?: SceneNode[]
   /** operand whose object / node was deleted */
@@ -96,12 +96,15 @@ export type UiMessage =
   | { type: 'setColor'; id: Id; color: string; preview?: boolean }
   /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
-  /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step. */
-  | { type: 'setOperation'; id: Id; op: OperationKind; k: number; preview?: boolean }
+  /** Insert a blend node (k = 0) directly above a repeat. */
+  | { type: 'blendRepeat'; id: Id }
+  /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step.
+   *  op 'blend' only updates that node's fillet; it does not turn the node into a union. */
+  | { type: 'setOperation'; id: Id; op: OperationKind | 'blend'; k: number; preview?: boolean }
   /** One deform param; preview as setOperation. */
   | { type: 'setNodeParam'; id: Id; name: string; value: number; preview?: boolean }
-  /** Nodes still used by other nodes are kept (host sends a notice). */
-  | { type: 'deleteNodes'; ids: Id[] }
+  /** Remove nodes. deep: also remove every node and primitive under them. Otherwise children take the node's place. */
+  | { type: 'deleteNodes'; ids: Id[]; deep?: boolean }
   /** AI agent tool call (src/ui/src/ai/tools.ts → Ai/AiTools.cs); answered by aiToolResult. */
   | { type: 'aiTool'; callId: string; tool: string; args: Record<string, unknown> }
   /** Save a finished AI run to disk for review (Ai/AiRunLog.cs). Images become PNG files next to transcript.json. */
