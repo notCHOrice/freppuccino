@@ -8,6 +8,8 @@ Freppuccino makes implicit geometry available natively in Rhino for everyone.
 
 # What is implicit geometry?
 
+Implicit geometry is a geometry type that is made parametrically using functions (don't worry, you don't need to know the functions!).
+
 # Authors
 
 - Ben Howes
