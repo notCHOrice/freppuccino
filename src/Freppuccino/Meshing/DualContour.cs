@@ -584,6 +584,9 @@ public static class DualContour
                     if (InterfaceOk(g, cell)) checkedOk.Add(cell);
                     else { refined.Add(cell); grew = true; }
                 }
+            // Interface checks above may have added face centres since the estimate: charge them before going on.
+            if (g.Blocks.Count * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 + g.CentreMemory > MemoryBudget)
+                return false;
             if (!grew) return true;
             if ((long)refined.Count * g.Step * g.Step * g.Step > 4 * FineCellBudget) return false;
         }
@@ -779,6 +782,12 @@ public static class DualContour
             RefineCoarse = RefineStuckCoarse && g.K > 0 && !last,
         };
         octree.Build(tolerance);
+        // Merging adds face centres (its sheet and loop tests); this is the last place the cache grows.
+        if (k > 0 && g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4 + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
+        {
+            over = true;
+            return new Result([], [], 0, 0, 0, h);
+        }
         Mark("octree");
         void ContourAll()
         {
