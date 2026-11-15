@@ -38,10 +38,24 @@ public class FrepMeshCommand : Command
             RhinoApp.WriteLine("FrepMesh: no F-rep objects in the document (create some with FSphere, FBox, ...).");
             return Result.Nothing;
         }
-        var field = FrepFieldBuilder.Build(scene, null, out _);
+        // Only the selected blends (roots), snapshotted now, before the new mesh becomes the selection. Nothing selected,
+        // or only shapes inside blends: pick blends. Never the whole scene.
+        var roots = Selection.FrepSelection.Roots(doc);
+        if (roots.Count == 0)
+        {
+            var picked = PickRoots(doc);
+            if (picked == null) return Result.Cancel;
+            roots = picked;
+        }
+        if (roots.Count == 0)
+        {
+            RhinoApp.WriteLine("FrepMesh: no blend selected; nothing baked.");
+            return Result.Nothing;
+        }
+        var field = FrepFieldBuilder.Build(scene, roots, out var built);
         if (!field.HasRoots)
         {
-            RhinoApp.WriteLine("FrepMesh: nothing to mesh (every F-rep is hidden or cancelled out by the CSG tree).");
+            RhinoApp.WriteLine("FrepMesh: nothing to mesh (the selected blends are hidden or cancelled out by the CSG tree).");
             return Result.Nothing;
         }
 
@@ -114,9 +128,33 @@ public class FrepMeshCommand : Command
         doc.Objects.Select(id);
         doc.Views.Redraw();
         RhinoApp.WriteLine(
-            $"FrepMesh: {scene.Count} F-rep(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
+            $"FrepMesh: {built.Count} blend(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
             $"{quality}, {watch.ElapsedMilliseconds} ms.");
         return Result.Success;
+    }
+
+    /// Click blends (an F-rep selection session: the picker acts during this prompt, adding each clicked root); Enter ends.
+    /// Null if cancelled.
+    static List<Csg.FrepOperand>? PickRoots(RhinoDoc doc)
+    {
+        doc.Objects.UnselectAll(); // leaves only: start the blend selection from scratch
+        doc.Views.Redraw();
+        using var session = Selection.FrepPicker.BeginSession();
+        var gp = new Rhino.Input.Custom.GetPoint();
+        gp.SetCommandPrompt("Click the blends to bake, Enter when done");
+        gp.AcceptNothing(true);
+        while (true)
+        {
+            switch (gp.Get())
+            {
+                case GetResult.Point: // a click on no blend: ignore
+                    continue;
+                case GetResult.Nothing:
+                    return Selection.FrepSelection.Roots(doc);
+                default:
+                    return null;
+            }
+        }
     }
 
     /// <see cref="DualContour.Defects"/> for a Rhino mesh: faces are read through the mesh's topology, so

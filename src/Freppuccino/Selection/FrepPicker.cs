@@ -63,7 +63,7 @@ public sealed class FrepPicker : MouseCallback
 
         var vp = view.ActiveViewport;
         var client = new Point2d(e.ViewportPoint.X, e.ViewportPoint.Y);
-        if (e.ShiftKeyDown)
+        if (e.ShiftKeyDown && sessions == 0)
         {
             // Leaf: the nearest control instance. A miss is left to Rhino (Shift+click = add to its selection).
             var leaf = PickInstance(doc, vp, client, out var ambiguous);
@@ -88,8 +88,9 @@ public sealed class FrepPicker : MouseCallback
         }
         if (hit is not { } root)
         {
-            // Rhino deselects its own objects on an empty click, but node roots aren't Rhino objects.
-            UiController_ClearNodes(doc);
+            // Rhino deselects its own objects on an empty click, but node roots aren't Rhino objects. (Not in a session:
+            // there an empty click goes to the running command.)
+            if (sessions == 0) UiController_ClearNodes(doc);
             return;
         }
         e.Cancel = true;
@@ -110,7 +111,12 @@ public sealed class FrepPicker : MouseCallback
             return;
         }
         if (p.Leaf != null) FrepSelection.SelectLeaf(p.Doc, p.Leaf, add: false);
-        else if (p.Root is { } r) FrepSelection.SelectRoot(p.Doc, r, add: false);
+        else if (p.Root is { } r)
+        {
+            // In a selection session clicks accumulate (a second click on a chosen blend unchooses it).
+            if (sessions > 0 && FrepSelection.Roots(p.Doc).Contains(r)) FrepSelection.DeselectRoot(p.Doc, r);
+            else FrepSelection.SelectRoot(p.Doc, r, add: sessions > 0);
+        }
         Picked?.Invoke(p.Doc);
     }
 

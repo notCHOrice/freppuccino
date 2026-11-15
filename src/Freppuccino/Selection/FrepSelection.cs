@@ -136,6 +136,17 @@ public static class FrepSelection
         doc.Views.Redraw();
     }
 
+    public static void DeselectRoot(RhinoDoc doc, FrepOperand root)
+    {
+        if (root.IsNode)
+        {
+            UiController.SetSelectedNodes(doc, UiController.SelectedNodes(doc).Where(n => n != root.NodeId));
+            if (FrepCarriers.Find(doc, root.NodeId) is { } c) doc.Objects.Select(c.Id, false);
+        }
+        else doc.Objects.Select(root.ObjectId, false);
+        doc.Views.Redraw();
+    }
+
     /// Rhino only builds the gumball for selections made by its own picking; one made from code shows none until the
     /// gumball setting changes. Cycling it rebuilds the gumball without running a command (no echo), and leaves a
     /// gumball the user switched off switched off.
