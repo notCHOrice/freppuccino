@@ -62,6 +62,16 @@ Freppuccino is very easy to build.
 Run `dotnet build` from the root.
 To debug, use the `Rhino 9 + Freppuccino` launch profile in VSCode.
 
+## Yak package
+
+Run `powershell -ExecutionPolicy Bypass -File yak/build-yak.ps1` (or the `build yak` VS Code task).
+This builds Release, bundles the plugin, side panel UI and native shader libraries, and writes
+`artifacts/yak/freppuccino-<version>-rh9_0-any.yak`.
+
+- Install locally: drag the `.yak` onto Rhino 9, or run `"C:\Program Files\Rhino 9\System\Yak.exe" install artifacts\yak\<file>.yak`
+- Publish: `"C:\Program Files\Rhino 9\System\Yak.exe" login`, then `Yak.exe push artifacts\yak\<file>.yak` (try `--source https://test.yak.rhino3d.com` first)
+- Options: `-Platform win|mac|any` (default `any`), `-Version 0.2.0` (default: `<Version>` in Freppuccino.csproj), `-Yak <path to Yak.exe>`
+
 ---
 
 # Authors

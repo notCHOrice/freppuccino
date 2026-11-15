@@ -1,0 +1,26 @@
+name: Freppuccino
+version: $version
+authors:
+- Ben Howes
+- Callum Sykes
+- Dan Cascaval
+- Danniel Cho Valadao
+- Luke Gehron
+- Mathieu Huard
+- Sam Potter
+- Sergey Pigach
+description: >
+  Freppuccino makes implicit geometry (F-reps) available natively in Rhino.
+  Create F-rep primitives, blend them with smooth unions, subtractions and intersections,
+  edit them live with the gumball and mesh them with FrepMesh. Requires Rhino 9.
+url: "https://github.com/sampotter/freppuccino"
+icon: icon.png
+keywords:
+- freppuccino
+- frep
+- implicit
+- sdf
+- csg
+- blend
+- fillet
+- boolean
