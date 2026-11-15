@@ -40,6 +40,13 @@ public static class FrepFieldBuilder
                 nodeRef[n.Id] = FieldRef.Node(field.AddNode(FieldOp.Blend, n.K, [blended], m));
                 continue;
             }
+            if (n.Op == FrepOp.Offset)
+            {
+                // Surface shift of a boolean (main #28): K moves it out (positive) or in.
+                if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } shifted) continue;
+                nodeRef[n.Id] = FieldRef.Node(field.AddNode(FieldOp.Offset, n.K, [shifted], m));
+                continue;
+            }
             if (n.Op.IsWarp())
             {
                 if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;

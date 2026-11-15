@@ -24,12 +24,17 @@ export function Inspector(props: { selected: SceneNode[]; labels: Map<string, st
           <PrimitiveSection key={one.id} node={one} labels={labels} />
         ) : one.op === 'blend' ? (
           <BlendSection key={one.id} node={one} labels={labels} />
+        ) : one.op === 'offset' ? (
+          <OffsetSection key={one.id} node={one} labels={labels} />
         ) : isDeform(one.op) ? (
           <DeformSection key={one.id} node={one} labels={labels} />
         ) : (
           <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} />
         )}
-        <DeformButtons repeatId={one.op === 'repeat' ? one.id : undefined} />
+        <DeformButtons
+          repeatId={one.op === 'repeat' ? one.id : undefined}
+          offsetId={one.op === 'union' || one.op === 'subtract' || one.op === 'intersect' ? one.id : undefined}
+        />
       </>
     )
   const canCombine = selected.length === 2 && selected.every((n) => roots.has(n.id))
@@ -214,12 +219,12 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
 
 // ── ≥ 2 objects / nodes: new operation; or one operation node: edit it ──
 
-/** Split unwraps the node and leaves its children. Delete removes the node and everything under it. */
+/** Unwrap removes the node and leaves its children in its place. Delete removes the node and everything under it. */
 function NodeActions(props: { id: Id }) {
   return (
     <div className="flex gap-2">
       <Button variant="outline" className="flex-1" onClick={() => send({ type: 'deleteNodes', ids: [props.id] })}>
-        <Ungroup /> Split
+        <Ungroup /> Unwrap
       </Button>
       <Button variant="outline" className="flex-1" onClick={() => send({ type: 'deleteNodes', ids: [props.id], deep: true })}>
         <Trash2 /> Delete
@@ -488,9 +493,82 @@ function BlendSlider(props: { id: Id; k: number }) {
   )
 }
 
+/** Offset node above a union, intersection, or difference. Positive distance grows the solid. */
+function OffsetSection(props: { node: SceneNode; labels: Map<string, string> }) {
+  const { node, labels } = props
+  const child = node.children?.[0]
+  return (
+    <Section title={labels.get(node.id) ?? ''} badge="Offset" icon={<BrandIcon name="offset" className="size-6" />}>
+      {child && <Operand node={child} label={labels.get(child.id)} role="Child" />}
+      <OffsetSlider id={node.id} k={node.k ?? 0} />
+      <NodeActions id={node.id} />
+    </Section>
+  )
+}
+
+function OffsetSlider(props: { id: Id; k: number }) {
+  const units = useHost((s) => s.settings.units)
+  const [k, setK] = useState(props.k)
+  const [dragging, setDragging] = useState(false)
+  const [pending, setPending] = useState<number | null>(null)
+  if (!dragging && pending === null && k !== props.k) setK(props.k)
+  if (!dragging && pending !== null && Math.abs((props.k ?? 0) - pending) < 1e-6) setPending(null)
+
+  const live = useRef({ timer: 0, k: props.k, previewed: false })
+  const sendK = (value: number, preview: boolean) => {
+    setPending(value)
+    send({ type: 'setOperation', id: props.id, op: 'offset', k: value, preview })
+  }
+  const preview = (value: number) => {
+    const l = live.current
+    l.k = value
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      sendK(l.k, true)
+    }, PREVIEW_MS)
+  }
+  const commit = (value: number) => {
+    const l = live.current
+    clearTimeout(l.timer)
+    l.timer = 0
+    setDragging(false)
+    if (l.previewed || value !== props.k) sendK(value, false)
+    l.previewed = false
+  }
+  useEffect(() => {
+    const l = live.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed) send({ type: 'setOperation', id: props.id, op: 'offset', k: l.k })
+    }
+  }, [props.id])
+
+  return (
+    <ParamSlider
+      label="Offset"
+      units={units}
+      value={k}
+      min={-20}
+      max={20}
+      belowMin
+      onChange={(v) => {
+        setK(v)
+        setDragging(true)
+        preview(v)
+      }}
+      onCommit={(v) => {
+        setK(v)
+        commit(v)
+      }}
+    />
+  )
+}
+
 /** Runs FTwist / FBend / FRepeat on the selection (they then ask for the line / box).
- *  A Repeat also gets Blend, which inserts a blend node above that repeat. */
-function DeformButtons(props: { repeatId?: Id }) {
+ *  A Repeat also gets Blend. A union, intersection, or difference also gets Offset. */
+function DeformButtons(props: { repeatId?: Id; offsetId?: Id }) {
   return (
     <Section title="Deform">
       <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
@@ -499,6 +577,9 @@ function DeformButtons(props: { repeatId?: Id }) {
         ))}
         {props.repeatId && (
           <CommandTile label="Blend" icon="blend" onClick={() => send({ type: 'blendRepeat', id: props.repeatId! })} />
+        )}
+        {props.offsetId && (
+          <CommandTile label="Offset" icon="offset" onClick={() => send({ type: 'offsetNode', id: props.offsetId! })} />
         )}
       </div>
     </Section>

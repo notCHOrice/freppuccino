@@ -67,7 +67,7 @@ export function SceneTree(props: {
                 setMenu(null)
               }}
             >
-              <Ungroup className="size-3.5" /> Split
+              <Ungroup className="size-3.5" /> Unwrap
             </button>
           )}
           <button
@@ -145,7 +145,7 @@ function TreeRow(props: {
           {props.labels.get(node.id)}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
-          {node.kind === 'operation' && node.op && !isDeform(node.op) && !node.missing && (
+          {node.kind === 'operation' && node.op && !isDeform(node.op) && node.op !== 'offset' && !node.missing && (
             <BlendField id={node.id} op={node.op} k={node.k ?? 0} />
           )}
           {node.locked && <Lock className="size-3.5 text-muted-foreground" />}
