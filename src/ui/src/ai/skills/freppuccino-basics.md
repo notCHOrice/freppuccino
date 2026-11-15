@@ -21,6 +21,15 @@ always: true
 - Every primitive takes an optional color ("#RRGGBB" or a name). Give parts their real colors (a tan cone, red stripes);
   colors blend smoothly across blended joins. Uncolored parts render light grey.
 
+## Colors (set_color)
+- set_color recolors existing primitives without touching their shape: refs + color for one color, or
+  colors: [{ref, color}, ...] to paint many parts in one call (one undo step). A node ref paints every primitive under it.
+- update_primitive also takes color, but use set_color for color-only changes, especially several parts at once.
+- How colors combine: union / intersect fade between the operands' colors across the blend (k); subtract keeps the
+  target's color on the cut faces (the cutter's color never shows); deforms keep the child's colors.
+  So to color a cut surface (a cup's inside), color the target, or union a thin colored part inside it.
+- get_scene lists every primitive's color.
+
 ## Deforms (deform tool)
 - twist, bend and repeat wrap one finished part: spirals and swirls, coils, ropes, hooks and curved parts, arrays and
   patterns of identical features (studs, pickets, holes). Load the deformations skill before using them.

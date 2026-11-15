@@ -34,6 +34,7 @@ public static partial class AiTools
         "move" => Move(doc, args),
         "delete" => Delete(doc, args),
         "set_visible" => SetVisible(doc, args),
+        "set_color" => SetColors(doc, args),
         "clear_scene" => ClearScene(doc),
         "capture_views" => CaptureViews(doc, args),
         "create_function" => CreateFunction(doc, args),
@@ -66,7 +67,7 @@ public static partial class AiTools
                 ? AiShapes.ToSpec(p)
                 : new JsonObject { ["type"] = SdfUserText.ReadType(obj.Attributes), ["invalid"] = true };
             o.Insert(0, "ref", refs[obj.Id]);
-            if (obj.Attributes.ColorSource == ObjectColorSource.ColorFromObject) o["color"] = Hex(obj.Attributes.ObjectColor);
+            o["color"] = Hex(SdfUserText.ReadColorOrDefault(obj.Attributes)); // the shader color (white when unset)
             if (obj.IsHidden) o["visible"] = false;
             var used = UsedBy(FrepOperand.Object(obj.Id));
             if (used.Count > 0) o["used_by"] = used;
@@ -342,6 +343,47 @@ public static partial class AiTools
             FrepTrees.Set(doc, t, "AI: visibility");
         });
         return new JsonObject { ["ok"] = true };
+    }
+
+    /// Colors primitives without touching their shape. A node ref colors every primitive under it.
+    /// Either one "color" for all refs, or "colors": [{ "ref", "color" }, ...] for several colors in one undo step.
+    static JsonNode SetColors(RhinoDoc doc, JsonObject args)
+    {
+        var tree = FrepTrees.Get(doc);
+        var requests = new List<(string Ref, System.Drawing.Color Color)>();
+        if (args["colors"] is JsonArray list)
+        {
+            foreach (var item in list)
+            {
+                if (item is not JsonObject entry) throw new AiToolException("'colors' must contain { \"ref\", \"color\" } objects");
+                var color = AiShapes.Color(entry) ?? throw new AiToolException("every 'colors' entry needs a 'color'");
+                requests.Add((Str(entry, "ref"), color));
+            }
+        }
+        if (args.ContainsKey("refs"))
+        {
+            var color = AiShapes.Color(args) ?? throw new AiToolException("give 'color' with 'refs'");
+            requests.AddRange(Refs(args, "refs").Select(r => (r, color)));
+        }
+        if (requests.Count == 0) throw new AiToolException("give 'refs' + 'color', or 'colors': [{ \"ref\", \"color\" }, ...]");
+
+        // Resolve everything first so a bad ref changes nothing. Later entries win for a primitive listed twice.
+        var targets = new Dictionary<Guid, (RhinoObject Obj, System.Drawing.Color Color)>();
+        foreach (var (r, color) in requests)
+        {
+            var leaves = Leaves(doc, tree, Resolve(doc, tree, r)).ToList();
+            if (leaves.Count == 0) throw new AiToolException($"'{r}' has no primitives to color");
+            foreach (var obj in leaves) targets[obj.Id] = (obj, color);
+        }
+
+        Mutate(doc, "color", () =>
+        {
+            foreach (var (obj, color) in targets.Values) FrepPrimitives.SetColor(doc, obj, color);
+        });
+        var refs = RefNames(SdfObjects(doc).ToList());
+        var colored = new JsonObject();
+        foreach (var (obj, color) in targets.Values) colored[refs.GetValueOrDefault(obj.Id) ?? obj.Id.ToString("D")] = Hex(color);
+        return new JsonObject { ["colored"] = colored };
     }
 
     static JsonNode ClearScene(RhinoDoc doc)

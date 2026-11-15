@@ -56,6 +56,8 @@
     <EmbeddedResource Include="EmbeddedResources/**/*" />
     <!-- FFunction guide, single source for: external Claude Code (skill), the panel agent (src/ui/src/ai/skills.ts), AiTools help. -->
     <EmbeddedResource Include="$(MSBuildProjectDirectory)/../../.claude/skills/freppuccino-ffunction/SKILL.md" LogicalName="Freppuccino.ffunction.md" />
+    <None Include="EmbeddedResources/plugin-freppuccino.ico" Link="icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Freppuccino.rui" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- THROWAWAY hack kept for reference, not compiled -->

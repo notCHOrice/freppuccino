@@ -148,6 +148,18 @@ export function createMockHost(): Transport {
     sphere: 'sdSphere', box: 'sdBox', cylinder: 'sdCappedCylinder', cone: 'sdCappedCone',
     pyramid: 'sdPyramid', ellipsoid: 'sdEllipsoid', torus: 'sdTorus',
   }
+  /** "#RRGGBB" / "RRGGBB" / CSS color name → "#RRGGBB" (the browser parses names); undefined when absent or invalid. */
+  const mockColor = (raw: unknown): string | undefined => {
+    if (typeof raw !== 'string' || !raw.trim()) return undefined
+    const text = /^[0-9a-f]{6}$/i.test(raw.trim()) ? `#${raw.trim()}` : raw.trim()
+    const ctx = document.createElement('canvas').getContext('2d')
+    if (!ctx) return undefined
+    ctx.fillStyle = '#010203'
+    ctx.fillStyle = text // invalid values are ignored by the canvas
+    const out = String(ctx.fillStyle)
+    if (out === '#010203' && text.toLowerCase() !== '#010203') return undefined
+    return /^#[0-9a-f]{6}$/i.test(out) ? out.toUpperCase() : undefined
+  }
   const find = (ref: string) => {
     const node = flat(scene).find((x) => x.id === ref || x.name === ref)
     if (!node) throw new Error(`no object or node '${ref}'; call get_scene for current refs`)
@@ -159,7 +171,7 @@ export function createMockHost(): Transport {
         const all = flat(scene)
         return {
           units: 'Millimeters',
-          primitives: all.filter((x) => x.kind === 'primitive').map((x) => ({ ref: x.name ?? x.id, ...specs.get(x.id) })),
+          primitives: all.filter((x) => x.kind === 'primitive').map((x) => ({ ref: x.name ?? x.id, ...specs.get(x.id), color: x.color ?? '#FCFCFC' })),
           operations: all.filter((x) => x.kind === 'operation').map((x) => ({
             ref: x.id, op: x.op, k: x.k, operands: x.children?.map((c) => c.name ?? c.id),
           })),
@@ -171,17 +183,37 @@ export function createMockHost(): Transport {
         if (!SDF[type]) throw new Error(`unknown type '${type}'`)
         let name = String(args.name ?? type).replace(/\s+/g, '_')
         while (flat(scene).some((x) => x.name === name)) name += '_2'
-        const p = prim(SDF[type], {}, name)
-        const { name: _, ...spec } = args
+        const { name: _, color, ...spec } = args
+        const p = { ...prim(SDF[type], {}, name), color: mockColor(color) ?? '#FCFCFC' }
         specs.set(p.id, spec)
         scene = [...scene, p]
         return { ref: name, guid: p.id }
       }
       case 'update_primitive': {
         const p = find(String(args.ref))
-        const { ref: _, ...patch } = args
+        const { ref: _, color, ...patch } = args
         specs.set(p.id, { ...specs.get(p.id), ...patch })
-        return { ref: p.name, ...specs.get(p.id) }
+        const c = mockColor(color)
+        if (c) scene = map(scene, (x) => (x.id === p.id ? { ...x, color: c } : x))
+        return { ref: p.name, ...specs.get(p.id), ...(c ? { color: c } : {}) }
+      }
+      case 'set_color': {
+        const requests: [string, string][] = [
+          ...((args.colors as { ref: string; color: string }[] | undefined) ?? []).map((e): [string, string] => [e.ref, e.color]),
+          ...((args.refs as string[] | undefined) ?? []).map((r): [string, string] => [r, String(args.color ?? '')]),
+        ]
+        if (requests.length === 0) throw new Error('give refs + color, or colors: [{ ref, color }, ...]')
+        const colored: Record<string, string> = {}
+        for (const [ref, raw] of requests) {
+          const c = mockColor(raw)
+          if (!c) throw new Error(`'color' must be "#RRGGBB" or a color name (got "${raw}")`)
+          for (const leaf of flat([find(ref)]).filter((x) => x.kind === 'primitive')) {
+            scene = map(scene, (x) => (x.id === leaf.id ? { ...x, color: c } : x))
+            colored[leaf.name ?? leaf.id] = c
+          }
+        }
+        emit({ type: 'scene', scene })
+        return { colored }
       }
       case 'combine': {
         const operands = (args.operands as string[]).map(find)

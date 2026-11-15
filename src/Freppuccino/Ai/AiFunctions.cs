@@ -110,6 +110,7 @@ public static partial class AiTools
         ("move", "{item, to?, from?, index?} re-parent a primitive or node (no 'to' = make it a root)"),
         ("delete", "{refs, recursive?} delete primitives / nodes"),
         ("set_visible", "{refs, visible} show / hide"),
+        ("set_color", "{refs, color} | {colors: [{ref, color}]} shader color (SDF.Color); a node colors every primitive under it"),
         ("clear_scene", "{} delete every F-rep primitive and operation"),
         ("capture_views", "{views?, focus?, size?} screenshots (RunJson saves them as PNG files and returns their paths)"),
     ];
