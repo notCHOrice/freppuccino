@@ -155,8 +155,10 @@ public static class FrepPrimitives
         if (color is { } c) SetColor(attributes, c);
         WriteSdf(attributes, p, doc.ModelUnitSystem);
         var id = obj.Id;
-        if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
+        // Attributes before geometry: ModifyAttributes after Replace, with attributes duplicated from the pre-Replace
+        // object, silently drops some user-string edits (e.g. newly added SDF.Linear.*).
         if (!doc.Objects.ModifyAttributes(id, attributes, true)) throw new InvalidOperationException("couldn't update the object's SDF values");
+        if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
     }
 
     /// <summary>Object color + SDF.Color (what the viewport shader draws; blends mix them).</summary>
