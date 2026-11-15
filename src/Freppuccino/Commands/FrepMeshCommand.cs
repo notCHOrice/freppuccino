@@ -66,12 +66,39 @@ public class FrepMeshCommand : Command
         rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower, and it reshapes the surface slightly)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
 
+        var baked = Bake(doc, field, resolution, simplify, quads, "FrepMesh", out var error);
+        if (baked == null)
+        {
+            RhinoApp.WriteLine($"FrepMesh: {error}.");
+            return Result.Failure;
+        }
+
+        // The Freppuccino display mode draws the F-reps over unselected objects; selecting the mesh shows it.
+        doc.Objects.UnselectAll();
+        doc.Objects.Select(baked.Id);
+        doc.Views.Redraw();
+        RhinoApp.WriteLine(
+            $"FrepMesh: {built.Count} blend(s) -> {baked.Faces}, cell size {baked.CellSize:0.####} {doc.ModelUnitSystem}, " +
+            $"{baked.Quality}, {baked.Milliseconds} ms.");
+        return Result.Success;
+    }
+
+    public sealed record BakeResult(Guid Id, string Faces, int FaceCount, double CellSize, bool Closed, int BadEdges, int BadVertices, long Milliseconds)
+    {
+        public bool Manifold => BadEdges + BadVertices == 0;
+        public string Quality => $"{(Closed ? "closed" : "OPEN")}, " +
+            (Manifold ? "manifold" : $"NON-MANIFOLD ({BadEdges} bad edges, {BadVertices} pinched vertices; try a higher resolution)");
+    }
+
+    public static BakeResult? Bake(RhinoDoc doc, FrepField field, int resolution, double simplify, bool quads, string name, out string error)
+    {
+        error = "";
         var watch = Stopwatch.StartNew();
         var result = DualContour.Mesh(field, resolution, simplify);
         if (result.Triangles.Count == 0)
         {
-            RhinoApp.WriteLine("FrepMesh: the F-reps produced no surface at this resolution.");
-            return Result.Failure;
+            error = "the F-reps produced no surface at this resolution";
+            return null;
         }
 
         var mesh = new Mesh();
@@ -111,26 +138,16 @@ public class FrepMeshCommand : Command
         // vertices, which an edge-based test such as Mesh.IsManifold passes.
         bool closed = mesh.IsClosed;
         var (badEdges, badVertices) = Defects(mesh);
-        string quality = $"{(closed ? "closed" : "OPEN")}, " +
-            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
 
         var attributes = doc.CreateDefaultAttributes();
-        attributes.Name = "FrepMesh";
+        attributes.Name = name;
         var id = doc.Objects.AddMesh(mesh, attributes);
         if (id == Guid.Empty)
         {
-            RhinoApp.WriteLine("FrepMesh: unable to add the mesh to the document.");
-            return Result.Failure;
+            error = "unable to add the mesh to the document";
+            return null;
         }
-
-        // The Freppuccino display mode draws the F-reps over unselected objects; selecting the mesh shows it.
-        doc.Objects.UnselectAll();
-        doc.Objects.Select(id);
-        doc.Views.Redraw();
-        RhinoApp.WriteLine(
-            $"FrepMesh: {built.Count} blend(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
-            $"{quality}, {watch.ElapsedMilliseconds} ms.");
-        return Result.Success;
+        return new BakeResult(id, faces, mesh.Faces.Count, result.CellSize, closed, badEdges, badVertices, watch.ElapsedMilliseconds);
     }
 
     /// Click blends (an F-rep selection session: the picker acts during this prompt, adding each clicked root); Enter ends.

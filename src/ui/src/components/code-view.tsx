@@ -1,4 +1,4 @@
-import { Check, CircleAlert, CircleCheck, Copy, Maximize2, Minimize2 } from 'lucide-react'
+import { Check, CircleAlert, CircleCheck, Copy, Maximize2, Minimize2, SquarePen } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -12,7 +12,7 @@ const COLLAPSED_PX = 240
  * Read-only FFunction source: line gutter, lines with diagnostics tinted red (hover for the message),
  * then the diagnostics list (click one to scroll to its line) or "Compiles OK" + hash.
  */
-export function CodeView(props: { fn: UserFnInfo }) {
+export function CodeView(props: { fn: UserFnInfo; onEdit?: () => void }) {
   const { fn } = props
   const lines = fn.code.replace(/\r\n?/g, '\n').split('\n')
   const byLine = new Map<number, string[]>()
@@ -44,6 +44,11 @@ export function CodeView(props: { fn: UserFnInfo }) {
     <div className="grid gap-2">
       <div className="flex items-center gap-1">
         <span className="type-label min-w-0 flex-1 truncate text-muted-foreground">Code</span>
+        {props.onEdit && (
+          <Button variant="outline" size="xs" title="Edit in the Script tab" onClick={props.onEdit}>
+            <SquarePen /> Edit
+          </Button>
+        )}
         <Button variant="ghost" size="icon-xs" aria-label="Copy code" title="Copy" onClick={copy}>
           {copied ? <Check /> : <Copy />}
         </Button>

@@ -42,17 +42,56 @@ src/Freppuccino/Ai/
 src/Freppuccino/Scene/FrepPrimitives.cs   SdPrimitive → SDF.* user text + proxy Brep, add / replace in the doc
 ```
 
-Tools: `get_scene`, `create_primitive`, `update_primitive`, `transform`, `combine`, `deform`, `edit_operation`, `delete`,
-`set_color`, `set_visible`, `clear_scene`, `capture_views`, `load_skill`. Objects are addressed by name (unique names are enforced), GUID, or node
-name (`N3`).
+Tools: `get_scene`, `create_primitive`, `update_primitive`, `transform`, `combine`, `deform`, `edit_operation`, `add_operand`,
+`remove_operand`, `move`, `delete`, `wrap`, `unwrap`, `set_color`, `set_visible`, `select`, `clear_scene`, `capture_views`, `mesh`,
+`set_zebra`, the FFunction tools below, `load_skill` and `get_function_example` (the last two run in the panel, not in Rhino).
+Objects are addressed by name (unique names are enforced), GUID, or node name (`N3`). `get_scene` also reports the user's
+selection, so "make this taller" works.
+
+## Coverage: app features vs. AI tools
+
+Every feature a user can reach in Rhino or the panel, and how the agent reaches it. Keep this table current when adding a
+command or a panel action.
+
+| Feature | User (command / panel) | AI tool |
+|---|---|---|
+| Primitives: box, sphere, cylinder, cone, pyramid, ellipsoid, torus | `FBox` … `FTorus`, Create tiles | `create_primitive`, `update_primitive` |
+| Primitive parameters, color, visibility | inspector sliders / color / eye | `update_primitive`, `set_color`, `set_visible` |
+| Move / rotate / scale | gumball | `transform` |
+| FFunction (user SDF code) | `FFunction`, Create tile, **Script tab** | `create_function`, `set_function_code`, `get_function`, `check_function_code` |
+| FFunction params, Lipschitz | inspector / Script tab sliders | `set_function_params` |
+| FFunction example library (`examples/ffunction/`) | Script tab → Examples | `get_function_example` |
+| Union / subtract / intersect + blend k | `FUnion` `FDifference` `FIntersect`, Combine section | `combine`, `edit_operation` |
+| Restructure the tree | (AI only; users re-run the CSG commands) | `add_operand`, `remove_operand`, `move` |
+| Twist / bend / repeat | `FTwist` `FBend` `FRepeat`, Deform tiles | `deform`, `edit_operation` |
+| Blend a repeat's copies | Deform → Blend | `wrap op=blend`, `edit_operation k` |
+| Offset a CSG node (signed) | Deform → Offset | `wrap op=offset`, `edit_operation k` (may be negative) |
+| Unwrap a node / delete a subtree | Unwrap / Delete buttons | `unwrap` / `delete recursive` |
+| Selection | click in viewport / browser | read: `get_scene.selection`; write: `select` |
+| Bake to mesh | `FrepMesh` | `mesh` |
+| Zebra analysis | `FZebra` / `FZebraOff` | `set_zebra` (stripes show in `capture_views`) |
+| Look at the result | viewport | `capture_views` (offscreen, Freppuccino shading) |
+| Freppuccino display mode | `Freppuccino` | not needed: captures render in their own hidden mode |
+
+Not exposed on purpose: arbitrary Rhino commands (the panel whitelist stays a whitelist) and the zebra colors.
+
+Script tab (side panel): an editor for FFunction code. It follows the selection (one selected function = edit it, Ctrl+Enter
+applies with `set_function_code`), otherwise it makes a new function (box size, Lipschitz, name; Create = `create_function`,
+Y-up box on the ground at the origin). It compiles as you type (`check_function_code`), lists diagnostics (click → line),
+loads examples, and hands the code plus diagnostics to the AI tab ("Ask" / "Fix"). It calls the same tools as the agent,
+through `aiTool` with `source: "script"`, so its edits are labelled "Script: …" in Undo instead of "AI: …".
 
 Colors: the AI writes `SDF.Color`, the same per-primitive shader color as the inspector's color picker (not the Rhino object
 color). `create_primitive` / `update_primitive` take a `color`; `set_color` recolors without changing shape, either
 `refs` + `color` or `colors: [{ref, color}, …]` for many parts in one undo step, and a node ref colors every primitive under it.
 `get_scene` reports each primitive's color. Colors are `"#RRGGBB"` or a CSS / .NET name.
 
-FFunctions (user SDF code in a clip box): `create_function`, `set_function_code`, `get_function`, `set_function_params`
-(`Ai/AiFunctions.cs`); `help` returns the FFunction guide + tool list. The guide is one file,
+FFunctions (user SDF code in a clip box): `create_function`, `set_function_code`, `get_function`, `set_function_params`,
+`check_function_code` (`Ai/AiFunctions.cs`); `help` returns the FFunction guide + tool list. `get_function_example` serves
+`examples/ffunction/*.glsl` (bundled into the UI by `src/ui/src/lib/examples.ts`, which also holds each example's clip box and
+Lipschitz scale: add a row there when adding an example). The `lattices` panel skill has TPMS / infill recipes.
+`wrap`, `unwrap`, `select`, `mesh`, `set_zebra` live in `Ai/AiSceneTools.cs`; `mesh` calls `FrepMeshCommand.Bake`, the
+command's own mesher without its prompts. The guide is one file,
 `.claude/skills/freppuccino-ffunction/SKILL.md`: a Claude Code skill for external sessions (which call
 `Freppuccino.Ai.AiTools.RunJson(tool, json)` through Rhino MCP `run_csharp`), a panel skill (skills.ts also globs
 `.claude/skills/freppuccino-*/SKILL.md`), and the embedded resource `help` returns.

@@ -8,7 +8,14 @@ import { isImageFile, MAX_ATTACHMENTS, readImageFile, type Attachment } from '@/
 import { useHost } from '@/bridge/host'
 import { cn } from '@/lib/utils'
 
-const SUGGESTIONS = ['Make a coffee cup', 'Make a rubber duck', 'Make a chess pawn', 'Make a simple table']
+const SUGGESTIONS = [
+  'Make a coffee cup',
+  'Make a rubber duck',
+  'Make a chess pawn',
+  'Make a gyroid-filled sphere, cut open',
+  'Make a vase with a Schwarz P lattice wall',
+  'Show me the Scherk tower example',
+]
 
 /** AI tab: chat with the modeling agent (src/ai/agent.ts). */
 export function AiPanel() {

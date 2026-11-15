@@ -166,7 +166,7 @@ public sealed record SetNodeParamRequest(string Id, string Name, double Value, b
 public sealed record DeleteNodesRequest(string[] Ids, bool Deep = false);
 
 /// AI agent tool call (Ai/AiTools.cs); answered with an AiToolResultMessage carrying the same CallId.
-public sealed record AiToolRequest(string CallId, string Tool, JsonElement? Args = null);
+public sealed record AiToolRequest(string CallId, string Tool, JsonElement? Args = null, string? Source = null);
 
 /// Saves a finished AI run for review (Ai/AiRunLog.cs). Images: { name: "01-perspective.png", dataUrl }.
 public sealed record AiSaveRunRequest(string Title, JsonElement Transcript, AiImage[]? Images = null);

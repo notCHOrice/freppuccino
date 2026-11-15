@@ -12,7 +12,12 @@ import type { AllowedCommand, DeformKind, Id, OperationKind, SceneNode } from '@
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
-export function Inspector(props: { selected: SceneNode[]; labels: Map<string, string>; roots: Set<string> }) {
+export function Inspector(props: {
+  selected: SceneNode[]
+  labels: Map<string, string>
+  roots: Set<string>
+  onEditCode?: (id: Id) => void
+}) {
   const { labels, roots } = props
   const selected = props.selected.filter((n) => !n.missing)
   if (selected.length === 0) return <CreateSection />
@@ -21,7 +26,7 @@ export function Inspector(props: { selected: SceneNode[]; labels: Map<string, st
     return (
       <>
         {one.kind === 'primitive' ? (
-          <PrimitiveSection key={one.id} node={one} labels={labels} />
+          <PrimitiveSection key={one.id} node={one} labels={labels} onEditCode={props.onEditCode} />
         ) : one.op === 'blend' ? (
           <BlendSection key={one.id} node={one} labels={labels} />
         ) : one.op === 'offset' ? (
@@ -75,7 +80,12 @@ function CreateSection() {
 
 // ── One primitive: its SDF parameters ──
 
-function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> }) {
+export function PrimitiveSection(props: {
+  node: SceneNode
+  labels: Map<string, string>
+  hideCode?: boolean
+  onEditCode?: (id: Id) => void
+}) {
   const { node } = props
   const units = useHost((s) => s.settings.units)
   const notice = useHost((s) => s.notice)
@@ -169,7 +179,9 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
       <ColorField label="Color" value={node.color ?? '#FCFCFC'} onChange={previewColor} onCommit={commitColor} />
       {fn && (
         <>
-          <CodeView fn={fn} />
+          {!props.hideCode && (
+            <CodeView fn={fn} onEdit={props.onEditCode ? () => props.onEditCode!(node.id) : undefined} />
+          )}
           {fn.params.map((p) => {
             const r = userParamRange(p.default)
             return (

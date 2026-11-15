@@ -64,3 +64,12 @@ always: true
 - Keep it to roughly 40 primitives or fewer: the viewport shader has a budget (get_scene warns when it is full) and
   every primitive costs render time.
 - Create several primitives per turn with parallel tool calls. Capture after a meaningful stage, not after every primitive.
+
+## Beyond primitives
+- FFunctions (create_function): your own SDF code in a box, for what primitives can't do: lattices, gyroids / TPMS,
+  foams, minimal surfaces, ribs, textures. Load freppuccino-ffunction (and lattices for lattice work); start from
+  get_function_example. They combine, deform and color like any primitive.
+- wrap op=offset on a union / subtract / intersect node shifts its whole surface (negative = thinner); wrap op=blend
+  on a repeat node fillets its copies together. unwrap removes a node and keeps its children.
+- The user's selection is in get_scene ("selection"). End by selecting the finished part (select) so they can tweak it.
+- mesh bakes roots into a Rhino mesh, only when asked. set_zebra checks blend smoothness in captures.
