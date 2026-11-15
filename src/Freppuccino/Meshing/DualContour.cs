@@ -175,11 +175,15 @@ public static class DualContour
         /// Fine cells built for a refined base cell without deep cells, reused by later builds (same samples, same result).
         public readonly ConcurrentDictionary<int, (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad)> FineCellCache = new();
 
-        /// Estimated bytes held by FineCellCache (16 per cell entry, 160 per point entry), charged in the closures' budget
-        /// checks; a build counts the entries it uses through its own cell count instead.
+        /// Estimated bytes held by FineCellCache, charged in the closures' budget checks (a build counts the entries it
+        /// uses through its own cell count instead): each list's allocated capacity times its element's actual size,
+        /// plus 256 bytes per entry for the dictionary node, the two list objects and their array headers (a
+        /// conservative allowance; an empty entry still holds them).
         public long FineCacheBytes;
         public static long CacheBytes((List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad) e) =>
-            (long)e.Cells.Count * 16 + (long)e.Points.Count * 160;
+            256 + (long)e.Cells.Capacity * CellEntrySize + (long)e.Points.Capacity * PointEntrySize;
+        static readonly long CellEntrySize = System.Runtime.CompilerServices.Unsafe.SizeOf<(long, int, int)>();
+        static readonly long PointEntrySize = System.Runtime.CompilerServices.Unsafe.SizeOf<(V3, Qef, V3?, V3, bool, double, long, bool, bool)>();
 
         /// Base cells already accepted as interface cells by Close (see InterfaceOk); kept across closures.
         public readonly HashSet<int> InterfaceAccepted = [];
