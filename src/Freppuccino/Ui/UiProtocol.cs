@@ -40,6 +40,8 @@ public static class OperationKind
     public const string Repeat = "repeat";
     /// One child, a Repeat. K fillets every copy (0 = sharp). Not a combine op.
     public const string Blend = "blend";
+    /// One child, a union, intersection, or difference. K shifts the surface (positive grows). Not a combine op.
+    public const string Offset = "offset";
 }
 
 /// <summary>
@@ -149,6 +151,9 @@ public sealed record ApplyOperationRequest(string[] Operands, string Op, double 
 
 /// Insert a blend node (k = 0) directly above a Repeat. Its slider fillets the copies.
 public sealed record BlendRepeatRequest(string Id);
+
+/// Insert an offset node (k = 0) directly above a union, intersection, or difference.
+public sealed record OffsetNodeRequest(string Id);
 
 /// Edit an existing operation node. Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
 public sealed record SetOperationRequest(string Id, string Op, double K, bool Preview = false);

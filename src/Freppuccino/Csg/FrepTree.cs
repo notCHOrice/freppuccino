@@ -8,9 +8,10 @@ namespace Freppuccino.Csg;
 
 /// Union/Intersect/Difference: CSG over ≥ 1 operand (created with ≥ 2; operand edits may leave 1 = pass-through), blend K.
 /// Blend: one child (a Repeat); K fillets its copies.
+/// Offset: one child, a union, intersection, or difference; K moves its surface out (positive) or in.
 /// Twist/Bend/Repeat: domain warps of one operand, shaped by a referenced Rhino object
 /// (<see cref="FrepNode.Ref"/>: line for Twist/Bend, box for Repeat) + <see cref="FrepNode.Params"/>.
-public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5, Blend = 6 }
+public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5, Blend = 6, Offset = 7 }
 
 public static class FrepOps
 {
@@ -40,7 +41,8 @@ public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
 /// Difference: Operands[0] − Operands[1..]. K = smooth blend distance (model units, 0 = hard).
 /// Hidden: dropped like a hidden primitive (a missing leaf for its parents; not drawn as a root).
 /// Warps: Operands = [child], Ref = line/box object, Params per <see cref="FrepOps.ParamNames"/>.
-/// Blend uses K as the fillet between a Repeat's copies (0 = hard). Warps ignore K.
+/// Blend uses K as the fillet between a Repeat's copies (0 = hard). Offset uses K as the surface shift
+/// (positive grows). Warps ignore K.
 public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false,
     Guid Ref = default, ImmutableArray<double> Params = default)
 {
@@ -83,15 +85,18 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
     }
 
     /// Blend node directly above <paramref name="repeatId"/>. Parents that used the repeat now use the blend.
-    public (FrepTree Tree, FrepNode Node) BlendOver(int repeatId)
+    public (FrepTree Tree, FrepNode Node) BlendOver(int repeatId) => WrapOver(FrepOp.Blend, 0, repeatId);
+
+    /// Node of <paramref name="op"/> directly above <paramref name="childId"/>. Parents that used the child now use it.
+    public (FrepTree Tree, FrepNode Node) WrapOver(FrepOp op, double k, int childId)
     {
-        var (tree, blend) = Add(FrepOp.Blend, 0, [FrepOperand.Node(repeatId)]);
+        var (tree, node) = Add(op, k, [FrepOperand.Node(childId)]);
         var nodes = tree.Nodes.Select(n =>
         {
-            if (n.Id == blend.Id || !n.Operands.Any(o => o.IsNode && o.NodeId == repeatId)) return n;
-            return n with { Operands = [.. n.Operands.Select(o => o.IsNode && o.NodeId == repeatId ? FrepOperand.Node(blend.Id) : o)] };
+            if (n.Id == node.Id || !n.Operands.Any(o => o.IsNode && o.NodeId == childId)) return n;
+            return n with { Operands = [.. n.Operands.Select(o => o.IsNode && o.NodeId == childId ? FrepOperand.Node(node.Id) : o)] };
         }).ToImmutableList();
-        return (tree with { Nodes = nodes }, blend);
+        return ((tree with { Nodes = nodes }).Sorted(), node);
     }
 
     public FrepTree WithParam(int id, int index, double value) => Edit(id, n =>

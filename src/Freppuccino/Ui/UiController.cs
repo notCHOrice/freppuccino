@@ -239,6 +239,7 @@ public sealed class UiController : IDisposable
         FrepOp.Bend => OperationKind.Bend,
         FrepOp.Repeat => OperationKind.Repeat,
         FrepOp.Blend => OperationKind.Blend,
+        FrepOp.Offset => OperationKind.Offset,
         _ => throw new ArgumentOutOfRangeException(nameof(op)),
     };
 
@@ -419,6 +420,9 @@ public sealed class UiController : IDisposable
                     break;
                 case "blendRepeat":
                     BlendRepeat(doc, Parse<BlendRepeatRequest>(message));
+                    break;
+                case "offsetNode":
+                    OffsetNode(doc, Parse<OffsetNodeRequest>(message));
                     break;
                 case "setOperation":
                     SetOperation(doc, Parse<SetOperationRequest>(message));
@@ -673,10 +677,29 @@ public sealed class UiController : IDisposable
         doc.Views.Redraw();
     }
 
+    static void OffsetNode(RhinoDoc doc, OffsetNodeRequest request)
+    {
+        var tree = FrepTrees.Get(doc);
+        if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node) return;
+        if (node.Op is not (FrepOp.Union or FrepOp.Intersect or FrepOp.Difference)) return;
+        var (next, offset) = tree.WrapOver(FrepOp.Offset, 0, id);
+        FrepTrees.Set(doc, next, "Offset");
+        doc.Objects.UnselectAll();
+        SelectNode(doc, offset.Id);
+        doc.Views.Redraw();
+    }
+
     static void SetOperation(RhinoDoc doc, SetOperationRequest request)
     {
         var tree = FrepTrees.Get(doc);
         if (!TryNode(tree, request.Id, out var id) || tree.Find(id) is not { } node) return;
+        if (node.Op == FrepOp.Offset)
+        {
+            if (request.Op != OperationKind.Offset || !double.IsFinite(request.K)) return;
+            if (node.K != request.K) FrepTrees.Preview(doc, tree.WithK(id, request.K), $"Edit {node.Name}");
+            if (!request.Preview) FrepTrees.Commit(doc);
+            return;
+        }
         var k = Math.Max(0, request.K);
         if (node.Op == FrepOp.Blend)
         {
