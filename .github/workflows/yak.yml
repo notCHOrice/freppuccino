@@ -24,7 +24,9 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Test
         run: dotnet test tests/UserFn.Tests/UserFn.Tests.csproj -c Release
@@ -75,15 +77,15 @@ jobs:
 
       - name: Build Yak package
         shell: pwsh
-        run: ./yak/build-yak.ps1 -Platform any -Version '${{ steps.version.outputs.version }}' -Yak $env:YAK_EXE
+        run: ./yak/build-yak.ps1 -Version '${{ steps.version.outputs.version }}' -Yak $env:YAK_EXE
 
       - name: Package name
         id: package
         shell: pwsh
         run: |
-          $package = Get-ChildItem artifacts/yak -Filter *.yak | Select-Object -First 1
-          if (-not $package) { throw 'No .yak package produced.' }
-          "name=$($package.Name)" >> $env:GITHUB_OUTPUT
+          $packages = @(Get-ChildItem artifacts/yak -Filter *.yak)
+          if ($packages.Count -ne 2) { throw "Expected 2 .yak packages (Rhino 9 and Rhino 8), got $($packages.Count)." }
+          "name=freppuccino-${{ steps.version.outputs.version }}-yak" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:

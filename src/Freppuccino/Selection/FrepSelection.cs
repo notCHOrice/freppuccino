@@ -157,9 +157,15 @@ public static class FrepSelection
     /// gumball the user switched off switched off.
     public static void RefreshGumball()
     {
+#if RHINO9
         if (!Rhino.ApplicationSettings.GumballSettings.EnableGumball) return;
         Rhino.ApplicationSettings.GumballSettings.EnableGumball = false;
         Rhino.ApplicationSettings.GumballSettings.EnableGumball = true;
+#else
+        if (!Rhino.ApplicationSettings.ModelAidSettings.AutoGumballEnabled) return;
+        Rhino.ApplicationSettings.ModelAidSettings.AutoGumballEnabled = false;
+        Rhino.ApplicationSettings.ModelAidSettings.AutoGumballEnabled = true;
+#endif
     }
 
     public static void SelectLeaf(RhinoDoc doc, FrepInstance leaf, bool add)

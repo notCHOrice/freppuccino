@@ -50,7 +50,7 @@ Implicit geometry is a geometry type that is made parametrically using functions
 | A | The objects MUST be F-reps, regular boxes are not compatible (yet). |
 | | |
 | Q | The yak does not work for me? |
-| A | This project only works for Rhino 9 or newer |
+| A | Freppuccino needs Rhino 9 (Windows or Mac) or Rhino 8.19+ (Windows). Rhino 7 and Rhino 8 for Mac are not supported. |
 | | |
 | Q | `The duck`? It haunts my nightmares and scares my cat! |
 | A | Our research suggests that `The duck` does not exist, and as such, should be ignored. |
@@ -66,11 +66,12 @@ To debug, use the `Rhino 9 + Freppuccino` launch profile in VSCode.
 ## Yak package
 
 Run `powershell -ExecutionPolicy Bypass -File yak/build-yak.ps1` (or the `build yak` VS Code task).
-This builds Release, bundles the plugin, side panel UI and native shader libraries, and writes
-`artifacts/yak/freppuccino-<version>-rh9_0-any.yak`.
+This builds Release for Rhino 9 and Rhino 8, bundles the plugin, side panel UI and native shader libraries, and writes
+`artifacts/yak/freppuccino-<version>-rh9_0-any.yak` (Rhino 9, Windows + Mac) and `artifacts/yak/freppuccino-<version>-rh8_19-win.yak` (Rhino 8.19+, Windows).
+Push both for a release; Rhino's Package Manager installs the right one. Pass `-Rhino 9` or `-Rhino 8` to build only one.
 
 - Install locally: drag the `.yak` onto Rhino 9, or run `"C:\Program Files\Rhino 9\System\Yak.exe" install artifacts\yak\<file>.yak`
-- Options: `-Platform win|mac|any` (default `any`), `-Version 0.2.0` (default: `<Version>` in Freppuccino.csproj), `-Yak <path to Yak.exe>`
+- Options: `-Platform win|mac|any` (default: `any` for Rhino 9, `win` for Rhino 8), `-Version 0.2.0` (default: `<Version>` in Freppuccino.csproj), `-Yak <path to Yak.exe>`
 - Private repository: `-Repo \\server\share\rhino-packages` copies the `.yak` into that folder and runs `yak cache`. Add the folder to `Rhino.Options.PackageManager.Sources` (Options → Advanced), separated from `https://yak.rhino3d.com` by `;`.
 - Package metadata (authors, description, keywords, icon) lives in `yak/manifest.yml` and `yak/icon.png`.
 
@@ -79,12 +80,12 @@ This builds Release, bundles the plugin, side panel UI and native shader librari
 `.github/workflows/yak.yml` runs on every push to `main`, every pull request, on `v*` tags, and manually (Actions → Yak → Run workflow).
 CI never pushes to the Yak server and needs no secrets.
 
-- Every run: unit tests + a `.yak` build, uploaded as a workflow artifact (version `<csproj Version>-ci.<run number>`).
-- Tag `v1.2.3` (or `v1.2.3-beta.1`): also creates a GitHub Release with the `.yak` attached.
+- Every run: unit tests + both `.yak` builds (Rhino 9 and Rhino 8), uploaded as one workflow artifact (version `<csproj Version>-ci.<run number>`).
+- Tag `v1.2.3` (or `v1.2.3-beta.1`): also creates a GitHub Release with both `.yak` files attached.
 
 Releasing: bump `<Version>` in `Freppuccino.csproj`, then `git tag v0.2.0 && git push origin v0.2.0`.
-Publishing to the Rhino Package Manager is done by hand: download the `.yak` from the release,
-run `"C:\Program Files\Rhino 9\System\Yak.exe" login`, then `Yak.exe push <file>.yak`
+Publishing to the Rhino Package Manager is done by hand: download both `.yak` files from the release,
+run `"C:\Program Files\Rhino 9\System\Yak.exe" login`, then `Yak.exe push <file>.yak` for each
 (try `--source https://test.yak.rhino3d.com` first).
 
 ---

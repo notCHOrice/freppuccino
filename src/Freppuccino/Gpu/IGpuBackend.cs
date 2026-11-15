@@ -21,17 +21,25 @@ public interface IGpuBackend : IDisposable
 
 public static class GpuBackends
 {
-    static IGpuBackend? metal, d3d11;
+    static IGpuBackend? metal, d3d11, gl;
 
+#if RHINO9
     public static IGpuBackend? For(DisplayPipeline p) => p.Technology switch
     {
         DisplayTechnology.Metal => metal ??= new Metal.MetalBackend(),
         DisplayTechnology.Direct3d11 => d3d11 ??= new D3D11.D3D11Backend(),
+        DisplayTechnology.OpenGL when OperatingSystem.IsWindows() => gl ??= new OpenGL.GlBackend(),
         _ => null,
     };
+#else
+    public static IGpuBackend? For(DisplayPipeline p) =>
+        OperatingSystem.IsMacOS() ? metal ??= new Metal.MetalBackend()
+        : OperatingSystem.IsWindows() && p.IsOpenGL ? gl ??= new OpenGL.GlBackend()
+        : null;
+#endif
 
     /// Build error of <paramref name="program"/> on whichever backend exists (null: builds, or nothing has drawn yet).
-    public static string? CompileError(ShaderSource program) => metal?.Compile(program) ?? d3d11?.Compile(program);
+    public static string? CompileError(ShaderSource program) => metal?.Compile(program) ?? d3d11?.Compile(program) ?? gl?.Compile(program);
 
-    public static void DisposeAll() { metal?.Dispose(); d3d11?.Dispose(); metal = d3d11 = null; }
+    public static void DisposeAll() { metal?.Dispose(); d3d11?.Dispose(); gl?.Dispose(); metal = d3d11 = gl = null; }
 }
