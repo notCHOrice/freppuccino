@@ -54,6 +54,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="EmbeddedResources/**/*" />
+    <None Include="EmbeddedResources/plugin-freppuccino.ico" Link="icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Freppuccino.rui" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- THROWAWAY hack kept for reference, not compiled -->
