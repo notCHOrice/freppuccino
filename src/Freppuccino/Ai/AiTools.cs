@@ -36,6 +36,11 @@ public static partial class AiTools
         "set_visible" => SetVisible(doc, args),
         "clear_scene" => ClearScene(doc),
         "capture_views" => CaptureViews(doc, args),
+        "create_function" => CreateFunction(doc, args),
+        "set_function_code" => SetFunctionCode(doc, args),
+        "get_function" => GetFunction(doc, args),
+        "set_function_params" => SetFunctionParams(doc, args),
+        "help" => Help(args),
         _ => throw new AiToolException($"unknown tool '{tool}'"),
     };
 
@@ -98,8 +103,15 @@ public static partial class AiTools
             ["roots"] = new JsonArray([.. roots]),
         };
         if (bbox.IsValid) result["bounding_box"] = new JsonObject { ["min"] = AiShapes.Json(bbox.Min), ["max"] = AiShapes.Json(bbox.Max) };
-        if (FrepScene.Get(doc).Dropped is > 0 and var dropped)
-            result["warning"] = $"{dropped} primitives are not drawn: the viewport shader is full. Use fewer primitives.";
+        var drawn = FrepScene.Get(doc);
+        var warnings = new List<string>();
+        if (drawn.Dropped is > 0 and var dropped)
+            warnings.Add($"{dropped} primitives are not drawn: the viewport shader is full. Use fewer primitives.");
+        if (drawn.FailedFunctions > 0)
+            warnings.Add($"{drawn.FailedFunctions} functions are not drawn: their code has errors (ok: false; see get_function).");
+        if (Display.ShaderConduit.LastError != null)
+            warnings.Add("the viewport shader failed to compile (get_function shows shader_error); the last working version is shown, if any.");
+        if (warnings.Count > 0) result["warning"] = string.Join(" ", warnings);
         return result;
     }
 
@@ -108,6 +120,7 @@ public static partial class AiTools
     static JsonNode Create(RhinoDoc doc, JsonObject args)
     {
         var type = Str(args, "type").ToLowerInvariant();
+        if (type == "function") return CreateFunction(doc, args);
         var prim = AiShapes.FromSpec(type, args);
         var name = UniqueName(doc, args["name"]?.GetValue<string>() ?? type);
         var color = AiShapes.Color(args);
@@ -127,6 +140,7 @@ public static partial class AiTools
         foreach (var (key, value) in args)
             if (key is not ("ref" or "name" or "type" or "color")) spec[key] = value?.DeepClone();
         var prim = AiShapes.FromSpec(type, spec);
+        if (current.Kind == SdKind.User) prim = prim with { Fn = current.Fn }; // code / params / L: set_function_code / _params
 
         string? newName = null;
         if (args["name"]?.GetValue<string>() is { } requested && requested != obj.Attributes.Name)

@@ -19,6 +19,14 @@ public sealed class ShaderConduit : DisplayConduit
     const int TitleClearance = 28;
     bool loggedFailure, loggedCap;
 
+    /// Last scene shader compile error (shaderc / MSL / HLSL text), or null once the current scene program draws.
+    /// Read by the panel and the AI tools (get_function). Draws keep the last good program meanwhile (see PostDrawObjects).
+    public static string? LastError { get; private set; }
+    /// Hash of the program LastError belongs to.
+    public static string? LastErrorHash { get; private set; }
+    // Per doc (RuntimeSerialNumber): last scene program that drew.
+    static readonly Dictionary<uint, ShaderSource> lastGood = [];
+
     protected override void PostDrawObjects(DrawEventArgs e)
     {
         var dp = e.Display;
@@ -36,7 +44,7 @@ public sealed class ShaderConduit : DisplayConduit
                 loggedCap = true;
             }
             if (scene.Program != null)
-                drew |= gpu.Draw(dp, scene.Program, FrepShaderGen.SceneUniforms(dp.Viewport, scene));
+                drew |= DrawScene(gpu, dp, e.RhinoDoc, scene);
 
             if (!AiCapture.Active) // AI screenshots: just the model
             {
@@ -51,6 +59,26 @@ public sealed class ShaderConduit : DisplayConduit
             if (!loggedFailure) RhinoApp.WriteLine("Freppuccino: " + ex);
             loggedFailure = true;
         }
+    }
+
+    /// Draws the scene program. If it failed to compile, draws the doc's last good program instead, but only when it reads
+    /// the uniforms the same way (same Layout: e.g. FFunction code edited, param count unchanged); else nothing. The error
+    /// stays in LastError either way; failed programs are not retried (backend cache).
+    static bool DrawScene(IGpuBackend gpu, DisplayPipeline dp, RhinoDoc doc, FrepSceneData scene)
+    {
+        var program = scene.Program!;
+        var uniforms = FrepShaderGen.SceneUniforms(dp.Viewport, scene);
+        if (gpu.Draw(dp, program, uniforms))
+        {
+            lastGood[doc.RuntimeSerialNumber] = program;
+            LastError = LastErrorHash = null;
+            return true;
+        }
+        if (gpu.CompileError(program) is not { } error) return false; // e.g. a pass we can't draw in
+        LastError = error;
+        LastErrorHash = program.Hash;
+        return lastGood.TryGetValue(doc.RuntimeSerialNumber, out var good) && good.Hash != program.Hash &&
+               good.Layout.Length > 0 && good.Layout == program.Layout && gpu.Draw(dp, good, uniforms);
     }
 
     protected override void DrawForeground(DrawEventArgs e)

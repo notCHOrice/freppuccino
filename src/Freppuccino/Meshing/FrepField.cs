@@ -1,3 +1,5 @@
+using Freppuccino.UserFn;
+
 namespace Freppuccino.Meshing;
 
 /// Minimal double-precision vector for the meshing core, which deliberately has no Rhino dependency
@@ -19,8 +21,11 @@ public readonly record struct V4(double X, double Y, double Z, double W)
     public V3 Xyz => new(X, Y, Z);
 }
 
-/// Same kinds and parameter packing as Scene.SdKind / SdPrimitive.P.
-public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
+/// Same kinds and parameter packing as Scene.SdKind / SdPrimitive.P. User: P = clip box half-extents (see AddUser).
+public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid, User }
+
+/// FFunction data for <see cref="FieldKind.User"/>: field = max(Eval(q, U) / L, box(q, b)).
+public sealed record UserField(UserFnEval Eval, double[] U, double L);
 
 /// Twist/Bend/Repeat: domain warps of one operand (see <see cref="FrepField.AddWarp"/>).
 public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat }
@@ -46,7 +51,7 @@ public readonly record struct FieldRef(bool IsNode, int Index)
 public sealed class FrepField
 {
     // X, Y, Z are the canonical-to-world columns (bounds). Ix, Iy, Iz are the rows of the inverse (the dots in PrimValue).
-    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, double Lip, V3 Ix, V3 Iy, V3 Iz);
+    readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, double Lip, V3 Ix, V3 Iy, V3 Iz, UserField? Fn = null);
     // Rows: warp params (null for CSG).
     readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null);
 
@@ -65,14 +70,22 @@ public sealed class FrepField
     /// <paramref name="x"/>, <paramref name="y"/>, <paramref name="z"/> are the columns of the canonical-to-world map
     /// (the frame axes when the primitive is rigid). <paramref name="lip"/> is σ_min of that map: the local distance is
     /// multiplied by it so the field stays Lipschitz 1 in world space.
-    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V3? z = null, double lip = 1)
+    public int AddPrimitive(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V3? z = null, double lip = 1) =>
+        Add(kind, origin, x, y, p, z, lip, null);
+
+    /// FFunction: like a box (<paramref name="half"/> = clip box half-extents), value max(fn(q) / L, box(q)) in the local frame.
+    public int AddUser(V3 origin, V3 x, V3 y, V3 half, UserField fn, V3? z = null, double lip = 1) =>
+        Add(FieldKind.User, origin, x, y, half, z, lip, fn);
+
+    int Add(FieldKind kind, V3 origin, V3 x, V3 y, V3 p, V3? z, double lip, UserField? fn)
     {
+        if (kind == FieldKind.User && fn == null) throw new ArgumentNullException(nameof(fn), "User primitives need AddUser");
         var zz = z ?? V3.Cross(x, y);
         if (!InverseRows(x, y, zz, out var ix, out var iy, out var iz))
         {
             ix = x; iy = y; iz = zz;
         }
-        prims.Add(new Prim(kind, origin, x, y, zz, p, lip, ix, iy, iz));
+        prims.Add(new Prim(kind, origin, x, y, zz, p, lip, ix, iy, iz, fn));
         return prims.Count - 1;
     }
 
@@ -312,6 +325,7 @@ public sealed class FrepField
             FieldKind.Cone => Cone(x, y, z, s.P),
             FieldKind.Ellipsoid => Ellipsoid(x, y, z, s.P),
             FieldKind.Pyramid => Pyramid(x, y, z, s.P),
+            FieldKind.User => Math.Max(s.Fn!.Eval(x, y, z, s.Fn.U) / s.Fn.L, Box(x, y, z, s.P)), // same as the shader's max(f/L, sdBox)
             _ => throw new ArgumentOutOfRangeException(nameof(s)),
         };
         // σ_min(A). Ellipsoid already folds its own scale in; its lip is 1.
@@ -559,7 +573,9 @@ public sealed class FrepField
         switch (s.Kind)
         {
             case FieldKind.Sphere: hi = new V3(s.P.X + grow, s.P.X + grow, s.P.X + grow); lo = hi * -1; break;
-            case FieldKind.Box: hi = new V3(s.P.X + grow, s.P.Y + grow, s.P.Z + grow); lo = hi * -1; break;
+            case FieldKind.Box:
+            case FieldKind.User: // clipped by its box: max(f, box) <= t needs box <= t
+                hi = new V3(s.P.X + grow, s.P.Y + grow, s.P.Z + grow); lo = hi * -1; break;
             case FieldKind.Torus: hi = new V3(s.P.X + s.P.Y + grow, s.P.Y + grow, s.P.X + s.P.Y + grow); lo = hi * -1; break;
             case FieldKind.Cylinder: hi = new V3(s.P.Y + grow, s.P.X + grow, s.P.Y + grow); lo = hi * -1; break;
             case FieldKind.Cone:
