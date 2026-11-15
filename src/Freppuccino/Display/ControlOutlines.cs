@@ -24,6 +24,9 @@ public static class ControlOutlines
     readonly record struct Key(Guid Obj, uint Serial, string Rel, bool Persp, Point3d Eye, Vector3d Dir);
     static readonly Dictionary<Key, Curve[]> cache = [];
 
+    /// Diagnostics: the placement (relative to the real brep) each instance outline was last drawn with.
+    public static readonly Dictionary<(Guid Obj, FrepOperand Root, string Path), Transform> LastDrawn = [];
+
     public static bool IsControl(RhinoObject? o) => o != null && SdfUserText.ReadType(o.Attributes) != null;
 
     /// For DisplayConduit.PreDrawObject: hide control breps in Freppuccino-mode views.
@@ -38,16 +41,19 @@ public static class ControlOutlines
         var vp = dp.Viewport;
         var color = selected ? Rhino.ApplicationSettings.AppearanceSettings.SelectedObjectColor : Unselected;
         int thickness = selected ? 2 : 1;
-        var (roots, instances) = FrepSelection.Structure(doc);
+        // Base instance transforms from the committed tree: FrepScene.Get's tree already carries a dragged root's preview
+        // matrix, and the real brep still sits at its committed primary placement. Each preview is applied once below.
+        var scene = Scene.FrepScene.Get(doc);
+        var (roots, instances) = FrepInstances.Compute(Csg.FrepTrees.Get(doc), scene.Ids);
         var rootSet = roots.ToHashSet();
         var selectedLeaves = FrepSelection.Leaves(doc);
 
-        // Distinct (object, T) per object; the first is the primary instance (the real brep's placement).
+        // Per object, every instance (per root; already deduplicated within a root); the first is the primary instance.
         var byObject = new Dictionary<Guid, List<FrepInstance>>();
         foreach (var i in instances)
         {
             if (!byObject.TryGetValue(i.Object, out var list)) byObject[i.Object] = list = [];
-            if (!list.Any(x => FrepInstances.Same(x.T, i.T))) list.Add(i);
+            list.Add(i);
         }
 
         // Drags in progress, with the same precedence as the field preview (FrepScene.Get) and the commit: a dragged root
@@ -84,7 +90,7 @@ public static class ControlOutlines
                 // Selected: a standalone shape whose brep is selected, or this exact instance among the selected leaves
                 // (picked through its path, or through its own instance carrier).
                 bool isSel = (objSelected && rootSet.Contains(FrepOperand.Object(o.Id))) ||
-                    selectedLeaves.Any(l => l.Object == o.Id && FrepInstances.Same(l.T, inst.T));
+                    selectedLeaves.Any(l => l.SamePath(inst)); // by path: its T may carry a drag preview
                 if (isSel != selected) continue;
                 // The real brep B sits at the primary instance (B = T_p c); this instance shows T_inst c, previewed:
                 Transform eff;
@@ -93,6 +99,7 @@ public static class ControlOutlines
                 else if (instDrag.TryGetValue(o.Id, out var q)) eff = inst.T * q * primaryInv;
                 else if (leafDrag.TryGetValue(o.Id, out var lx)) eff = inst.T * primaryInv * lx;
                 else eff = inst.T * primaryInv;
+                LastDrawn[(o.Id, inst.Root, string.Join(",", inst.Path))] = eff;
                 Draw(dp, o, Placement.IsIdentity(eff, 1e-12) ? null : eff, vp, doc, color, thickness);
             }
         }
