@@ -42,6 +42,14 @@ public static class SdfUserText
     public const string LinearYKey = Prefix + "Linear.Y";
     public const string LinearZKey = Prefix + "Linear.Z";
 
+    /// <summary>FFunction (SDF.Type = sdUser): GLSL-subset source, see UserFn/.</summary>
+    public const string UserType = "sdUser";
+    public const string CodeKey = Prefix + "Code";
+    /// <summary>FFunction Lipschitz scale: field = f / L. Missing = 1.</summary>
+    public const string LipschitzKey = Prefix + "L";
+    /// <summary>FFunction param values: SDF.u.&lt;name&gt;. Missing = the param's declared default.</summary>
+    public const string UserParamPrefix = Prefix + "u.";
+
     /// <summary>Per-object display color "#RRGGBB" the viewport shader uses. Set from the Freppuccino panel.</summary>
     public const string ColorKey = Prefix + "Color";
 

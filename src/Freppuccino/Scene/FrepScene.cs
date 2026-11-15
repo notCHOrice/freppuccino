@@ -9,7 +9,7 @@ using Rhino.Geometry;
 namespace Freppuccino.Scene;
 
 /// Primitive kinds the viewport shader can draw.
-public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
+public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid, User }
 
 /// One F-rep primitive: local frame (as written in SDF.Frame.*) + up to three IQ parameters packed in P.
 ///   Sphere    P.X = s (radius)
@@ -19,11 +19,14 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
 ///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
+///   User      P = b (half-extents of the clip box, like Box); code/params/L in Fn. Field = max(f(q)/L, sdBox(q, b)).
 /// Basis, when set, is the canonical-to-world map (SDF.Linear.*). The frame axes stay the parameter frame;
 /// the parameters are not pre-scaled by that map.
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 {
     public SdfBasis? Basis { get; init; }
+    /// Kind == User only.
+    public Freppuccino.UserFn.UserFnInstance? Fn { get; init; }
 }
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
