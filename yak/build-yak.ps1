@@ -2,7 +2,8 @@ param(
     [ValidateSet('any', 'win', 'mac')]
     [string]$Platform = 'any',
     [string]$Version,
-    [string]$Yak
+    [string]$Yak,
+    [string]$Repo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,3 +62,19 @@ finally {
 
 $package = Get-ChildItem -LiteralPath $artifacts -Filter *.yak | Select-Object -First 1
 Write-Host "Built $($package.FullName)"
+
+if ($Repo) {
+    if (-not (Test-Path -LiteralPath $Repo)) { New-Item -ItemType Directory -Path $Repo | Out-Null }
+    $target = Join-Path $Repo $package.Name
+    if (Test-Path -LiteralPath $target) { throw "$($package.Name) already exists in $Repo. Bump <Version> in Freppuccino.csproj or pass -Version." }
+    Copy-Item -LiteralPath $package.FullName -Destination $target
+    Push-Location $Repo
+    try {
+        & $Yak cache
+        if ($LASTEXITCODE -ne 0) { throw 'yak cache failed.' }
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Host "Published $($package.Name) to $Repo"
+}
