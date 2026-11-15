@@ -200,6 +200,13 @@ public static class DualContour
 
         readonly ConcurrentDictionary<(int, int, int), bool> centres = new();
 
+        /// Bytes charged per cached face centre in the memory budget. Measured about 61 retained bytes per entry
+        /// including dictionary growth (sol, #339); charged at twice that.
+        public const long CentreBytes = 128;
+
+        /// Bytes the face-centre cache is charged in the budget now.
+        public long CentreMemory => centres.Count * CentreBytes;
+
         /// Inside test at a point given in doubled finest-lattice coordinates (so face centres are integers). One
         /// formula and one cache for every caller, so every consumer of a face decides it the same way. A value of
         /// exactly 0 counts as outside, as at the samples.
@@ -541,7 +548,7 @@ public static class DualContour
             }
             // Sample every block not yet sampled.
             var missing = refined.Concat(near).Where(c => !g.Blocks.ContainsKey(c)).ToList();
-            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 > MemoryBudget)
+            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 + g.CentreMemory > MemoryBudget)
                 return false;
             Parallel.ForEach(missing, cell =>
             {
@@ -713,7 +720,7 @@ public static class DualContour
                         }
                 cellsOf[n] = (cells, points, bad);
                 long total = Interlocked.Add(ref made, cells.Count);
-                if (total > FineCellBudget || blockBytes + total * 400 > MemoryBudget)
+                if (total > FineCellBudget || blockBytes + total * 400 + g.CentreMemory > MemoryBudget)
                 {
                     overBudget = true;
                     state.Stop();
