@@ -78,19 +78,6 @@ public static class FrepScene
 
     public static void MarkDirty() => dirty = true;
 
-    /// Node ids in a node's subtree (itself included).
-    static IEnumerable<int> SubtreeNodes(FrepTree tree, int id)
-    {
-        var seen = new HashSet<int>();
-        var stack = new Stack<int>([id]);
-        while (stack.Count > 0)
-        {
-            var cur = stack.Pop();
-            if (!seen.Add(cur) || tree.Find(cur) is not { } n) continue;
-            foreach (var o in n.Operands) if (o.IsNode) stack.Push(o.NodeId);
-        }
-        return seen;
-    }
     static void Dirty(object? sender, RhinoObjectEventArgs e) => dirty = true;
 
     public static FrepSceneData Get(RhinoDoc doc)
@@ -110,12 +97,25 @@ public static class FrepScene
             movingRoots.Add(id);
         }
         var underMoving = new HashSet<Guid>();
-        var warpsUnderMoving = new HashSet<int>();
-        if (movingRoots.Count > 0)
+        var refsUnderMoving = new HashSet<Guid>();
+        // Instance carriers under a drag: the leaf previews Q = T_inst⁻¹ X T_inst (unless a moving root carries it),
+        // taking precedence over the leaf's own drag, as at commit.
+        var instanceDrag = new Dictionary<Guid, Transform>();
+        var anyCarrierDrag = movingRoots.Count > 0 || doc.Objects.GetSelectedObjects(false, false).Any(o => o is Selection.FrepCarrier);
+        if (anyCarrierDrag)
         {
-            foreach (var inst in Selection.FrepInstances.Compute(tree, scene.Ids).Instances)
+            var (allRoots, instances) = Selection.FrepInstances.Compute(tree, scene.Ids);
+            foreach (var inst in instances)
                 if (inst.Root.IsNode && movingRoots.Contains(inst.Root.NodeId)) underMoving.Add(inst.Object);
-            foreach (var id in movingRoots) warpsUnderMoving.UnionWith(SubtreeNodes(tree, id));
+            // References follow their owning root (first in instance order), exactly like the commit (sol #170).
+            foreach (var (refId, owner) in Selection.FrepCarriers.ReferenceOwners(tree, allRoots))
+                if (movingRoots.Contains(owner.NodeId)) refsUnderMoving.Add(refId);
+            foreach (var o in doc.Objects.GetSelectedObjects(false, false))
+            {
+                if (Selection.FrepCarriers.InstanceOf(o, instances) is not { } inst || underMoving.Contains(inst.Object)) continue;
+                if (!o.GetDynamicTransform(out var dx) || dx.IsIdentity || !inst.T.TryGetInverse(out var tiv)) continue;
+                instanceDrag[inst.Object] = tiv * dx * inst.T;
+            }
         }
 
         List<SdPrimitive>? prims = null;
@@ -123,6 +123,16 @@ public static class FrepScene
         for (int i = 0; i < owners.Count; i++)
         {
             if (underMoving.Contains(owners[i].Id)) continue;
+            if (instanceDrag.TryGetValue(owners[i].Id, out var q))
+            {
+                if (TryTransform(scene.Primitives[i], q, out var viaInstance))
+                {
+                    prims ??= [.. scene.Primitives];
+                    prims[i] = viaInstance;
+                    reshaped |= viaInstance.Kind != scene.Primitives[i].Kind;
+                }
+                continue;
+            }
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
             // Under transformed roots the leaf sits at T × canonical: the drag is T⁻¹ X T on its values.
             if (Selection.FrepSelection.InstanceOf(doc, owners[i].Id, tree, scene.Ids) is { } inst && !inst.T.IsIdentity && inst.T.TryGetInverse(out var ti))
@@ -136,7 +146,7 @@ public static class FrepScene
         List<SdWarp>? warps = null;
         for (int i = 0; i < warpOwners.Count; i++)
         {
-            if (warpsUnderMoving.Contains(scene.WarpIds[i])) continue;
+            if (refsUnderMoving.Contains(warpOwners[i].Id)) continue;
             if (!warpOwners[i].GetDynamicTransform(out var world) || world.IsIdentity) continue;
             // The drag moves the real object (A × canonical); in canonical space that is A⁻¹ × drag × A.
             var a = warpApplied[i];

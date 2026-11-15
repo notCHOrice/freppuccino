@@ -33,6 +33,7 @@ public static class FrepCarriers
     public const string Key = "FREP.Carrier";
     static bool dirty = true, saving;
     static readonly HashSet<int> reselect = [];
+    static readonly HashSet<string> reselectInstances = [];
 
     public static void Install()
     {
@@ -55,7 +56,10 @@ public static class FrepCarriers
         {
             saving = true;
             // Selected roots get their (rebuilt) carriers selected again after the save.
-            reselect.UnionWith(e.Document.Objects.GetSelectedObjects(false, false).Select(NodeOf).OfType<int>());
+            var selected = e.Document.Objects.GetSelectedObjects(false, false).ToList();
+            reselect.UnionWith(selected.Select(NodeOf).OfType<int>());
+            // Selected instance carriers too: the logical leaf/path, rebuilt and reselected after the save.
+            reselectInstances.UnionWith(selected.Select(o => InstanceOf(e.Document, o) is { } i ? Encode(i) : null).OfType<string>());
             RemoveAll(e.Document);
         };
         RhinoDoc.EndSaveDocument += (_, _) =>
@@ -84,6 +88,21 @@ public static class FrepCarriers
     {
         if (o is not FrepCarrier || o.Attributes.GetUserString(InstanceKey) is not { } tag) return null;
         return FrepSelection.Structure(doc).Instances.FirstOrDefault(i => Encode(i) == tag);
+    }
+
+    /// Same, from a given structure (FrepScene itself must not call back into FrepScene.Get).
+    public static FrepInstance? InstanceOf(RhinoObject? o, IReadOnlyList<FrepInstance> instances) =>
+        o is FrepCarrier && o.Attributes.GetUserString(InstanceKey) is { } tag ? instances.FirstOrDefault(i => Encode(i) == tag) : null;
+
+    /// Owner of each warp reference object: the first root (in instance order) whose subtree uses it. The commit moves
+    /// a reference (and composes its A) only when its owner moves; the drag preview follows the same rule.
+    public static Dictionary<Guid, FrepOperand> ReferenceOwners(FrepTree tree, IReadOnlyList<FrepOperand> roots)
+    {
+        var owner = new Dictionary<Guid, FrepOperand>();
+        foreach (var r in roots.Where(r => r.IsNode))
+            foreach (var n in Subtree(tree, r.NodeId))
+                if (n.Op.IsWarp() && n.Ref != Guid.Empty) owner.TryAdd(n.Ref, r);
+        return owner;
     }
 
     /// The instance's transform relative to the real brep (which stands for the primary instance): T_inst × T_primary⁻¹.
@@ -141,11 +160,15 @@ public static class FrepCarriers
         try
         {
             SyncCore(doc);
-            if (reselect.Count > 0)
+            if (reselect.Count > 0 || reselectInstances.Count > 0)
             {
                 foreach (var id in reselect)
                     if (Find(doc, id) is { } c) c.Select(true, true);
                 reselect.Clear();
+                var instances = FrepSelection.Structure(doc).Instances;
+                foreach (var tag in reselectInstances)
+                    if (instances.FirstOrDefault(i => Encode(i) == tag) is { } inst && EnsureInstance(doc, inst) is { } ic) ic.Select(true, true);
+                reselectInstances.Clear();
                 FrepSelection.RefreshGumball();
                 doc.Views.Redraw();
             }
@@ -254,8 +277,16 @@ public static class FrepCarriers
     public static HashSet<Guid> OnBeforeTransform(RhinoDoc doc, RhinoObject[] objects, Transform x, bool copy)
     {
         var skip = new HashSet<Guid>();
-        if (!copy) TransformInstances(doc, objects, x, skip);
         var carriers = objects.Where(o => o is FrepCarrier && NodeOf(o) != null).ToList();
+        // Root precedence first: a leaf reachable from any root moved here gets no edit of its own, not even through an
+        // instance carrier (the roots' M carry the change).
+        if (!copy)
+        {
+            var movingRoots = carriers.Select(c => NodeOf(c)!.Value).ToHashSet();
+            var reachable = movingRoots.Count == 0 ? [] : FrepSelection.Structure(doc).Instances
+                .Where(i => i.Root.IsNode && movingRoots.Contains(i.Root.NodeId)).Select(i => i.Object).ToHashSet();
+            TransformInstances(doc, objects, x, skip, reachable);
+        }
         if (carriers.Count == 0) return skip;
         if (copy)
         {
@@ -301,11 +332,7 @@ public static class FrepCarriers
 
         // Warp reference objects, once each, owned by the first root (in instance order) whose subtree uses them.
         var (allRoots, _) = FrepInstances.Compute(tree, scene.Ids);
-        var owner = new Dictionary<Guid, FrepOperand>();
-        foreach (var r in allRoots.Where(r => r.IsNode))
-            foreach (var n in Subtree(tree, r.NodeId))
-                if (n.Op.IsWarp() && n.Ref != Guid.Empty) owner.TryAdd(n.Ref, r);
-        foreach (var (refId, root) in owner)
+        foreach (var (refId, root) in ReferenceOwners(tree, allRoots))
         {
             if (!moved.Contains(root) || doc.Objects.FindId(refId) is not { } r) continue;
             var a = r.Attributes.Duplicate();
@@ -324,11 +351,14 @@ public static class FrepCarriers
     /// Instance carriers in the transform: the leaf is edited through that instance, Q = T_inst⁻¹ X T_inst on its canonical
     /// values (the per-type handlers / SDF.Linear), and its real brep — the primary instance — is re-placed as
     /// T_p Q T_p⁻¹. Both in the running command's undo record. The leaf itself, if also selected, is left to this path.
-    static void TransformInstances(RhinoDoc doc, RhinoObject[] objects, Transform x, HashSet<Guid> skip)
+    static void TransformInstances(RhinoDoc doc, RhinoObject[] objects, Transform x, HashSet<Guid> skip, HashSet<Guid> reachable)
     {
+        var moving = objects.Select(o => o.Id).ToHashSet();
         foreach (var c in objects)
         {
             if (InstanceOf(doc, c) is not { } inst || doc.Objects.FindId(inst.Object) is not { } leaf) continue;
+            if (reachable.Contains(inst.Object)) continue; // a moved root carries it (root precedence)
+            if (!skip.Add(leaf.Id)) continue;              // once per leaf
             var primary = FrepSelection.Structure(doc).Instances.FirstOrDefault(i => i.Object == inst.Object);
             if (primary == null || !inst.T.TryGetInverse(out var ti) || !primary.T.TryGetInverse(out var pi)) continue;
             var q = ti * x * inst.T;
@@ -339,9 +369,17 @@ public static class FrepCarriers
                 continue;
             }
             doc.Objects.ModifyAttributes(leaf, a, true);
-            var g = leaf.Geometry.Duplicate();
-            if (g.Transform(primary.T * q * pi)) doc.Objects.Replace(leaf.Id, g, true);
-            skip.Add(leaf.Id);
+            var place = primary.T * q * pi; // the real brep's new place
+            if (moving.Contains(leaf.Id))
+            {
+                // Rhino is about to move the selected brep by X itself: correct it afterwards to `place`.
+                if (x.TryGetInverse(out var xi)) restore.Add((doc.RuntimeSerialNumber, leaf.Id, place * xi));
+            }
+            else
+            {
+                var g = leaf.Geometry.Duplicate();
+                if (g.Transform(place)) doc.Objects.Replace(leaf.Id, g, true);
+            }
         }
     }
 

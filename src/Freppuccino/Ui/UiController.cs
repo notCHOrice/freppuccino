@@ -300,10 +300,14 @@ public sealed class UiController : IDisposable
     {
         // Leaves selected only so the gumball can sit on a node's geometry stay out of the panel selection.
         var gumball = NodeLeaves(doc);
-        return doc.Objects.GetSelectedObjects(false, false)
+        var selected = doc.Objects.GetSelectedObjects(false, false).ToList();
+        return selected
             .Where(o => SdfUserText.ReadType(o.Attributes) != null && !gumball.Contains(o.Id))
             .Select(o => ObjectKey(o.Id))
+            // A shared shape picked through another blend's copy is selected via its instance carrier: its row too.
+            .Concat(selected.Select(o => Selection.FrepCarriers.InstanceOf(doc, o)).OfType<Selection.FrepInstance>().Select(i => ObjectKey(i.Object)))
             .Concat(selectedNodes.GetValueOrDefault(doc.RuntimeSerialNumber, []).Select(NodeKey))
+            .Distinct()
             .ToList();
     }
 
