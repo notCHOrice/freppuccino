@@ -311,11 +311,12 @@ export const TOOLS: ToolDef[] = [
   tool(
     'mesh',
     'Bakes F-rep roots into a Rhino mesh (the FrepMesh command): the F-reps stay. Only when the user asks for a mesh / export. ' +
-      'Returns the mesh id, face count, closed and manifold flags (not manifold: raise resolution).',
+      'Returns the mesh id, face count, closed / manifold flags and self_intersections (not manifold: raise resolution; self-intersections: raise refine).',
     {
       refs: refs('root refs to bake (default: every visible root)'),
       resolution: { type: 'integer', description: 'cells along the longest side, 16–384 (default 128; 256 for fine lattices)' },
       simplify: { type: 'number', description: 'simplification tolerance in cells, 0–1 (default 0.03; 0 = uniform)' },
+      refine: { type: 'integer', description: 'extra levels for thin features and sharp creases, 0–3 (default 0; raise it when self_intersections > 0 or thin walls break)' },
       quads: { type: 'boolean', description: "remesh to quads with Rhino's QuadRemesh (slower)" },
       name: { type: 'string', description: 'Rhino object name (default "FrepMesh")' },
     },

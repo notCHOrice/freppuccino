@@ -28,6 +28,14 @@ This project is for industrial designers, aerospace, boolean and fillet aficiona
 - Commands to create F-rep objects
 
 
+# Distribution
+- Shipped as a Yak package for Rhino 9 (`rh9_0-any`, Windows + Mac)
+  - `yak/build-yak.ps1` builds Release and packages the plugin, side panel UI and shaderc / SPIRV-Cross native libraries
+  - `yak/manifest.yml` holds the package metadata: every contributor, description, keywords, `yak/icon.png`
+  - New contributors must be added to both `yak/manifest.yml` and the README Authors list
+- CI (`.github/workflows/yak.yml`) runs tests and builds the `.yak` on every push / PR, and attaches it to a GitHub Release on `v*` tags
+- CI does NOT publish to the Yak server and holds no Yak token; pushing to the Package Manager is a manual `yak push`
+
 # Glossary
 
 - F-rep -> Function-REPresentation

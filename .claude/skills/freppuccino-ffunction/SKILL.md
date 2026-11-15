@@ -68,7 +68,7 @@ to see F-reps.
 - Tree edits: `combine`, `add_operand {node, operand, index?}`, `remove_operand {node, operand}`,
   `move {item, to?, from?, index?}` (no `to` = make it a root), `deform`, `wrap {op: offset|blend, target, k?}`,
   `unwrap {refs}`, `transform`, `delete`.
-- Also: `select {refs?, mode?}`, `mesh {refs?, resolution?, simplify?, quads?, name?}` (FrepMesh without prompts),
+- Also: `select {refs?, mode?}`, `mesh {refs?, resolution?, simplify?, refine?, quads?, name?}` (FrepMesh without prompts),
   `set_zebra {on, stripes?, vertical?}`.
 - `help {topic?}`: this guide + the tool list (`topic: "tools"`: only the list).
 

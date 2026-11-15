@@ -109,6 +109,7 @@ public static partial class AiTools
             ? (int)Math.Clamp(Math.Round(AiShapes.Number(args, "resolution")), FrepMeshCommand.MinResolution, FrepMeshCommand.MaxResolution)
             : 128;
         var simplify = args.ContainsKey("simplify") ? Math.Clamp(AiShapes.Number(args, "simplify"), 0, 1) : 0.03;
+        var refine = args.ContainsKey("refine") ? (int)Math.Clamp(Math.Round(AiShapes.Number(args, "refine")), 0, 3) : 0;
         var quads = args["quads"] is JsonValue q && q.TryGetValue<bool>(out var b) && b;
         var name = args["name"] is JsonValue n && n.TryGetValue<string>(out var given) && given.Length > 0 ? given : "FrepMesh";
 
@@ -116,7 +117,7 @@ public static partial class AiTools
         if (!field.HasRoots) throw new AiToolException("nothing to mesh: the roots are hidden or cancelled out by the CSG tree");
         FrepMeshCommand.BakeResult? baked = null;
         var error = "";
-        Mutate(doc, $"mesh {name}", () => baked = FrepMeshCommand.Bake(doc, field, resolution, simplify, quads, name, out error));
+        Mutate(doc, $"mesh {name}", () => baked = FrepMeshCommand.Bake(doc, field, resolution, simplify, refine, quads, name, out error));
         if (baked == null) throw new AiToolException(error);
         return new JsonObject
         {
@@ -128,6 +129,8 @@ public static partial class AiTools
             ["cell_size"] = AiShapes.Round(baked.CellSize),
             ["closed"] = baked.Closed,
             ["manifold"] = baked.Manifold,
+            ["self_intersections"] = baked.Crossings,
+            ["quality"] = baked.Quality,
             ["ms"] = baked.Milliseconds,
             ["note"] = "A plain Rhino mesh next to the F-reps (which stay). capture_views shows only F-reps, so it is not in screenshots.",
         };

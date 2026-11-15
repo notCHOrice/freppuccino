@@ -132,7 +132,7 @@ public static partial class AiTools
         ("clear_scene", "{} delete every F-rep primitive and operation"),
         ("capture_views", "{views?, focus?, size?} screenshots (RunJson saves them as PNG files and returns their paths)"),
         ("select", "{refs?, mode?: replace|add|toggle} select in Rhino + the panel (no refs = clear); get_scene reports the selection"),
-        ("mesh", "{refs?, resolution?, simplify?, quads?, name?} bake roots (default: all) to a Rhino mesh, like FrepMesh"),
+        ("mesh", "{refs?, resolution?, simplify?, refine?, quads?, name?} bake roots (default: all) to a Rhino mesh, like FrepMesh"),
         ("set_zebra", "{on, stripes?, vertical?} zebra stripes on union surfaces (blend continuity check), like FZebra"),
     ];
 

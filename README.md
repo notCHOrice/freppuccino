@@ -62,6 +62,29 @@ Freppuccino is very easy to build.
 Run `dotnet build` from the root.
 To debug, use the `Rhino 9 + Freppuccino` launch profile in VSCode.
 
+## Yak package
+
+Run `powershell -ExecutionPolicy Bypass -File yak/build-yak.ps1` (or the `build yak` VS Code task).
+This builds Release, bundles the plugin, side panel UI and native shader libraries, and writes
+`artifacts/yak/freppuccino-<version>-rh9_0-any.yak`.
+
+- Install locally: drag the `.yak` onto Rhino 9, or run `"C:\Program Files\Rhino 9\System\Yak.exe" install artifacts\yak\<file>.yak`
+- Options: `-Platform win|mac|any` (default `any`), `-Version 0.2.0` (default: `<Version>` in Freppuccino.csproj), `-Yak <path to Yak.exe>`
+- Package metadata (authors, description, keywords, icon) lives in `yak/manifest.yml` and `yak/icon.png`.
+
+## CI/CD
+
+`.github/workflows/yak.yml` runs on every push to `main`, every pull request, on `v*` tags, and manually (Actions → Yak → Run workflow).
+CI never pushes to the Yak server and needs no secrets.
+
+- Every run: unit tests + a `.yak` build, uploaded as a workflow artifact (version `<csproj Version>-ci.<run number>`).
+- Tag `v1.2.3` (or `v1.2.3-beta.1`): also creates a GitHub Release with the `.yak` attached.
+
+Releasing: bump `<Version>` in `Freppuccino.csproj`, then `git tag v0.2.0 && git push origin v0.2.0`.
+Publishing to the Rhino Package Manager is done by hand: download the `.yak` from the release,
+run `"C:\Program Files\Rhino 9\System\Yak.exe" login`, then `Yak.exe push <file>.yak`
+(try `--source https://test.yak.rhino3d.com` first).
+
 ---
 
 # Authors
