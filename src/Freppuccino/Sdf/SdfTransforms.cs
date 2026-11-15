@@ -187,8 +187,14 @@ public static class SdfTransforms
         // Leaf placement P (Scene.Placement): once P is set, the transform composes into it and the SDF values stay put
         // (feeding it to the handler would compose in the wrong space). Otherwise the handler first; whatever it can't
         // represent (shear, non-uniform scale off the frame axes) becomes P instead of being rejected.
-        if (Scene.Placement.TryReadLeaf(attributes, out var place))
-            return TryPlace(attributes, xform * place, out reason);
+        switch (Scene.Placement.ReadLeaf(attributes, out var place))
+        {
+            case Scene.Placement.Stored.Valid:
+                return TryPlace(attributes, xform * place, out reason);
+            case Scene.Placement.Stored.Invalid:
+                reason = "unreadable or degenerate " + Scene.Placement.LeafKey;
+                return false;
+        }
         var trial = attributes.Duplicate();
         if (handler(trial, xform, out reason))
         {

@@ -272,12 +272,16 @@ public static class FrepScene
     static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
     {
         if (!TryReadValues(a, out prim)) return false;
-        if (Placement.TryReadLeaf(a, out var place))
+        switch (Placement.ReadLeaf(a, out var place))
         {
-            if (!Placement.TryRows(place, out _)) return false; // singular: degenerate like a zero radius
-            prim = prim with { Place = place };
+            case Placement.Stored.Valid:
+                prim = prim with { Place = place };
+                return true;
+            case Placement.Stored.Invalid:
+                return false; // degenerate, like a zero radius; never silently unplaced
+            default:
+                return true;
         }
-        return true;
     }
 
     static bool TryReadValues(ObjectAttributes a, out SdPrimitive prim)

@@ -24,11 +24,16 @@ public static class FrepWarpMath
         applied = Transform.Identity;
         if (!n.Op.IsWarp() || n.Hidden || doc.Objects.FindId(n.Ref) is not { IsDeleted: false } o) return false;
         var g = o.Geometry;
-        if (Placement.TryReadApplied(o.Attributes, out var a) && a.TryGetInverse(out var inv))
+        switch (Placement.ReadApplied(o.Attributes, out var a))
         {
-            applied = a;
-            g = g.Duplicate();
-            if (!g.Transform(inv)) return false;
+            case Placement.Stored.Invalid:
+                return false; // unreadable: treated like a missing reference, never as unmoved geometry
+            case Placement.Stored.Valid:
+                if (!a.TryGetInverse(out var inv)) return false;
+                applied = a;
+                g = g.Duplicate();
+                if (!g.Transform(inv)) return false;
+                break;
         }
         if (!(n.Op == FrepOp.Repeat ? FrepRefs.TryBox(g, out region) : FrepRefs.TryLine(g, out axis))) return false;
         obj = o;

@@ -22,12 +22,34 @@ public static class Placement
     /// then (s(P), 0, 0, 0).
     public const int ShaderRows = 4;
 
-    public static bool TryReadLeaf(ObjectAttributes a, out Transform place) => TryRead(a.GetUserString(LeafKey), out place);
-    public static bool TryReadApplied(ObjectAttributes a, out Transform applied) => TryRead(a.GetUserString(AppliedKey), out applied);
+    public enum Stored { Absent, Valid, Invalid }
 
-    /// Identity (or null) removes the key.
+    /// Absent = identity. Invalid = present but unparsable or not <see cref="IsUsable"/>: callers treat the primitive as
+    /// degenerate rather than unplaced.
+    public static Stored ReadLeaf(ObjectAttributes a, out Transform place) => Read(a.GetUserString(LeafKey), out place);
+    public static Stored ReadApplied(ObjectAttributes a, out Transform applied) => Read(a.GetUserString(AppliedKey), out applied);
+
+    public static bool TryReadLeaf(ObjectAttributes a, out Transform place) => ReadLeaf(a, out place) == Stored.Valid;
+    public static bool TryReadApplied(ObjectAttributes a, out Transform applied) => ReadApplied(a, out applied) == Stored.Valid;
+
+    /// Identity (or null) removes the key. Callers write only <see cref="IsUsable"/> transforms.
     public static void WriteLeaf(ObjectAttributes a, Transform? place) => Write(a, LeafKey, place);
     public static void WriteApplied(ObjectAttributes a, Transform? applied) => Write(a, AppliedKey, applied);
+
+    /// Largest condition number (largest / smallest stretch) accepted. Scale-relative, so a well-shaped placement of any
+    /// absolute size passes (a determinant test would reject a tiny but healthy one); beyond this, P⁻¹ loses precision.
+    public const double MaxCondition = 1e10;
+
+    /// The single validity test for reading and writing: finite affine with full rank, condition <= MaxCondition.
+    public static bool IsUsable(Transform t)
+    {
+        if (!t.IsValid || !t.IsAffine) return false;
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 4; c++)
+                if (!double.IsFinite(t[r, c])) return false;
+        var (lo, hi) = Singular(t);
+        return lo > 0 && hi / lo <= MaxCondition && t.TryGetInverse(out _);
+    }
 
     public static bool IsIdentity(Transform t, double tol = 1e-12)
     {
@@ -63,9 +85,8 @@ public static class Placement
     public static bool TryRows(Transform place, out V4[] rows)
     {
         rows = [];
-        if (!place.TryGetInverse(out var inv)) return false;
+        if (!IsUsable(place) || !place.TryGetInverse(out var inv)) return false;
         double s = MinScale(place);
-        if (!(s > 0)) return false;
         rows = [
             new(inv.M00, inv.M01, inv.M02, inv.M03),
             new(inv.M10, inv.M11, inv.M12, inv.M13),
@@ -75,17 +96,21 @@ public static class Placement
         return true;
     }
 
-    static bool TryRead(string? text, out Transform t)
+    static Stored Read(string? text, out Transform t)
     {
         t = Transform.Identity;
-        var parts = text?.Split(',');
-        if (parts is not { Length: 12 }) return false;
+        if (string.IsNullOrWhiteSpace(text)) return Stored.Absent;
+        var parts = text.Split(',');
+        if (parts.Length != 12) return Stored.Invalid;
+        var r = Transform.Identity;
         for (int i = 0; i < 12; i++)
         {
-            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) { t = Transform.Identity; return false; }
-            t[i / 4, i % 4] = v;
+            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) return Stored.Invalid;
+            r[i / 4, i % 4] = v;
         }
-        return t.IsValid && Math.Abs(t.Determinant) > 1e-18;
+        if (!IsUsable(r)) return Stored.Invalid;
+        t = r;
+        return Stored.Valid;
     }
 
     static void Write(ObjectAttributes a, string key, Transform? t)
