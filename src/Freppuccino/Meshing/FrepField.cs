@@ -107,7 +107,7 @@ public sealed class FrepField
     /// Domain warp of <paramref name="child"/>; <paramref name="rows"/> as packed by Csg.FrepWarpMath.Rows (shader uniform layout).
     public int AddWarp(FieldOp op, V4[] rows, FieldRef child)
     {
-        int want = op switch { FieldOp.Twist => 2, FieldOp.Bend => 3, FieldOp.Repeat => 5, _ => throw new ArgumentOutOfRangeException(nameof(op)) };
+        int want = op switch { FieldOp.Twist => 2, FieldOp.Bend => 3, FieldOp.Repeat => 6, _ => throw new ArgumentOutOfRangeException(nameof(op)) };
         if (rows.Length != want) throw new ArgumentException($"{op} needs {want} rows", nameof(rows));
         nodes.Add(new Node(op, 0, [child], rows));
         hasWarps = true;
@@ -193,10 +193,30 @@ public sealed class FrepField
             var n = nodes[r.Index];
             if (n.Rows is { } w)
             {
-                var q = Warp(n.Op, w, p, out double lip);
                 int saved = top;
-                d = Eval(n.Operands[0], q, Push(ref memo, ref top, stride), ref memo, ref top, stride) / lip;
-                top = saved;
+                if (n.Op == FieldOp.Repeat)
+                {
+                    // Min over the copies that can be nearest; fresh context per copy.
+                    V3 x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y), dl = p - w[0].Xyz;
+                    var (i0, i1) = RepeatCells(V3.Dot(dl, x), w[0].W, w[3].X, w[4].X, w[5].X);
+                    var (j0, j1) = RepeatCells(V3.Dot(dl, y), w[1].W, w[3].Y, w[4].Y, w[5].Y);
+                    var (k0, k1) = RepeatCells(V3.Dot(dl, z), w[2].W, w[3].Z, w[4].Z, w[5].Z);
+                    d = double.PositiveInfinity;
+                    for (int k = k0; k <= k1; k++)
+                    for (int j = j0; j <= j1; j++)
+                    for (int i = i0; i <= i1; i++)
+                    {
+                        var q = p - x * (i * w[0].W) - y * (j * w[1].W) - z * (k * w[2].W);
+                        d = Math.Min(d, Eval(n.Operands[0], q, Push(ref memo, ref top, stride), ref memo, ref top, stride));
+                        top = saved;
+                    }
+                }
+                else
+                {
+                    var q = Warp(n.Op, w, p, out double lip);
+                    d = Eval(n.Operands[0], q, Push(ref memo, ref top, stride), ref memo, ref top, stride) / lip;
+                    top = saved;
+                }
             }
             else
             {
@@ -207,7 +227,16 @@ public sealed class FrepField
         return memo[slot] = d;
     }
 
-    // Domain warps, ported from opTwist/opBend/opRepeat in Shaders/FrepShaderGen.cs; keep in sync. Returns the point to
+    // One axis of repeatCells in Shaders/FrepShaderGen.cs (keep in sync): local coord, spacing, index range, reach in cells.
+    static (int C0, int C1) RepeatCells(double local, double s, double lo, double hi, double r)
+    {
+        double t = local / Math.Max(s, 1e-9), a = Math.Clamp(Math.Round(t), lo, hi);
+        double fwd = Math.Ceiling(r), back = Math.Max(Math.Ceiling(r - 0.5), 0);
+        bool up = t >= a;
+        return ((int)Math.Max(a - (up ? back : fwd), lo), (int)Math.Min(a + (up ? fwd : back), hi));
+    }
+
+    // Domain warps, ported from opTwist/opBend in Shaders/FrepShaderGen.cs; keep in sync. Returns the point to
     // evaluate the child at; lip = local Lipschitz bound (child value is divided by it). Row layouts: see the GLSL.
     static V3 Warp(FieldOp op, V4[] w, V3 p, out double lip)
     {
@@ -252,17 +281,6 @@ public sealed class FrepField
                     y0 = -qx * Math.Sin(beta) + qy * Math.Cos(beta);
                 }
                 return a + d * h0 + n * y0 + b;
-            }
-            case FieldOp.Repeat:
-            {
-                V3 o = w[0].Xyz, x = w[1].Xyz, y = w[2].Xyz, z = V3.Cross(x, y);
-                var dl = p - o;
-                static double Cell(double local, double s, double lo, double hi) =>
-                    Math.Clamp(Math.Round(local / Math.Max(s, 1e-9), MidpointRounding.AwayFromZero), lo, hi) * s;
-                double ix = Cell(V3.Dot(dl, x), w[0].W, w[3].X, w[4].X);
-                double iy = Cell(V3.Dot(dl, y), w[1].W, w[3].Y, w[4].Y);
-                double iz = Cell(V3.Dot(dl, z), w[2].W, w[3].Z, w[4].Z);
-                return p - x * ix - y * iy - z * iz;
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(op));

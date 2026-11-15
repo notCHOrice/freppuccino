@@ -40,14 +40,14 @@ One operand each. Node stores `Ref` (Guid of a Rhino line or box, read live via 
 |---|---|---|---|---|
 | Twist | line | angle (°, total start→end) | 2: (start, rad/unit), (dir, extent) | rotate about the infinite axis; linear past the ends |
 | Bend | line | angle (°, over line length), direction (° about axis; 0 = world +Z ⟂ axis, +X if axis vertical) | 3: (start, L), (dir, β), (n, minR) | arc of radius L/β; before start unchanged, past end rigid tangent continuation |
-| Repeat | box | x, y, z spacing (model units) | 5: (anchor, sx), (X, sy), (Y, sz), lo, hi | lattice anchored at child bbox centre, axes = box frame; cell = clamp(round(local/s), lo, hi), lo/hi so copies stay in the box |
+| Repeat | box | x, y, z spacing (model units) | 6: (anchor, sx), (X, sy), (Y, sz), lo, hi, reach | lattice anchored at child bbox centre, axes = box frame; lo/hi so copies stay in the box; min over cells that can hold the nearest copy ([IQ](https://iquilezles.org/articles/sdfrepetition/)): clamped nearest cell + neighbor on p's side (2×2×2), widened by reach = child half-extent / s (≤ 2) when copies overlap |
 
-- Codegen: each warp opens a point context `q{c}`; its subtree is re-emitted in that context (memoized by operand × context).
-- Distance: twist/bend divide the child value by a per-point Lipschitz bound (`l{c}`, clamped by child extent); repeat doesn't (clips a child wider than the spacing).
+- Codegen: each warp opens a point context `q{c}`; its subtree is re-emitted in that context (memoized by operand × context). Repeat emits the subtree once inside a cell loop (`repeatCells` / `repeatAt`), min'd into the node value.
+- Distance: twist/bend divide the child value by a per-point Lipschitz bound (`l{c}`, clamped by child extent); repeat doesn't (rigid); exact for any child shape up to reach 2 (child ≤ ~4 spacings wide), may overshoot past that.
 - Missing cases: ref deleted / wrong type → passthrough (child unwarped; panel says so); child missing → empty; node hidden → absent.
 - `bound` (raymarch sphere): computed per frame from in-memory prims/warps (`FrepShaderGen.Bound`), so it follows drags. Prims = sphere around frame origin; union/intersect = union of operand boxes; difference = base; hidden node = absent; warps via `FrepField.WarpBox` (shared with the mesher): twist = cylinder about axis over child's axial span, bend = child box ∪ annular arc sector ∪ rigidly moved tail corners, repeat = child box ⊕ farthest cell offsets. Padded by Σk × max ellipsoid stretch. `FrepScene.Bounds` (warp extent/anchor, nested warps) uses the same `Warped`.
 - Shared math: `Csg/FrepWarpMath.cs` (ref resolution, `SdWarp` extent/anchor, packed rows, bend frame) feeds both the shader uniforms and the mesher.
-- Mesher (`Meshing/FrepField.cs`): line-for-line port of `opTwist`/`opBend`/`opRepeat` with per-warp point contexts; keep in sync with the GLSL. Only diff: repeat rounds halves away from zero (GLSL `round` is driver-defined on exact cell boundaries).
+- Mesher (`Meshing/FrepField.cs`): line-for-line port of `opTwist`/`opBend`/`opRepeat` with per-warp point contexts (one per repeat cell); keep in sync with the GLSL.
 - Known: bend `lip` jumps between arc and straight regions (field shrinks, surface unaffected); twist/bend Lipschitz clamp only holds within child extent; repeat assumes the child fits one cell.
 
 Original slice program (removed):
