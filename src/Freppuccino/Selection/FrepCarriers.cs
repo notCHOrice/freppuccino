@@ -47,7 +47,11 @@ public static class FrepCarriers
         Rhino.Commands.Command.EndCommand += (_, e) => { if (e.Document is { } d) Restore(d); };
         RhinoApp.Idle += (_, _) => { if (restore.Count > 0 && RhinoDoc.ActiveDoc is { } d && !Rhino.Commands.Command.InCommand()) Restore(d); };
         RhinoDoc.AddRhinoObject += (_, _) => dirty = true;
-        RhinoDoc.DeleteRhinoObject += (_, _) => dirty = true;
+        RhinoDoc.DeleteRhinoObject += (_, e) =>
+        {
+            dirty = true;
+            if (internalDeletes == 0) OnUserDelete(e.TheObject);
+        };
         RhinoDoc.UndeleteRhinoObject += (_, _) => dirty = true;
         RhinoDoc.ReplaceRhinoObject += (_, _) => dirty = true;
         RhinoDoc.ModifyObjectAttributes += (_, _) => dirty = true;
@@ -223,17 +227,71 @@ public static class FrepCarriers
         finally { doc.UndoRecordingEnabled = recording; }
     }
 
+    // Our own carrier deletes (sync, replace, save); anything else deleting a carrier is the user (Delete key, Cut, ...).
+    static int internalDeletes;
+
     static void Delete(RhinoDoc doc, RhinoObject o)
     {
         // Outside an undo record this leaves no undo step.
-        doc.Objects.Unlock(o.Id, true);
-        doc.Objects.Delete(o.Id, true);
+        internalDeletes++;
+        try
+        {
+            doc.Objects.Unlock(o.Id, true);
+            doc.Objects.Delete(o.Id, true);
+        }
+        finally { internalDeletes--; }
+    }
+
+    /// The user deleted a carrier: delete what it stands for, in the same undo record (as a viewport delete of a leaf
+    /// prunes the tree in UiController). Node carrier: the blend, i.e. its subtree's nodes, leaves and warp reference
+    /// objects, except those another root still uses. Instance carrier: the leaf object. Undo/redo replay the recorded
+    /// edits themselves.
+    static void OnUserDelete(RhinoObject? o)
+    {
+        if (o is not FrepCarrier || o.Document is not { } doc || doc.UndoActive || doc.RedoActive) return;
+        if (o.Attributes.GetUserString(InstanceKey) != null)
+        {
+            if (InstanceOf(doc, o) is { } inst && doc.Objects.FindId(inst.Object) is { IsDeleted: false })
+                doc.Objects.Delete(inst.Object, true);
+            return;
+        }
+        if (NodeOf(o) is not { } id) return;
+        var tree = FrepTrees.Get(doc);
+        if (tree.Find(id) == null) return;
+        var dropNodes = Subtree(tree, id).Select(n => n.Id).ToHashSet();
+        // Anything reachable from another root stays.
+        var keepNodes = new HashSet<int>();
+        var keepObjects = new HashSet<Guid>();
+        foreach (var r in FrepScene.Get(doc).Roots)
+        {
+            if (r.IsNode && r.NodeId == id) continue;
+            if (!r.IsNode) { keepObjects.Add(r.ObjectId); continue; }
+            foreach (var n in Subtree(tree, r.NodeId))
+            {
+                keepNodes.Add(n.Id);
+                foreach (var op in n.Operands) if (!op.IsNode) keepObjects.Add(op.ObjectId);
+                if (n.Ref != Guid.Empty) keepObjects.Add(n.Ref);
+            }
+        }
+        dropNodes.ExceptWith(keepNodes);
+        var dropObjects = new HashSet<Guid>();
+        foreach (var n in dropNodes.Select(tree.Find).OfType<FrepNode>())
+        {
+            foreach (var op in n.Operands) if (!op.IsNode) dropObjects.Add(op.ObjectId);
+            if (n.Ref != Guid.Empty) dropObjects.Add(n.Ref);
+        }
+        dropObjects.ExceptWith(keepObjects);
+        var next = tree.Excise(dropNodes, dropObjects);
+        if (!ReferenceEquals(next, tree)) FrepTrees.Set(doc, next, "Delete");
+        foreach (var g in dropObjects)
+            if (doc.Objects.FindId(g) is { IsDeleted: false }) doc.Objects.Delete(g, true);
+        doc.Views.Redraw();
     }
 
     static void Replace(RhinoDoc doc, RhinoObject o, Mesh mesh)
     {
         var a = o.Attributes.Duplicate();
-        doc.Objects.Delete(o.Id, true);
+        Delete(doc, o);
         var carrier = new FrepCarrier(mesh);
         doc.Objects.AddRhinoObject(carrier, mesh);
         doc.Objects.ModifyAttributes(carrier, a, true);
