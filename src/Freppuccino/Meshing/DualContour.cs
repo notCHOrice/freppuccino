@@ -259,8 +259,10 @@ public static class DualContour
         /// including dictionary growth (sol, #339); charged at twice that.
         public const long CentreBytes = 128;
 
-        /// Bytes the face-centre cache is charged in the budget now.
-        public long CentreMemory => centres.Count * CentreBytes;
+        /// Bytes the face-centre cache is charged in the budget: its whole allowance (CentreCap entries) when it has
+        /// one, reserved in advance so the cache can never grow into memory already given to samples or cells (sol
+        /// #379); otherwise what it holds.
+        public long CentreMemory => CentreCap == long.MaxValue ? centres.Count * CentreBytes : CentreCap * CentreBytes;
 
         /// Inside test at a point given in doubled finest-lattice coordinates (so face centres are integers). One
         /// formula and one cache for every caller, so every consumer of a face decides it the same way. A value of
@@ -585,7 +587,7 @@ public static class DualContour
             }
             if (grewBase)
             {
-                if (!Close(g, refined, near, bases, ref unsafeSamples)) return false;
+                if (!Close(g, refined, near, bases, ref unsafeSamples, (long)g.Deep.Count * deepBytes + reserved)) return false;
                 continue;
             }
 
@@ -823,7 +825,8 @@ public static class DualContour
     /// is written back and the base cells around it are refined.
     ///
     /// False if the samples or the refined set go over budget.
-    static bool Close(Grid g, HashSet<int> refined, HashSet<int> near, Dictionary<int, BaseInfo> bases, ref int unsafeSamples)
+    /// <paramref name="resident"/>: bytes already held elsewhere for this attempt (deep blocks, a kept mesh), charged too.
+    static bool Close(Grid g, HashSet<int> refined, HashSet<int> near, Dictionary<int, BaseInfo> bases, ref int unsafeSamples, long resident = 0)
     {
         int side = g.PerBase + 1, per = g.PerBase;
         long blockBytes = (long)side * side * side * 4;
@@ -847,7 +850,7 @@ public static class DualContour
             }
             // Sample every block not yet sampled.
             var missing = refined.Concat(near).Where(c => !g.Blocks.ContainsKey(c)).ToList();
-            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory > MemoryBudget)
+            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + resident > MemoryBudget)
                 return false;
             Parallel.ForEach(missing, cell =>
             {
@@ -884,7 +887,7 @@ public static class DualContour
                     else { refined.Add(cell); grew = true; }
                 }
             // Interface checks above may have added face centres since the estimate: charge them before going on.
-            if (g.Blocks.Count * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory > MemoryBudget)
+            if (g.Blocks.Count * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + resident > MemoryBudget)
                 return false;
             if (!grew) return true;
             if ((long)refined.Count * per * per * per > 4 * FineCellBudget) return false;
