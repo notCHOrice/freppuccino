@@ -31,6 +31,9 @@ public class FreppuccinoPlugin : PlugIn
         SdfTransformWatcher.Install();
         FrepScene.Install();
         FrepTrees.Install();
+        Selection.FrepSelection.Install();
+        Selection.FrepCarriers.Install();
+        Selection.FrepPicker.Install();
         Conduit = new ShaderConduit { Enabled = true };
         Panels.RegisterPanel(this, typeof(FrepPanel), FrepPanel.Caption, GetType().Assembly,
             IconResource, PanelType.PerDoc);

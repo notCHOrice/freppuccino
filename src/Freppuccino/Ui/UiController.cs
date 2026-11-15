@@ -50,6 +50,20 @@ public sealed class UiController : IDisposable
         return ids;
     }
 
+    /// Selected node ids (panel order), without consuming them.
+    public static IReadOnlyList<int> SelectedNodes(RhinoDoc doc) => selectedNodes.GetValueOrDefault(doc.RuntimeSerialNumber, []);
+
+    /// Writes the panel's node selection (FrepSelection is the caller for scene clicks).
+    public static void SetSelectedNodes(RhinoDoc doc, IEnumerable<int> ids)
+    {
+        var list = NodesOf(doc);
+        var next = ids.Distinct().ToList();
+        if (list.SequenceEqual(next)) return;
+        list.Clear();
+        list.AddRange(next);
+        NodeSelectionChanged?.Invoke();
+    }
+
     static event Action? NodeSelectionChanged;
 
     static List<int> NodesOf(RhinoDoc doc) =>
@@ -355,10 +369,14 @@ public sealed class UiController : IDisposable
     {
         // Leaves selected only so the gumball can sit on a node's geometry stay out of the panel selection.
         var gumball = NodeLeaves(doc);
-        return doc.Objects.GetSelectedObjects(false, false)
+        var selected = doc.Objects.GetSelectedObjects(false, false).ToList();
+        return selected
             .Where(o => SdfUserText.ReadType(o.Attributes) != null && !gumball.Contains(o.Id))
             .Select(o => ObjectKey(o.Id))
+            // A shared shape picked through another blend's copy is selected via its instance carrier: its row too.
+            .Concat(selected.Select(o => Selection.FrepCarriers.InstanceOf(doc, o)).OfType<Selection.FrepInstance>().Select(i => ObjectKey(i.Object)))
             .Concat(selectedNodes.GetValueOrDefault(doc.RuntimeSerialNumber, []).Select(NodeKey))
+            .Distinct()
             .ToList();
     }
 
@@ -471,13 +489,15 @@ public sealed class UiController : IDisposable
             ClearNodes(doc); // OnDeselectAll doesn't fire if no Rhino object was selected
         }
         var nodes = NodesOf(doc);
+        var rootSet = Selection.FrepSelection.Structure(doc).Roots.ToHashSet();
         foreach (var n in nodeIds)
         {
             bool select = request.Mode != "toggle" || !nodes.Contains(n);
             nodes.Remove(n);
             if (select) nodes.Add(n);
-            // Select the node's primitives so Rhino draws the gumball on that geometry.
-            SelectLeaves(doc, tree, n, select);
+            // An inner node: select its primitives so Rhino draws the gumball on that geometry (each moves as a leaf).
+            // A root: its blend carrier below, so the gumball transforms the whole blend.
+            if (!rootSet.Contains(FrepOperand.Node(n))) SelectLeaves(doc, tree, n, select);
         }
         foreach (var key in request.Ids)
         {
@@ -486,7 +506,14 @@ public sealed class UiController : IDisposable
             bool select = request.Mode != "toggle" || obj.IsSelected(false) == 0;
             obj.Select(select);
         }
+        // A root row selects that blend in the scene too: its carrier, which carries the gumball.
+        foreach (var n in nodeIds.ToList())
+        {
+            if (!rootSet.Contains(FrepOperand.Node(n)) || Selection.FrepCarriers.Ensure(doc, n) is not { } carrier) continue;
+            carrier.Select(NodesOf(doc).Contains(n), true);
+        }
         ShowGumball();
+        Selection.FrepSelection.RefreshGumball(); // a selection made from code shows no gumball until refreshed
         NodeSelectionChanged?.Invoke();
         doc.Views.Redraw();
     }

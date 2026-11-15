@@ -49,6 +49,8 @@ public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimit
     public IReadOnlyList<Guid> Ids { get; init; } = [];
     /// Tree node ids, parallel to Warps.
     public IReadOnlyList<int> WarpIds { get; init; } = [];
+    /// Non-empty roots in the shader's map() order (its selection flags follow it).
+    public IReadOnlyList<FrepOperand> Roots { get; init; } = [];
     /// The tree this was compiled from.
     public FrepTree Tree { get; init; } = FrepTree.Empty;
     public int Count => Primitives.Count;
@@ -65,6 +67,8 @@ public static class FrepScene
     static List<RhinoObject> owners = [];
     // Parallel to scene.Warps: the referenced line/box objects.
     static List<RhinoObject> warpOwners = [];
+    // Parallel to warpOwners: each object's applied root transforms A (Placement.AppliedKey).
+    static List<Transform> warpApplied = [];
     static FrepTree tree = FrepTree.Empty; // the one scene was compiled from
     static uint docSerial;
     static bool dirty = true;
@@ -82,17 +86,66 @@ public static class FrepScene
     }
 
     public static void MarkDirty() => dirty = true;
+
     static void Dirty(object? sender, RhinoObjectEventArgs e) => dirty = true;
 
     public static FrepSceneData Get(RhinoDoc doc)
     {
         if (dirty || doc.RuntimeSerialNumber != docSerial) Rebuild(doc);
 
+        // Blend carriers under a drag: their roots' matrices preview as drag × M (the tree is only written on commit).
+        // Like the commit, a root wins over its descendants: leaves and warp references reachable from a dragged root
+        // get no canonical preview of their own, even when they are selected (and so dragged) too.
+        var previewTree = tree;
+        var movingRoots = new HashSet<int>();
+        foreach (var o in doc.Objects.GetSelectedObjects(false, false))
+        {
+            if (Selection.FrepCarriers.NodeOf(o) is not { } id || !o.GetDynamicTransform(out var cx) || cx.IsIdentity) continue;
+            if (previewTree.Find(id) is not { } n || !Placement.IsUsable(cx * n.M)) continue;
+            previewTree = previewTree.WithM(id, cx * n.M);
+            movingRoots.Add(id);
+        }
+        var underMoving = new HashSet<Guid>();
+        var refsUnderMoving = new HashSet<Guid>();
+        // Instance carriers under a drag: the leaf previews Q = T_inst⁻¹ X T_inst (unless a moving root carries it),
+        // taking precedence over the leaf's own drag, as at commit.
+        var instanceDrag = new Dictionary<Guid, Transform>();
+        var anyCarrierDrag = movingRoots.Count > 0 || doc.Objects.GetSelectedObjects(false, false).Any(o => o is Selection.FrepCarrier);
+        if (anyCarrierDrag)
+        {
+            var (allRoots, instances) = Selection.FrepInstances.Compute(tree, scene.Ids);
+            foreach (var inst in instances)
+                if (inst.Root.IsNode && movingRoots.Contains(inst.Root.NodeId)) underMoving.Add(inst.Object);
+            // References follow their owning root (first in instance order), exactly like the commit (sol #170).
+            foreach (var (refId, owner) in Selection.FrepCarriers.ReferenceOwners(tree, allRoots))
+                if (movingRoots.Contains(owner.NodeId)) refsUnderMoving.Add(refId);
+            foreach (var o in doc.Objects.GetSelectedObjects(false, false))
+            {
+                if (Selection.FrepCarriers.InstanceOf(o, instances) is not { } inst || underMoving.Contains(inst.Object)) continue;
+                if (!o.GetDynamicTransform(out var dx) || dx.IsIdentity || !inst.T.TryGetInverse(out var tiv)) continue;
+                instanceDrag[inst.Object] = tiv * dx * inst.T;
+            }
+        }
+
         List<SdPrimitive>? prims = null;
         bool reshaped = false;
         for (int i = 0; i < owners.Count; i++)
         {
+            if (underMoving.Contains(owners[i].Id)) continue;
+            if (instanceDrag.TryGetValue(owners[i].Id, out var q))
+            {
+                if (TryTransform(scene.Primitives[i], q, out var viaInstance))
+                {
+                    prims ??= [.. scene.Primitives];
+                    prims[i] = viaInstance;
+                    reshaped |= viaInstance.Kind != scene.Primitives[i].Kind;
+                }
+                continue;
+            }
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            // Under transformed roots the leaf sits at T × canonical: the drag is T⁻¹ X T on its values.
+            if (Selection.FrepSelection.InstanceOf(doc, owners[i].Id, tree, scene.Ids) is { } inst && !inst.T.IsIdentity && inst.T.TryGetInverse(out var ti))
+                xf = ti * xf * inst.T;
             // A transform that flattens the primitive previews at the original position.
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
@@ -102,13 +155,23 @@ public static class FrepScene
         List<SdWarp>? warps = null;
         for (int i = 0; i < warpOwners.Count; i++)
         {
-            if (!warpOwners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            if (refsUnderMoving.Contains(warpOwners[i].Id)) continue;
+            if (!warpOwners[i].GetDynamicTransform(out var world) || world.IsIdentity) continue;
+            // The drag moves the real object (A × canonical); in canonical space that is A⁻¹ × drag × A.
+            var a = warpApplied[i];
+            var xf = a.TryGetInverse(out var ai) ? ai * world * a : world;
             var w = scene.Warps[i];
             var axis = w.Axis;
             var region = w.Region;
             if (!(w.Op == FrepOp.Repeat ? region.Transform(xf) : axis.Transform(xf))) continue;
             warps ??= [.. scene.Warps];
             warps[i] = w with { Axis = axis, Region = region };
+        }
+        if (!ReferenceEquals(previewTree, tree))
+        {
+            var p2 = prims ?? scene.Primitives;
+            var (program2, ks2, _, roots2) = FrepShaderGen.Compile(p2, scene.Ids, previewTree, scene.WarpIds.ToHashSet());
+            return scene with { Primitives = p2, Warps = warps ?? scene.Warps, Tree = previewTree, Program = program2, Ks = ks2, Roots = roots2 };
         }
         if (prims == null && warps == null) return scene;
         var next = scene with { Primitives = prims ?? scene.Primitives, Warps = warps ?? scene.Warps };
@@ -122,12 +185,12 @@ public static class FrepScene
                 if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
             return next;
         }
-        var (program, ks, _) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
-        return next with { Program = program, Ks = ks };
+        var (program, ks, _, roots) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
+        return next with { Program = program, Ks = ks, Roots = roots };
     }
 
     /// Same rules as the per-command TransformSdf handlers, applied to in-memory values.
-    static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
+    internal static bool TryTransform(SdPrimitive p, Transform xf, out SdPrimitive result)
     {
         result = p;
         var v = p.P;
@@ -239,24 +302,32 @@ public static class FrepScene
 
         // Warp reference objects may be hidden (axis lines usually are); deleted = missing.
         var refs = new Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)>();
+        var applied = new Dictionary<int, Transform>();
         foreach (var n in tree.Nodes)
-            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region)) refs[n.Id] = (obj!, axis, region);
+            if (FrepWarpMath.TryResolve(doc, n, out var obj, out var axis, out var region, out var a))
+            {
+                refs[n.Id] = (obj!, axis, region);
+                applied[n.Id] = a;
+            }
 
-        var (program, ks, warpIds) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
+        var (program, ks, warpIds, rootOps) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
         var bounds = new Bounds(doc, tree, refs);
         var warps = new List<SdWarp>();
         var newWarpOwners = new List<RhinoObject>();
+        var newWarpApplied = new List<Transform>();
         foreach (var id in warpIds)
         {
             var n = tree.Find(id)!;
             var (obj, axis, region) = refs[id];
             warps.Add(FrepWarpMath.Make(n, axis, region, bounds.Of(n.Operands[0])));
             newWarpOwners.Add(obj);
+            newWarpApplied.Add(applied[id]);
         }
 
-        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree, FailedFunctions = failed };
+        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree, Roots = rootOps, FailedFunctions = failed };
         owners = newOwners;
         warpOwners = newWarpOwners;
+        warpApplied = newWarpApplied;
     }
 
     /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
@@ -272,10 +343,25 @@ public static class FrepScene
         return new Bounds(doc, tree, refs).Of(o);
     }
 
-    /// World bounding box of an operand's result, from leaf objects' Rhino geometry; live warps grown like the shader bound.
+    /// Bounding box of an operand's result in its parent's space (world for a root): leaves from their Rhino geometry
+    /// mapped back by their primary instance's root transforms T (the real object sits at T × canonical), live warps
+    /// grown like the shader bound, node transforms applied.
     sealed class Bounds(RhinoDoc doc, FrepTree tree, Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)> refs)
     {
         readonly Dictionary<FrepOperand, BoundingBox> memo = [];
+        Dictionary<Guid, Transform>? primaryT;
+
+        Transform PrimaryT(Guid id)
+        {
+            if (primaryT == null)
+            {
+                primaryT = [];
+                var leaves = tree.Nodes.SelectMany(n => n.Operands).Where(x => !x.IsNode).Select(x => x.ObjectId).Distinct().ToList();
+                foreach (var inst in Selection.FrepInstances.Compute(tree, leaves).Instances)
+                    primaryT.TryAdd(inst.Object, inst.T);
+            }
+            return primaryT.GetValueOrDefault(id, Transform.Identity);
+        }
 
         public BoundingBox Of(FrepOperand o)
         {
@@ -283,13 +369,19 @@ public static class FrepScene
             b = BoundingBox.Empty;
             if (!o.IsNode)
             {
-                if (doc.Objects.FindId(o.ObjectId) is { IsDeleted: false } obj) b = obj.Geometry.GetBoundingBox(true);
+                if (doc.Objects.FindId(o.ObjectId) is { IsDeleted: false } obj)
+                {
+                    b = obj.Geometry.GetBoundingBox(true);
+                    var t = PrimaryT(o.ObjectId);
+                    if (!t.IsIdentity && t.TryGetInverse(out var ti)) b.Transform(ti);
+                }
             }
             else if (tree.Find(o.NodeId) is { } n)
             {
                 if (n.Op == FrepOp.Difference && n.Operands.Length > 0) b = Of(n.Operands[0]);
                 else foreach (var c in n.Operands) b.Union(Of(c));
                 if (b.IsValid && refs.TryGetValue(n.Id, out var r)) b = FrepShaderGen.Warped(b, FrepWarpMath.Make(n, r.Axis, r.Region, b));
+                if (b.IsValid && n.HasMatrix) b.Transform(n.M);
             }
             return memo[o] = b;
         }
@@ -298,6 +390,17 @@ public static class FrepScene
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
     /// An FFunction reads even if its code doesn't compile (check Fn.Program).
     public static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
+    {
+        // An unreadable or degenerate SDF.Linear makes the primitive degenerate (like a zero radius), never unsheared.
+        if (SdfUserText.ReadLinear(a, out _, out _, out _) == SdfUserText.LinearState.Invalid)
+        {
+            prim = default;
+            return false;
+        }
+        return TryReadCore(a, out prim);
+    }
+
+    static bool TryReadCore(ObjectAttributes a, out SdPrimitive prim)
     {
         prim = default;
         switch (SdfUserText.ReadType(a))
@@ -336,7 +439,7 @@ public static class FrepScene
     static SdPrimitive Mapped(ObjectAttributes attributes, SdKind kind, Plane frame, Vector3d p)
     {
         var prim = new SdPrimitive(kind, frame, p);
-        if (SdfUserText.TryReadLinear(attributes, out var x, out var y, out var z))
+        if (SdfUserText.ReadLinear(attributes, out var x, out var y, out var z) == SdfUserText.LinearState.Valid)
             prim = prim with { Basis = new SdfBasis(x, y, z) };
         return prim;
     }

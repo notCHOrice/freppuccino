@@ -43,11 +43,37 @@ public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
 /// Warps: Operands = [child], Ref = line/box object, Params per <see cref="FrepOps.ParamNames"/>.
 /// Blend uses K as the fillet between a Repeat's copies (0 = hard). Offset uses K as the surface shift
 /// (positive grows). Warps ignore K.
+/// Matrix: optional affine transform M of the node's whole result (12 numbers, top three rows of the 4x4, row-major;
+/// default = identity): field = result(M⁻¹ p) · s(M), s = smallest singular value. A root's gumball transform composes
+/// into it ("transform the blend as one object"); it stays with the node if the node later becomes an operand.
 public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false,
-    Guid Ref = default, ImmutableArray<double> Params = default)
+    Guid Ref = default, ImmutableArray<double> Params = default, ImmutableArray<double> Matrix = default)
 {
     public string Name => FrepTree.NodeName(Id);
     public double Param(int i) => !Params.IsDefault && i < Params.Length ? Params[i] : 0;
+
+    public bool HasMatrix => !Matrix.IsDefault && Matrix.Length == 12;
+
+    /// M (identity if none).
+    public Rhino.Geometry.Transform M
+    {
+        get
+        {
+            var t = Rhino.Geometry.Transform.Identity;
+            if (!HasMatrix) return t;
+            for (int i = 0; i < 12; i++) t[i / 4, i % 4] = Matrix[i];
+            return t;
+        }
+    }
+
+    /// Identity clears the matrix.
+    public FrepNode WithM(Rhino.Geometry.Transform m)
+    {
+        if (Scene.Placement.IsIdentity(m)) return this with { Matrix = default };
+        var a = new double[12];
+        for (int i = 0; i < 12; i++) a[i] = m[i / 4, i % 4];
+        return this with { Matrix = [.. a] };
+    }
 }
 
 /// Immutable CSG DAG. Nodes kept in topological order (operands before their node): creation order, unless operand
@@ -112,6 +138,8 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
     public FrepTree WithOp(int id, FrepOp op, double k) => Edit(id, n => n with { Op = op, K = k });
 
     public FrepTree WithHidden(int id, bool hidden) => Edit(id, n => n with { Hidden = hidden });
+
+    public FrepTree WithM(int id, Rhino.Geometry.Transform m) => Edit(id, n => n.WithM(m));
 
     FrepTree Edit(int id, Func<FrepNode, FrepNode> f)
     {
@@ -320,8 +348,9 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         var nodes = Nodes;
         while (true)
         {
+            // A one-operand node with a transform M is kept: folding it into its operand would drop M.
             int i = nodes.FindIndex(n => n.Operands.Length == 0
-                || (n.Operands.Length == 1 && n.Op is FrepOp.Union or FrepOp.Intersect or FrepOp.Difference));
+                || (n.Operands.Length == 1 && !n.HasMatrix && n.Op is FrepOp.Union or FrepOp.Intersect or FrepOp.Difference));
             if (i < 0) break;
             var gone = nodes[i];
             FrepOperand? only = gone.Operands.Length == 1 ? gone.Operands[0] : null;
@@ -345,7 +374,7 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
         return n with { Operands = ops.ToImmutable() };
     }
 
-    const int Major = 1, Minor = 2; // 1.1: per-node Hidden; 1.2: Ref + Params
+    const int Major = 1, Minor = 3; // 1.1: per-node Hidden; 1.2: Ref + Params; 1.3: Matrix
 
     public void Write(BinaryArchiveWriter w)
     {
@@ -371,6 +400,12 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
             var p = n.Params.IsDefault ? [] : n.Params;
             w.WriteInt(p.Length);
             foreach (var v in p) w.WriteDouble(v);
+        }
+        foreach (var n in Nodes)
+        {
+            var m = n.HasMatrix ? n.Matrix : [];
+            w.WriteInt(m.Length);
+            foreach (var v in m) w.WriteDouble(v);
         }
     }
 
@@ -402,6 +437,13 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
                 var p = new double[r.ReadInt()];
                 for (int j = 0; j < p.Length; j++) p[j] = r.ReadDouble();
                 nodes[i] = nodes[i] with { Ref = reference, Params = [.. p] };
+            }
+        if (minor >= 3)
+            for (int i = 0; i < count; i++)
+            {
+                var m = new double[r.ReadInt()];
+                for (int j = 0; j < m.Length; j++) m[j] = r.ReadDouble();
+                if (m.Length == 12) nodes[i] = nodes[i] with { Matrix = [.. m] };
             }
         return new FrepTree(nodes.ToImmutable(), nextId);
     }

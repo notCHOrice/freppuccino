@@ -53,7 +53,8 @@ public sealed class FrepField
     // X, Y, Z are the canonical-to-world columns (bounds). Ix, Iy, Iz are the rows of the inverse (the dots in PrimValue).
     readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, double Lip, V3 Ix, V3 Iy, V3 Iz, UserField? Fn = null);
     // Rows: warp params (null for CSG).
-    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null);
+    // Place/Fwd: optional transform M of the node's result, rows as for a placed primitive (M⁻¹ rows + (s(M),0,0,0)).
+    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null, V4[]? Place = null, V4[]? Fwd = null);
 
     readonly List<Prim> prims = [];
     readonly List<Node> nodes = [];
@@ -65,7 +66,30 @@ public sealed class FrepField
     /// Blend distance of the implicit union used when no roots are declared; 0 = hard union.
     public double Blend { get; init; }
 
+    /// False: no declared roots means an empty field (+infinity everywhere), not the implicit union of every primitive.
+    /// Builders that declare roots explicitly (Scene.FrepFieldBuilder) set this, so a filter matching nothing stays empty.
+    public bool ImplicitUnion { get; init; } = true;
+
     public int Count => prims.Count;
+
+    /// Affine map given by three rows (xyz linear row, w translation): node transforms M (and their inverses).
+    static V3 Apply(V4[] rows, V3 p) =>
+        new(V3.Dot(rows[0].Xyz, p) + rows[0].W, V3.Dot(rows[1].Xyz, p) + rows[1].W, V3.Dot(rows[2].Xyz, p) + rows[2].W);
+
+    /// Inverse of the affine map given by three rows (xyz linear, w translation).
+    static V4[] Invert(V4[] m)
+    {
+        V3 a = m[0].Xyz, b = m[1].Xyz, c = m[2].Xyz;
+        // Columns of the inverse linear part are the cross products of the rows over the determinant.
+        V3 i0 = V3.Cross(b, c), i1 = V3.Cross(c, a), i2 = V3.Cross(a, b);
+        double det = V3.Dot(a, i0);
+        if (det == 0) throw new ArgumentException("singular placement");
+        double s = 1 / det;
+        // inv rows: (i0.X, i1.X, i2.X), ...
+        V3 r0 = new(i0.X * s, i1.X * s, i2.X * s), r1 = new(i0.Y * s, i1.Y * s, i2.Y * s), r2 = new(i0.Z * s, i1.Z * s, i2.Z * s);
+        var t = new V3(m[0].W, m[1].W, m[2].W);
+        return [new(r0.X, r0.Y, r0.Z, -V3.Dot(r0, t)), new(r1.X, r1.Y, r1.Z, -V3.Dot(r1, t)), new(r2.X, r2.Y, r2.Z, -V3.Dot(r2, t))];
+    }
 
     /// <paramref name="x"/>, <paramref name="y"/>, <paramref name="z"/> are the columns of the canonical-to-world map
     /// (the frame axes when the primitive is rigid). <paramref name="lip"/> is σ_min of that map: the local distance is
@@ -81,10 +105,11 @@ public sealed class FrepField
     {
         if (kind == FieldKind.User && fn == null) throw new ArgumentNullException(nameof(fn), "User primitives need AddUser");
         var zz = z ?? V3.Cross(x, y);
+        // Callers drop invalid maps upstream (SdfTransforms.IsUsableBasis, same test); a silent fallback here would be
+        // a wrong field nobody notices.
         if (!InverseRows(x, y, zz, out var ix, out var iy, out var iz))
-        {
-            ix = x; iy = y; iz = zz;
-        }
+            throw new ArgumentException("singular or degenerate primitive map");
+        if (!(lip > 0) || !double.IsFinite(lip)) throw new ArgumentException("primitive map scale must be finite and positive", nameof(lip));
         prims.Add(new Prim(kind, origin, x, y, zz, p, lip, ix, iy, iz, fn));
         return prims.Count - 1;
     }
@@ -93,7 +118,8 @@ public sealed class FrepField
     {
         double det = V3.Dot(x, V3.Cross(y, z));
         double volume = x.Length * y.Length * z.Length;
-        if (!(Math.Abs(det) > 1e-12 * Math.Max(volume, 1e-30)))
+        // Same scale-relative test as SdfTransforms.TryMetrics (normalized columns, no absolute floor).
+        if (!(volume > 0 && double.IsFinite(det / volume) && Math.Abs(det / volume) > 1e-12))
         {
             r0 = r1 = r2 = default;
             return false;
@@ -111,18 +137,24 @@ public sealed class FrepField
     public int AddBox(V3 center, V3 x, V3 y, V3 half) => AddPrimitive(FieldKind.Box, center, x, y, half);
 
     /// Difference is operands[0] minus the rest. Operands must already exist. At least one operand.
-    public int AddNode(FieldOp op, double k, IEnumerable<FieldRef> operands)
+    /// <paramref name="place"/>: optional transform M of the node's result, as rows like a placed primitive's
+    /// (field = result(M⁻¹ p) · s(M)).
+    public int AddNode(FieldOp op, double k, IEnumerable<FieldRef> operands, V4[]? place = null)
     {
-        nodes.Add(new Node(op, k, [.. operands]));
+        nodes.Add(new Node(op, k, [.. operands], null, Check(place), place == null ? null : Invert(place)));
+        hasWarps |= place != null; // a new point context: needs the context-aware evaluator
         return nodes.Count - 1;
     }
 
+    static V4[]? Check(V4[]? place) =>
+        place == null || place.Length == 4 ? place : throw new ArgumentException("placement needs 4 rows", nameof(place));
+
     /// Domain warp of <paramref name="child"/>; <paramref name="rows"/> as packed by Csg.FrepWarpMath.Rows (shader uniform layout).
-    public int AddWarp(FieldOp op, V4[] rows, FieldRef child)
+    public int AddWarp(FieldOp op, V4[] rows, FieldRef child, V4[]? place = null)
     {
         int want = op switch { FieldOp.Twist => 2, FieldOp.Bend => 3, FieldOp.Repeat => 6, _ => throw new ArgumentOutOfRangeException(nameof(op)) };
         if (rows.Length != want) throw new ArgumentException($"{op} needs {want} rows", nameof(rows));
-        nodes.Add(new Node(op, 0, [child], rows));
+        nodes.Add(new Node(op, 0, [child], rows, Check(place), place == null ? null : Invert(place)));
         hasWarps = true;
         return nodes.Count - 1;
     }
@@ -137,7 +169,7 @@ public sealed class FrepField
         lock (sealing)
         {
             if (isSealed) return;
-            if (roots.Count == 0 && prims.Count > 0)
+            if (ImplicitUnion && roots.Count == 0 && prims.Count > 0)
                 roots.Add(FieldRef.Node(AddNode(FieldOp.Union, Blend, Enumerable.Range(0, prims.Count).Select(FieldRef.Primitive))));
             isSealed = true;
         }
@@ -204,6 +236,13 @@ public sealed class FrepField
         else
         {
             var n = nodes[r.Index];
+            int outer = top;
+            // Node transform M: the body is evaluated at M⁻¹ p in a context of its own, the result scaled by s(M).
+            if (n.Place is { } pl)
+            {
+                p = Apply(pl, p);
+                ctx = Push(ref memo, ref top, stride);
+            }
             if (n.Op == FieldOp.Offset)
             {
                 d = n.Operands.Length == 0
@@ -251,6 +290,8 @@ public sealed class FrepField
                 d = Eval(n.Operands[0], p, ctx, ref memo, ref top, stride);
                 for (int o = 1; o < n.Operands.Length; o++) d = Combine(n, d, Eval(n.Operands[o], p, ctx, ref memo, ref top, stride));
             }
+            if (n.Place is { } pl2) d *= pl2[3].X;
+            top = outer;
         }
         return memo[slot] = d;
     }
@@ -519,6 +560,7 @@ public sealed class FrepField
             double t = nodeLevel[i];
             if (t == none) continue;
             var n = nodes[i];
+            if (n.Place is { } pl) t /= pl[3].X; // {body(M⁻¹p)·s <= t} = M × {body <= t/s}
             if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
             if (n.Op == FieldOp.Offset)
             {
@@ -558,6 +600,7 @@ public sealed class FrepField
                         new V3(Math.Max(box.Min.X, other.Min.X), Math.Max(box.Min.Y, other.Min.Y), Math.Max(box.Min.Z, other.Min.Z)),
                         new V3(Math.Min(box.Max.X, other.Max.X), Math.Min(box.Max.Y, other.Max.Y), Math.Min(box.Max.Z, other.Max.Z)));
                 }
+            if (n.Fwd is { } fwd && !IsEmpty(box)) box = MapBox(fwd, box);
             nodeBox[i] = IsEmpty(box) ? Empty : box;
         }
 
@@ -668,11 +711,23 @@ public sealed class FrepField
         }
     }
 
+    /// World box of an affine map of a box (its 8 corners mapped).
+    static (V3 Min, V3 Max) MapBox(V4[] fwd, (V3 Min, V3 Max) c)
+    {
+        var box = Empty;
+        for (int i = 0; i < 8; i++)
+        {
+            var p = Apply(fwd, new V3((i & 1) == 0 ? c.Min.X : c.Max.X, (i & 2) == 0 ? c.Min.Y : c.Max.Y, (i & 4) == 0 ? c.Min.Z : c.Max.Z));
+            box = Join(box, (p, p));
+        }
+        return box;
+    }
+
     /// World-axis bounds of {primitive field <= t}, t >= 0, from a box in the primitive's local frame.
     static (V3 Min, V3 Max) PrimBounds(in Prim s, double t)
     {
         // Field value is σ_min · local distance, so {field <= t} is a local offset of t / σ_min.
-        double grow = s.Lip > 1e-12 ? t / s.Lip : t;
+        double grow = t / s.Lip; // Lip is validated finite and positive in AddPrimitive, however small
         V3 lo, hi;
         switch (s.Kind)
         {
