@@ -74,6 +74,11 @@ public static class DualContour
     /// again, at most this many times.
     public static int RefineRestarts = 3;
 
+    /// With refinement, a coarse cell in a crossing that has no sharp placement left to undo is refined and the mesh
+    /// built again, instead of moving its vertex to the in-cell point (which can cut across a crease the cell held).
+    /// More accurate, but the second build roughly doubles the time; off by default.
+    public static bool RefineStuckCoarse = false;
+
     /// Optional progress and timing messages (for test harnesses).
     public static Action<string>? Trace;
     static readonly System.Diagnostics.Stopwatch clock = new();
@@ -333,7 +338,8 @@ public static class DualContour
             if (k > 0 && !Close(g, refined, near, bases, ref unsafeSamples)) return null;
             Mark($"closure: {refined.Count} refined, {near.Count} interface, {g.Blocks.Count} blocks");
 
-            var mesh = Build(g, bases, refined, near, simplify * h, out var stuck, out bool over);
+            bool last = restart >= RefineRestarts;
+            var mesh = Build(g, bases, refined, near, simplify * h, last, out var stuck, out bool over);
             if (over) return null;
             // A coarse cell still in a crossing at its last placement: refine it too and build again.
             if (mesh.Crossings == 0 || stuck.Count == 0 || k == 0 || restart >= RefineRestarts)
@@ -517,7 +523,9 @@ public static class DualContour
     /// Steps 4 and on, for the base cells and refined set given: fine cells inside the refined set, coarse leaves
     /// elsewhere, the octree with merging, contouring, and the crossing repair. <paramref name="stuck"/> returns the
     /// coarse cells still in a crossing at their last placement; <paramref name="over"/> is set if over budget.
-    static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, double tolerance, out HashSet<int> stuck, out bool over)
+    /// <paramref name="last"/>: no restart follows, so coarse cells take their in-cell step too rather than wait to be
+    /// refined.
+    static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, double tolerance, bool last, out HashSet<int> stuck, out bool over)
     {
         stuck = [];
         over = false;
@@ -651,7 +659,10 @@ public static class DualContour
             var node = new Octree.Node(k, bi, bj, bk);
             for (int l = k + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
         }
-        var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell);
+        var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell)
+        {
+            RefineCoarse = RefineStuckCoarse && g.K > 0 && !last,
+        };
         octree.Build(tolerance);
         Mark("octree");
         void ContourAll()
@@ -810,6 +821,9 @@ public static class DualContour
             if (merged.ContainsKey(n.Key) || coarse.ContainsKey(n.Key)) return Kind.Leaf;
             return occupied.Contains(n.Key) ? Kind.Internal : Kind.Empty;
         }
+
+        /// A coarse cell's last step is to be refined (the caller builds again), not its in-cell point.
+        public bool RefineCoarse;
 
         /// The vertex of a leaf node above level 0: a merged cell or a coarse (unrefined base) cell.
         int VertexOf(Node n) => merged.TryGetValue(n.Key, out int v) ? v : coarse[n.Key];
@@ -1007,7 +1021,7 @@ public static class DualContour
 
         /// One step down for each of <paramref name="verts"/>: a merged cell is unmerged, a sharp placement goes back to
         /// its stable one, a stable one to its in-cell point. A coarse (unrefined base) cell is never unmerged, as it
-        /// has no finer cells: it is demoted in place. Vertices already at the bottom are returned in
+        /// has no finer cells: its sharp placement is undone in place, and after that it is returned for refinement. Vertices already at the bottom are returned in
         /// <paramref name="bottom"/>; vertices added by RepairTunnels are left alone. Returns how many changed.
         public int Demote(HashSet<int> verts, out List<int> bottom)
         {
@@ -1020,6 +1034,9 @@ public static class DualContour
                 if (v >= cellMin.Count) continue;
                 if (owner.TryGetValue(v, out long key)) merged.Remove(key);
                 else if (fallback.Remove(v, out var stable)) Move(v, stable);
+                // With refinement, a coarse cell's last step is to be refined, not to lose its feature to the in-cell
+                // point: report it (the caller refines it and builds again).
+                else if (RefineCoarse && cellSide[v] == g.Hb) { bottom.Add(v); continue; }
                 else if (!AtBottom(v)) { Move(v, InCellOf(v)); atInCell.Add(v); }
                 else { bottom.Add(v); continue; }
                 changed++;
@@ -1031,7 +1048,7 @@ public static class DualContour
 
         /// Is vertex v at the last step of its ladder (its in-cell point, with no merge or sharp placement to undo)?
         public bool AtBottom(int v) =>
-            v >= cellMin.Count || (!fallback.ContainsKey(v) && (double.IsNaN(cellSide[v]) || InCellOf(v) == vertices[v]));
+            v >= cellMin.Count || (!fallback.ContainsKey(v) && (double.IsNaN(cellSide[v]) || (RefineCoarse && cellSide[v] == g.Hb) || InCellOf(v) == vertices[v]));
 
         // Polygons found by the octree walk, in order: (a, b, c, e, source) with e = -1 for a triangle. Choosing a
         // quad's diagonal needs field samples, so that is done for all quads in parallel afterwards.
