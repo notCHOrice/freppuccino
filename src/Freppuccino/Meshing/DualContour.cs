@@ -87,6 +87,10 @@ public static class DualContour
     /// Passes of refinement for output triangles that miss the surface by more than 0.25 finest cells (see MeshAt).
     public static int AccuracyPasses = 2;
 
+    /// In a crossing pair, only the vertices highest on the ladder take a step (a merge before a sharp placement
+    /// before a stable one), instead of all six; vertices already on their feature are not moved for a neighbour.
+    public static bool GentleDemotion = true;
+
     /// Optional progress and timing messages (for test harnesses).
     public static Action<string>? Trace;
     static readonly System.Diagnostics.Stopwatch clock = new();
@@ -795,7 +799,22 @@ public static class DualContour
             }
             var bad = new HashSet<int>();
             foreach (var (ta, tb) in crossings)
-                for (int c = 0; c < 3; c++) { bad.Add(tris[3 * ta + c]); bad.Add(tris[3 * tb + c]); }
+            {
+                if (!GentleDemotion)
+                {
+                    for (int c = 0; c < 3; c++) { bad.Add(tris[3 * ta + c]); bad.Add(tris[3 * tb + c]); }
+                    continue;
+                }
+                // Only the pair's least settled vertices take a step: a merge before a sharp placement before a
+                // stable one, so a vertex already on its feature is not moved for a neighbour's sake.
+                int top = 0;
+                for (int c = 0; c < 3; c++) top = Math.Max(top, Math.Max(octree.Rank(tris[3 * ta + c]), octree.Rank(tris[3 * tb + c])));
+                for (int c = 0; c < 3; c++)
+                    foreach (int v in new[] { tris[3 * ta + c], tris[3 * tb + c] })
+                        if (octree.Rank(v) == top) bad.Add(v);
+                foreach (int v in new[] { tris[3 * ta], tris[3 * ta + 1], tris[3 * ta + 2], tris[3 * tb], tris[3 * tb + 1], tris[3 * tb + 2] })
+                    if (tunnelOf.ContainsKey(v)) bad.Add(v);
+            }
             var before = vertices.ToArray();
             var oldKeys = new HashSet<(int, int, int)>();
             for (int t = 0; t < tris.Count; t += 3) oldKeys.Add(Key(tris, t));
@@ -1146,6 +1165,7 @@ public static class DualContour
                 }
             }
             foreach (long key in unmerge) merged.Remove(key);
+            if (unmerge.Count > 0) owners = null;
             foreach (int v in restore)
             {
                 Move(v, fallback[v]);
@@ -1167,7 +1187,7 @@ public static class DualContour
             foreach (int v in verts)
             {
                 if (v >= cellMin.Count) continue;
-                if (owner.TryGetValue(v, out long key)) merged.Remove(key);
+                if (owner.TryGetValue(v, out long key)) { merged.Remove(key); owners = null; }
                 else if (fallback.Remove(v, out var stable)) Move(v, stable);
                 // With refinement, a coarse cell's last step is to be refined, not to lose its feature to the in-cell
                 // point: report it (the caller refines it and builds again).
@@ -1177,6 +1197,15 @@ public static class DualContour
                 changed++;
             }
             return changed;
+        }
+
+        /// How far vertex v is from the bottom of its ladder: 3 merged, 2 sharp placement, 1 stable, 0 at the bottom.
+        public int Rank(int v)
+        {
+            if (v >= cellMin.Count) return 1;
+            if (MergedOwner(v, out _)) return 3;
+            if (fallback.ContainsKey(v)) return 2;
+            return AtBottom(v) ? 0 : 1;
         }
 
         V3 InCellOf(int v) => InCell(g, quadrics[v], cellMin[v] - g.Origin, cellSide[v], cellSide[v]) + g.Origin;
