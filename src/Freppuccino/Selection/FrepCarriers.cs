@@ -68,7 +68,57 @@ public static class FrepCarriers
     public static int? NodeOf(RhinoObject? o) =>
         o?.Attributes.GetUserString(Key) is { } s && int.TryParse(s, out var id) ? id : null;
 
-    public static bool IsCarrier(RhinoObject? o) => NodeOf(o) != null;
+    public static bool IsCarrier(RhinoObject? o) => NodeOf(o) != null || o?.Attributes.GetUserString(InstanceKey) != null;
+
+    // ─────────────── instance carriers ───────────────
+
+    /// A shared leaf picked through a path whose transform differs from its primary instance's: its real brep sits at the
+    /// primary place, so a transient carrier at that instance holds the gumball. Tag: "object|root|path".
+    public const string InstanceKey = "FREP.Instance";
+
+    static string Encode(FrepInstance i) =>
+        $"{i.Object:D}|{(i.Root.IsNode ? "N" + i.Root.NodeId : i.Root.ObjectId.ToString("D"))}|{string.Join(",", i.Path)}";
+
+    /// The instance a carrier stands for, if it is an instance carrier and that instance still exists.
+    public static FrepInstance? InstanceOf(RhinoDoc doc, RhinoObject? o)
+    {
+        if (o is not FrepCarrier || o.Attributes.GetUserString(InstanceKey) is not { } tag) return null;
+        return FrepSelection.Structure(doc).Instances.FirstOrDefault(i => Encode(i) == tag);
+    }
+
+    /// The instance's transform relative to the real brep (which stands for the primary instance): T_inst × T_primary⁻¹.
+    public static Transform? Relative(RhinoDoc doc, FrepInstance inst)
+    {
+        var primary = FrepSelection.Structure(doc).Instances.FirstOrDefault(i => i.Object == inst.Object);
+        if (primary == null || !primary.T.TryGetInverse(out var pi)) return null;
+        return inst.T * pi;
+    }
+
+    /// Whether a leaf instance needs its own carrier (its place isn't the real brep's).
+    public static bool NeedsInstanceCarrier(RhinoDoc doc, FrepInstance inst) =>
+        Relative(doc, inst) is { } rel && !Placement.IsIdentity(rel, 1e-9);
+
+    /// Creates (or finds) the instance's carrier: a box mesh around the brep mapped to that instance.
+    public static RhinoObject? EnsureInstance(RhinoDoc doc, FrepInstance inst)
+    {
+        var tag = Encode(inst);
+        var settings = new ObjectEnumeratorSettings { HiddenObjects = true, LockedObjects = true, ObjectTypeFilter = ObjectType.Mesh };
+        if (doc.Objects.GetObjectList(settings).FirstOrDefault(o => o is FrepCarrier && o.Attributes.GetUserString(InstanceKey) == tag) is { } found)
+            return found;
+        if (doc.Objects.FindId(inst.Object) is not { } leaf || Relative(doc, inst) is not { } rel) return null;
+        var box = leaf.Geometry.GetBoundingBox(true);
+        var corners = box.GetCorners();
+        var mapped = new BoundingBox(corners.Select(c => { c.Transform(rel); return c; }));
+        bool modified = doc.Modified;
+        var a = new ObjectAttributes { Name = "F-rep shape instance" };
+        a.SetUserString(InstanceKey, tag);
+        var mesh = BoxMesh(mapped);
+        var carrier = new FrepCarrier(mesh);
+        doc.Objects.AddRhinoObject(carrier, mesh);
+        doc.Objects.ModifyAttributes(carrier, a, true);
+        doc.Modified = modified;
+        return carrier;
+    }
 
     /// The carrier of a node root (null if none yet).
     public static RhinoObject? Find(RhinoDoc doc, int nodeId) =>
@@ -111,6 +161,12 @@ public static class FrepCarriers
         var settings = new ObjectEnumeratorSettings { HiddenObjects = true, LockedObjects = true, ObjectTypeFilter = ObjectType.Mesh };
         foreach (var o in doc.Objects.GetObjectList(settings).ToList())
         {
+            // Instance carriers are transient: only while selected and their instance exists.
+            if (o.Attributes.GetUserString(InstanceKey) != null)
+            {
+                if (o.IsSelected(false) == 0 || InstanceOf(doc, o) == null) Delete(doc, o);
+                continue;
+            }
             if (NodeOf(o) is not { } id) continue;
             if (o is not FrepCarrier || !roots.Contains(id) || !seen.Add(id)) { Delete(doc, o); continue; }
             if (o.IsSelected(false) > 0) continue;
@@ -190,6 +246,7 @@ public static class FrepCarriers
     public static HashSet<Guid> OnBeforeTransform(RhinoDoc doc, RhinoObject[] objects, Transform x, bool copy)
     {
         var skip = new HashSet<Guid>();
+        if (!copy) TransformInstances(doc, objects, x, skip);
         var carriers = objects.Where(o => o is FrepCarrier && NodeOf(o) != null).ToList();
         if (carriers.Count == 0) return skip;
         if (copy)
@@ -254,6 +311,30 @@ public static class FrepCarriers
             doc.Objects.ModifyAttributes(r.Id, a, true);
         }
         return skip;
+    }
+
+    /// Instance carriers in the transform: the leaf is edited through that instance, Q = T_inst⁻¹ X T_inst on its canonical
+    /// values (the per-type handlers / SDF.Linear), and its real brep — the primary instance — is re-placed as
+    /// T_p Q T_p⁻¹. Both in the running command's undo record. The leaf itself, if also selected, is left to this path.
+    static void TransformInstances(RhinoDoc doc, RhinoObject[] objects, Transform x, HashSet<Guid> skip)
+    {
+        foreach (var c in objects)
+        {
+            if (InstanceOf(doc, c) is not { } inst || doc.Objects.FindId(inst.Object) is not { } leaf) continue;
+            var primary = FrepSelection.Structure(doc).Instances.FirstOrDefault(i => i.Object == inst.Object);
+            if (primary == null || !inst.T.TryGetInverse(out var ti) || !primary.T.TryGetInverse(out var pi)) continue;
+            var q = ti * x * inst.T;
+            var a = leaf.Attributes.Duplicate();
+            if (!Sdf.SdfTransforms.TryApply(a, q, out var reason))
+            {
+                RhinoApp.WriteLine($"Freppuccino: shape not updated: {reason}.");
+                continue;
+            }
+            doc.Objects.ModifyAttributes(leaf, a, true);
+            var g = leaf.Geometry.Duplicate();
+            if (g.Transform(primary.T * q * pi)) doc.Objects.Replace(leaf.Id, g, true);
+            skip.Add(leaf.Id);
+        }
     }
 
     static bool X(Transform x, out Transform inverse) => x.TryGetInverse(out inverse);

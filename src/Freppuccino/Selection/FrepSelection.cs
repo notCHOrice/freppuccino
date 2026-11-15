@@ -97,6 +97,11 @@ public static class FrepSelection
         var result = new List<FrepInstance>();
         foreach (var o in doc.Objects.GetSelectedObjects(false, false))
         {
+            if (FrepCarriers.InstanceOf(doc, o) is { } viaCarrier)
+            {
+                result.Add(viaCarrier);
+                continue;
+            }
             if (SdfUserText.ReadType(o.Attributes) == null || rootSet.Contains(FrepOperand.Object(o.Id))) continue;
             if (map != null && map.TryGetValue(o.Id, out var p) && instances.Any(i => i.SamePath(p))) result.Add(p);
             else if (instances.FirstOrDefault(i => i.Object == o.Id) is { } primary) result.Add(primary);
@@ -160,9 +165,15 @@ public static class FrepSelection
     public static void SelectLeaf(RhinoDoc doc, FrepInstance leaf, bool add)
     {
         if (!add) ClearAll(doc);
-        if (!picked.TryGetValue(doc.RuntimeSerialNumber, out var map)) picked[doc.RuntimeSerialNumber] = map = [];
-        map[leaf.Object] = leaf;
-        doc.Objects.Select(leaf.Object, true, true);
+        // A shared leaf picked where its real brep isn't (another root's transform): its own carrier holds the gumball.
+        if (FrepCarriers.NeedsInstanceCarrier(doc, leaf) && FrepCarriers.EnsureInstance(doc, leaf) is { } carrier)
+            doc.Objects.Select(carrier.Id, true, true);
+        else
+        {
+            if (!picked.TryGetValue(doc.RuntimeSerialNumber, out var map)) picked[doc.RuntimeSerialNumber] = map = [];
+            map[leaf.Object] = leaf;
+            doc.Objects.Select(leaf.Object, true, true);
+        }
         RefreshGumball();
         doc.Views.Redraw();
     }

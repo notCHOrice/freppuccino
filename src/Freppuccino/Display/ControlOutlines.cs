@@ -64,8 +64,10 @@ public static class ControlOutlines
             if (!primary.T.TryGetInverse(out var primaryInv)) continue;
             foreach (var inst in list)
             {
-                bool isSel = objSelected && (rootSet.Contains(FrepOperand.Object(o.Id)) ||
-                    selectedLeaves.Any(l => l.Object == o.Id && FrepInstances.Same(l.T, inst.T)));
+                // Selected: a standalone shape whose brep is selected, or this exact instance among the selected leaves
+                // (picked through its path, or through its own instance carrier).
+                bool isSel = (objSelected && rootSet.Contains(FrepOperand.Object(o.Id))) ||
+                    selectedLeaves.Any(l => l.Object == o.Id && FrepInstances.Same(l.T, inst.T));
                 if (isSel != selected) continue;
                 Transform? rel = ReferenceEquals(inst, primary) ? null : inst.T * primaryInv;
                 Draw(dp, o, rel, vp, doc, color, thickness);
