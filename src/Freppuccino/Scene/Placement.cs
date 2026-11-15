@@ -23,6 +23,21 @@ public static class Placement
 
     public enum Stored { Absent, Valid, Invalid }
 
+    /// A transformed copy of <paramref name="g"/>, or null. Rhino keeps revolved/rational surfaces (sphere, cylinder,
+    /// cone, torus breps) exact under a similarity but does not deform them under a non-uniform scale or shear, so for
+    /// those transforms the copy is made deformable first (as Rhino's own Scale1D/Shear do).
+    public static GeometryBase? Mapped(GeometryBase g, Transform t)
+    {
+        var copy = g.Duplicate();
+        if (t.SimilarityType == TransformSimilarityType.NotSimilarity)
+        {
+            if (copy is Extrusion e) copy = e.ToBrep();
+            if (copy is Brep b) b.MakeDeformable();
+            else if (copy is Surface s) copy = s.ToNurbsSurface();
+        }
+        return copy.Transform(t) ? copy : null;
+    }
+
     /// Absent = identity. Invalid = present but unparsable or not <see cref="IsUsable"/>: the reference counts as missing.
     public static Stored ReadApplied(ObjectAttributes a, out Transform applied) => Read(a.GetUserString(AppliedKey), out applied);
     public static bool TryReadApplied(ObjectAttributes a, out Transform applied) => ReadApplied(a, out applied) == Stored.Valid;

@@ -1,4 +1,5 @@
 using Freppuccino.Csg;
+using Freppuccino.Scene;
 using Freppuccino.Sdf;
 using Freppuccino.Selection;
 using Rhino;
@@ -49,6 +50,22 @@ public static class ControlOutlines
             if (!list.Any(x => FrepInstances.Same(x.T, i.T))) list.Add(i);
         }
 
+        // Drags in progress, with the same precedence as the field preview (FrepScene.Get) and the commit: a dragged root
+        // carrier moves its instances (and its reachable leaves get no edit of their own); then an instance carrier's
+        // Q = T_inst⁻¹ X T_inst; then a leaf's own drag X of its real brep.
+        var rootDrag = new Dictionary<int, Transform>();
+        var instDrag = new Dictionary<Guid, Transform>();
+        var leafDrag = new Dictionary<Guid, Transform>();
+        foreach (var s in doc.Objects.GetSelectedObjects(false, false))
+        {
+            if (!s.GetDynamicTransform(out var dx) || dx.IsIdentity) continue;
+            if (FrepCarriers.NodeOf(s) is { } nid) rootDrag[nid] = dx;
+            else if (FrepCarriers.InstanceOf(s, instances) is { } ci && ci.T.TryGetInverse(out var cti)) instDrag[ci.Object] = cti * dx * ci.T;
+            else if (IsControl(s)) leafDrag[s.Id] = dx;
+        }
+        var underMoving = rootDrag.Count == 0 ? [] : instances
+            .Where(i => i.Root.IsNode && rootDrag.ContainsKey(i.Root.NodeId)).Select(i => i.Object).ToHashSet();
+
         var settings = new ObjectEnumeratorSettings { VisibleFilter = true, HiddenObjects = false, ObjectTypeFilter = ObjectType.Brep | ObjectType.Extrusion };
         foreach (var o in doc.Objects.GetObjectList(settings))
         {
@@ -56,8 +73,8 @@ public static class ControlOutlines
             bool objSelected = o.IsSelected(false) > 0;
             if (!byObject.TryGetValue(o.Id, out var list) || list.Count == 0)
             {
-                // Not reached by any visible root (e.g. under a hidden node): its brep as is.
-                if (objSelected == selected) Draw(dp, o, null, vp, doc, color, thickness);
+                // Not reached by any visible root (e.g. under a hidden node): its brep as is (following its own drag).
+                if (objSelected == selected) Draw(dp, o, leafDrag.TryGetValue(o.Id, out var own) ? own : null, vp, doc, color, thickness);
                 continue;
             }
             var primary = list[0];
@@ -69,8 +86,14 @@ public static class ControlOutlines
                 bool isSel = (objSelected && rootSet.Contains(FrepOperand.Object(o.Id))) ||
                     selectedLeaves.Any(l => l.Object == o.Id && FrepInstances.Same(l.T, inst.T));
                 if (isSel != selected) continue;
-                Transform? rel = ReferenceEquals(inst, primary) ? null : inst.T * primaryInv;
-                Draw(dp, o, rel, vp, doc, color, thickness);
+                // The real brep B sits at the primary instance (B = T_p c); this instance shows T_inst c, previewed:
+                Transform eff;
+                if (inst.Root.IsNode && rootDrag.TryGetValue(inst.Root.NodeId, out var rx)) eff = rx * inst.T * primaryInv;
+                else if (underMoving.Contains(o.Id)) eff = inst.T * primaryInv;             // a moving root carries it
+                else if (instDrag.TryGetValue(o.Id, out var q)) eff = inst.T * q * primaryInv;
+                else if (leafDrag.TryGetValue(o.Id, out var lx)) eff = inst.T * primaryInv * lx;
+                else eff = inst.T * primaryInv;
+                Draw(dp, o, Placement.IsIdentity(eff, 1e-12) ? null : eff, vp, doc, color, thickness);
             }
         }
     }
@@ -89,12 +112,8 @@ public static class ControlOutlines
         Silhouette[]? s = null;
         try
         {
-            var g = o.Geometry;
-            if (rel is { } t)
-            {
-                g = g.Duplicate();
-                if (!g.Transform(t)) g = null;
-            }
+            GeometryBase? g = o.Geometry;
+            if (rel is { } t) g = Placement.Mapped(g, t); // deformable copy under non-uniform maps (fable #173)
             double tol = doc.ModelAbsoluteTolerance, angle = doc.ModelAngleToleranceRadians;
             if (g != null)
                 s = persp ? Silhouette.Compute(g, Kinds, vp.CameraLocation, tol, angle)

@@ -326,8 +326,7 @@ public static class FrepCarriers
         foreach (var (obj, inst) in primary)
         {
             if (!moved.Contains(inst.Root) || moving.Contains(obj) || doc.Objects.FindId(obj) is not { } o) continue;
-            var g = o.Geometry.Duplicate();
-            if (g.Transform(x)) doc.Objects.Replace(obj, g, true);
+            if (Placement.Mapped(o.Geometry, x) is { } g) doc.Objects.Replace(obj, g, true);
         }
 
         // Warp reference objects, once each, owned by the first root (in instance order) whose subtree uses them.
@@ -340,8 +339,7 @@ public static class FrepCarriers
             Placement.WriteApplied(a, x * applied);
             if (!moving.Contains(r.Id))
             {
-                var g = r.Geometry.Duplicate();
-                if (g.Transform(x)) doc.Objects.Replace(r.Id, g, true);
+                if (Placement.Mapped(r.Geometry, x) is { } g) doc.Objects.Replace(r.Id, g, true);
             }
             doc.Objects.ModifyAttributes(r.Id, a, true);
         }
@@ -377,8 +375,7 @@ public static class FrepCarriers
             }
             else
             {
-                var g = leaf.Geometry.Duplicate();
-                if (g.Transform(place)) doc.Objects.Replace(leaf.Id, g, true);
+                if (Placement.Mapped(leaf.Geometry, place) is { } g) doc.Objects.Replace(leaf.Id, g, true);
             }
         }
     }
@@ -399,8 +396,7 @@ public static class FrepCarriers
         foreach (var (_, obj, inv) in items)
             if (doc.Objects.FindId(obj) is { } o)
             {
-                var g = o.Geometry.Duplicate();
-                if (g.Transform(inv)) doc.Objects.Replace(obj, g, true);
+                if (Placement.Mapped(o.Geometry, inv) is { } g) doc.Objects.Replace(obj, g, true);
             }
         if (record != 0) doc.EndUndoRecord(record);
         doc.Views.Redraw();
