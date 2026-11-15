@@ -607,6 +607,11 @@ public static class DualContour
         // 5. Polygons.
         var tris = new List<int>();
         var sources = new List<long>(); // per triangle: the finest grid edge its polygon was built around, or -1
+        // Tunnel repairs whose new vertex stays at the mean of its four neighbours instead of being walked onto the
+        // surface (the crossing repair's step for such a vertex), by the mesh edge they split; and per tunnel vertex
+        // of the current contour, that edge.
+        var flatTunnels = new HashSet<(int, int)>();
+        var tunnelOf = new Dictionary<int, (int, int)>();
         var noMerge = new HashSet<long>();
         foreach (int cell in refined.Concat(near))
         {
@@ -631,7 +636,7 @@ public static class DualContour
                 sources.Clear();
                 octree.Contour();
             }
-            RepairTunnels(g, vertices, tris, sources);
+            RepairTunnels(g, vertices, tris, sources, flatTunnels, tunnelOf);
         }
         ContourAll();
         Mark($"contour: {tris.Count / 3} triangles");
@@ -661,6 +666,8 @@ public static class DualContour
             var oldKeys = new HashSet<(int, int, int)>();
             for (int t = 0; t < tris.Count; t += 3) oldKeys.Add(Key(tris, t));
             int changed = octree.Demote(bad, out var bottom);
+            foreach (int v in bad)
+                if (tunnelOf.TryGetValue(v, out var edge) && flatTunnels.Add(edge)) changed++;
             foreach (int v in bottom)
                 if (coarseCell.TryGetValue(v, out int cell)) stuck.Add(cell);
             if (changed == 0) break; // nothing left to demote: the result reports what remains
@@ -1210,8 +1217,11 @@ public static class DualContour
     /// corners into two strips, and both strips run between the same two vertices u and w. The two
     /// triangles of one strip are split at a new vertex placed on the surface between them, so that
     /// strip uses u-m and m-w while the other keeps u-w.
-    static void RepairTunnels(Grid g, List<V3> vertices, List<int> tris, List<long> sources)
+    /// <paramref name="flat"/>: tunnels (by the edge they split) whose new vertex is not walked onto the surface;
+    /// <paramref name="added"/> returns each new vertex with its edge.
+    static void RepairTunnels(Grid g, List<V3> vertices, List<int> tris, List<long> sources, HashSet<(int, int)> flat, Dictionary<int, (int, int)> added)
     {
+        added.Clear();
         // Mesh edges shared by exactly four triangles, in the order each edge first appears.
         int nt = sources.Count;
         var entries = new (long Key, int Pos)[3 * nt];
@@ -1297,7 +1307,7 @@ public static class DualContour
             // Place the new vertex among the strip's four vertices, then walk it onto the surface.
             var m = (vertices[u] + vertices[w] + vertices[x] + vertices[y]) * 0.25;
             var start = m;
-            for (int it = 0; it < 4; it++)
+            for (int it = 0; it < 4 && !flat.Contains((u, w)); it++)
             {
                 var grad = g.Field.Gradient(m, 1e-5 * g.H);
                 double g2 = V3.Dot(grad, grad);
@@ -1307,6 +1317,7 @@ public static class DualContour
             if ((m - start).Length > g.H) m = start;
             int mi = vertices.Count;
             vertices.Add(m);
+            added[mi] = (u, w);
 
             foreach (int t in new[] { t1, t2 })
             {
