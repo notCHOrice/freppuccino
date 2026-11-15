@@ -29,7 +29,11 @@ public static partial class UserFnCompiler
             Checker.Check(prog, diags);
             if (diags.Count > 0) return Fail(diags);
             var cpu = CpuEmitter.Build(prog);
+#if NET9_0_OR_GREATER
             var hash = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(GlslEmitter.Emit(prog, "F"))))[..16];
+#else
+            var hash = Net8Compat.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(GlslEmitter.Emit(prog, "F"))))[..16];
+#endif
             var program = new UserFnProgram
             {
                 Source = source,

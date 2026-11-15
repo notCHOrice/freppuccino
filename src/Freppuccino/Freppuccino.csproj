@@ -1,21 +1,36 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
     <TargetExt>.rhp</TargetExt>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Title>Freppuccino</Title>
     <Description>Freppuccino Rhino plugin</Description>
     <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
 
-  <ItemGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <DefineConstants>$(DefineConstants);RHINO9</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <DefineConstants>$(DefineConstants);RHINO8</DefineConstants>
+    <RhinoCommon8 Condition="'$(RhinoCommon8)' == ''">8.19.25132.1001</RhinoCommon8>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
     <PackageReference Include="RhinoCommon" Version="9.0.26300.9401" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommon8)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <Compile Remove="Gpu/D3D11/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- native binaries only; P/Invokes are ours (Shaders/) -->
     <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
     <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
@@ -39,11 +54,11 @@
   <ItemGroup>
     <UiSources Include="$(UiDir)src/**/*;$(UiDir)index.html;$(UiDir)package.json;$(UiDir)package-lock.json;$(UiDir)vite.config.ts;$(UiDir)tsconfig*.json;$(UiDir)components.json;$(UiDir).env*;$(MSBuildProjectDirectory)/../../.claude/skills/freppuccino-*/SKILL.md" />
   </ItemGroup>
-  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true'" Inputs="@(UiSources)" Outputs="$(UiBuildOutput)">
+  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true' and '$(TargetFramework)' != ''" Inputs="@(UiSources)" Outputs="$(UiBuildOutput)">
     <Exec Command="npm ci" WorkingDirectory="$(UiDir)" Condition="!Exists('$(UiDir)node_modules')" ContinueOnError="WarnAndContinue" />
     <Exec Command="npm run build" WorkingDirectory="$(UiDir)" ContinueOnError="WarnAndContinue" />
   </Target>
-  <Target Name="CopyUi" AfterTargets="Build">
+  <Target Name="CopyUi" AfterTargets="Build" Condition="'$(TargetFramework)' != '' and '$(OutDir)' != ''">
     <Warning Condition="!Exists('$(UiDist)index.html')" Text="Side panel UI not built (src/ui/dist missing); the panel will show a placeholder. Run npm install + npm run build in src/ui." />
     <ItemGroup>
       <UiFiles Include="$(UiDist)**/*" />

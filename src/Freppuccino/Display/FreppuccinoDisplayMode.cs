@@ -30,7 +30,9 @@ public static class FreppuccinoDisplayMode
             a.BackMaterialTransparency = 1;
             a.ShowSurfaceEdges = false;
             a.ShowIsoCurves = false;
+#if RHINO9
             a.ShowSilhouttes = false;
+#endif
             a.ShowTangentEdges = false;
             a.ShowTangentSeams = false;
             a.ShowCurves = false; // warp axis lines

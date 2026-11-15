@@ -28,9 +28,18 @@ This project is for industrial designers, aerospace, boolean and fillet aficiona
 - Commands to create F-rep objects
 
 
+# Supported Rhino versions
+- Rhino 9 (Windows + Mac): `net10.0` build, RhinoCommon 9. Viewport via Direct3D 11 (Windows) or Metal (Mac)
+- Rhino 8.19+ (Windows): `net8.0` build, RhinoCommon 8.19. Viewport via OpenGL (`Gpu/OpenGL/`), shaders cross-compiled to GLSL 410
+  - Rhino 9-only APIs are behind `#if RHINO9` (gumball settings, silhouettes, Direct3D 11); `Gpu/D3D11/` is not compiled for `net8.0`
+  - .NET 10-only APIs have `net8.0` stand-ins in `Compat/Net8Compat.cs`
+  - Rhino 8 on Mac is not shipped: untested, and it relies on undocumented Rhino Metal exports
+- Rhino 7 is not supported (.NET Framework 4.8)
+
 # Distribution
-- Shipped as a Yak package for Rhino 9 (`rh9_0-any`, Windows + Mac)
-  - `yak/build-yak.ps1` builds Release and packages the plugin, side panel UI and shaderc / SPIRV-Cross native libraries
+- Shipped as two Yak packages per version: `rh9_0-any` (Rhino 9, Windows + Mac) and `rh8_19-win` (Rhino 8, Windows)
+  - `yak/build-yak.ps1` builds Release for both and packages the plugin, side panel UI and shaderc / SPIRV-Cross native libraries (`-Rhino 9` or `-Rhino 8` for one)
+  - Push both `.yak` files for a release; the Package Manager picks the right one per Rhino version
   - `yak/manifest.yml` holds the package metadata: every contributor, description, keywords, `yak/icon.png`
   - New contributors must be added to both `yak/manifest.yml` and the README Authors list
 - CI (`.github/workflows/yak.yml`) runs tests and builds the `.yak` on every push / PR, and attaches it to a GitHub Release on `v*` tags

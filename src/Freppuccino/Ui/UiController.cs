@@ -540,7 +540,9 @@ public sealed class UiController : IDisposable
     static void ShowGumball()
     {
         Rhino.ApplicationSettings.ModelAidSettings.AutoGumballEnabled = true;
+#if RHINO9
         Rhino.ApplicationSettings.GumballSettings.EnableGumball = true;
+#endif
     }
 
     static void SetVisible(RhinoDoc doc, SetVisibleRequest request)
