@@ -615,6 +615,28 @@ public static class FrepShaderGen
     /// Walks the tree like Compile(): prims → spheres, nodes union their operands, live warps grow their child's box.
     static (Point3d Center, double Radius) Bound(FrepSceneData scene)
     {
+        // Node transforms (a transformed blend blended again, nested ones, ...) defeat a global padding factor; the
+        // CPU field's sublevel bounds propagate through the graph exactly, so use them there. Cached per snapshot.
+        if (scene.Tree.Nodes.Any(n => !n.Hidden && n.HasMatrix))
+        {
+            var bb = sublevelBound.GetValue(scene, s =>
+            {
+                var f = Scene.FrepFieldBuilder.Build(s, null, out _);
+                var (lo, hi) = f.Bounds();
+                if (!(lo.X <= hi.X && lo.Y <= hi.Y && lo.Z <= hi.Z)) return new BoundBox(Point3d.Origin, 0);
+                var b = new BoundingBox(lo.X, lo.Y, lo.Z, hi.X, hi.Y, hi.Z);
+                return new BoundBox(b.Center, 0.5 * b.Diagonal.Length * 1.01 + 1e-6);
+            });
+            return (bb.Center, bb.Radius);
+        }
+        return HeuristicBound(scene);
+    }
+
+    sealed record BoundBox(Point3d Center, double Radius);
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<FrepSceneData, BoundBox> sublevelBound = new();
+
+    static (Point3d Center, double Radius) HeuristicBound(FrepSceneData scene)
+    {
         var tree = scene.Tree;
         var prim = new Dictionary<Guid, int>();
         for (int i = 0; i < scene.Ids.Count; i++) prim[scene.Ids[i]] = i;
@@ -666,11 +688,6 @@ public static class FrepShaderGen
             if (p.Place is { } place) s *= Placement.Condition(place);
             stretch = Math.Max(stretch, s);
         }
-        // A node transform maps a blend's bulge (in its own space) out by up to its largest stretch.
-        double grow = 1;
-        foreach (var n in tree.Nodes)
-            if (!n.Hidden && n.HasMatrix) grow *= Math.Max(1, Placement.MaxScale(n.M));
-        stretch *= grow;
         double radius = 0.5 * box.Diagonal.Length + pad * stretch;
         return (box.Center, radius * 1.01 + 1e-6); // margin for float32 rounding
     }

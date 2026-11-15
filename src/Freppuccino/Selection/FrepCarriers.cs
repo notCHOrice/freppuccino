@@ -32,6 +32,7 @@ public static class FrepCarriers
 {
     public const string Key = "FREP.Carrier";
     static bool dirty = true, saving;
+    static readonly HashSet<int> reselect = [];
 
     public static void Install()
     {
@@ -51,6 +52,8 @@ public static class FrepCarriers
         RhinoDoc.BeginSaveDocument += (_, e) =>
         {
             saving = true;
+            // Selected roots get their (rebuilt) carriers selected again after the save.
+            reselect.UnionWith(e.Document.Objects.GetSelectedObjects(false, false).Select(NodeOf).OfType<int>());
             RemoveAll(e.Document);
         };
         RhinoDoc.EndSaveDocument += (_, _) =>
@@ -83,7 +86,18 @@ public static class FrepCarriers
     {
         // Carriers are display helpers: adding or replacing them must not mark the document as changed.
         bool modified = doc.Modified;
-        try { SyncCore(doc); }
+        try
+        {
+            SyncCore(doc);
+            if (reselect.Count > 0)
+            {
+                foreach (var id in reselect)
+                    if (Find(doc, id) is { } c) c.Select(true, true);
+                reselect.Clear();
+                FrepSelection.RefreshGumball();
+                doc.Views.Redraw();
+            }
+        }
         finally { doc.Modified = modified; }
     }
 
@@ -98,7 +112,7 @@ public static class FrepCarriers
             if (NodeOf(o) is not { } id) continue;
             if (o is not FrepCarrier || !roots.Contains(id) || !seen.Add(id)) { Delete(doc, o); continue; }
             if (o.IsSelected(false) > 0) continue;
-            if (RootBox(scene, id) is { } box && !Near(o.Geometry.GetBoundingBox(true), box))
+            if (RootBox(scene, id) is { } box && !Near(o.Geometry.GetBoundingBox(true), Padded(box)))
                 Replace(doc, o, BoxMesh(box));
         }
         foreach (var id in roots)
@@ -136,10 +150,20 @@ public static class FrepCarriers
         doc.Objects.ModifyAttributes(carrier, a, true);
     }
 
+    /// Component-wise, both boxes padded the same way (the carrier's mesh is <see cref="Padded"/>).
     static bool Near(BoundingBox a, BoundingBox b)
     {
-        double tol = 1e-6 * Math.Max(1, b.Diagonal.Length);
-        return a.Min.DistanceTo(b.Min) <= tol && a.Max.DistanceTo(b.Max) <= tol;
+        double tol = 1e-7 * Math.Max(1, b.Diagonal.Length);
+        return Math.Abs(a.Min.X - b.Min.X) <= tol && Math.Abs(a.Min.Y - b.Min.Y) <= tol && Math.Abs(a.Min.Z - b.Min.Z) <= tol &&
+               Math.Abs(a.Max.X - b.Max.X) <= tol && Math.Abs(a.Max.Y - b.Max.Y) <= tol && Math.Abs(a.Max.Z - b.Max.Z) <= tol;
+    }
+
+    /// A degenerate (flat) box still needs volume for the gumball frame.
+    static BoundingBox Padded(BoundingBox b)
+    {
+        double pad = 1e-6 * Math.Max(1, b.Diagonal.Length);
+        b.Inflate(pad);
+        return b;
     }
 
     /// World box of a node root's surface (the field's sublevel bounds), or null if it's empty.
@@ -152,13 +176,7 @@ public static class FrepCarriers
         return new BoundingBox(lo.X, lo.Y, lo.Z, hi.X, hi.Y, hi.Z);
     }
 
-    static Mesh BoxMesh(BoundingBox b)
-    {
-        // A degenerate (flat) box still needs volume for the gumball frame.
-        double pad = 1e-6 * Math.Max(1, b.Diagonal.Length);
-        b.Inflate(pad);
-        return Mesh.CreateFromBox(b, 1, 1, 1);
-    }
+    static Mesh BoxMesh(BoundingBox b) => Mesh.CreateFromBox(Padded(b), 1, 1, 1);
 
     // ─────────────── transforms ───────────────
 
@@ -194,33 +212,39 @@ public static class FrepCarriers
         }
         if (roots.Count == 0) return skip;
         FrepTrees.Set(doc, tree, "Transform blend");
+        var moved = roots.Select(FrepOperand.Node).ToHashSet();
 
-        foreach (var id in roots)
+        // Canonical values: no selected leaf reachable from a transformed root gets its own update (the root's M carries
+        // the change, whichever root is the leaf's primary).
+        foreach (var i in instances)
+            if (moved.Contains(i.Root) && moving.Contains(i.Object)) skip.Add(i.Object);
+
+        // Derived real geometry, once per object, by primary ownership: leaves whose primary instance is in a moved root.
+        foreach (var (obj, inst) in primary)
         {
-            var root = FrepOperand.Node(id);
-            // Leaves whose real object stands for this root (first path).
-            foreach (var (obj, inst) in primary)
+            if (!moved.Contains(inst.Root) || moving.Contains(obj) || doc.Objects.FindId(obj) is not { } o) continue;
+            var g = o.Geometry.Duplicate();
+            if (g.Transform(x)) doc.Objects.Replace(obj, g, true);
+        }
+
+        // Warp reference objects, once each, owned by the first root (in instance order) whose subtree uses them.
+        var (allRoots, _) = FrepInstances.Compute(tree, scene.Ids);
+        var owner = new Dictionary<Guid, FrepOperand>();
+        foreach (var r in allRoots.Where(r => r.IsNode))
+            foreach (var n in Subtree(tree, r.NodeId))
+                if (n.Op.IsWarp() && n.Ref != Guid.Empty) owner.TryAdd(n.Ref, r);
+        foreach (var (refId, root) in owner)
+        {
+            if (!moved.Contains(root) || doc.Objects.FindId(refId) is not { } r) continue;
+            var a = r.Attributes.Duplicate();
+            Placement.ReadApplied(a, out var applied);
+            Placement.WriteApplied(a, x * applied);
+            if (!moving.Contains(r.Id))
             {
-                if (inst.Root != root) continue;
-                if (moving.Contains(obj)) { skip.Add(obj); continue; }
-                if (doc.Objects.FindId(obj) is not { } o) continue;
-                var g = o.Geometry.Duplicate();
-                if (g.Transform(x)) doc.Objects.Replace(obj, g, true);
+                var g = r.Geometry.Duplicate();
+                if (g.Transform(x)) doc.Objects.Replace(r.Id, g, true);
             }
-            // Warp references in this root's subtree.
-            foreach (var n in Subtree(tree, id))
-            {
-                if (!n.Op.IsWarp() || doc.Objects.FindId(n.Ref) is not { } r) continue;
-                var a = r.Attributes.Duplicate();
-                Placement.ReadApplied(a, out var applied);
-                Placement.WriteApplied(a, x * applied);
-                if (!moving.Contains(r.Id))
-                {
-                    var g = r.Geometry.Duplicate();
-                    if (g.Transform(x)) doc.Objects.Replace(r.Id, g, true);
-                }
-                doc.Objects.ModifyAttributes(r.Id, a, true);
-            }
+            doc.Objects.ModifyAttributes(r.Id, a, true);
         }
         return skip;
     }

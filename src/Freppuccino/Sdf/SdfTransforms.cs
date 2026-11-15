@@ -195,12 +195,8 @@ public static class SdfTransforms
                 reason = "unreadable or degenerate " + Scene.Placement.LeafKey;
                 return false;
         }
-        var trial = attributes.Duplicate();
-        if (handler(trial, xform, out reason))
-        {
-            CopySdf(trial, attributes);
-            return true;
-        }
+        // As before placements existed: the handler edits the attributes in place, and only on success.
+        if (handler(attributes, xform, out reason)) return true;
         return TryPlace(attributes, xform, out reason);
     }
 
@@ -216,12 +212,4 @@ public static class SdfTransforms
         return true;
     }
 
-    /// Replaces <paramref name="to"/>'s SDF.* keys with <paramref name="from"/>'s (a handler may drop or add keys).
-    static void CopySdf(ObjectAttributes from, ObjectAttributes to)
-    {
-        static IEnumerable<string> Keys(ObjectAttributes a) =>
-            a.GetUserStrings().AllKeys.Where(k => k != null && k.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal)).Select(k => k!).ToList();
-        foreach (var k in Keys(to)) to.DeleteUserString(k);
-        foreach (var k in Keys(from)) to.SetUserString(k, from.GetUserString(k));
-    }
 }
