@@ -68,14 +68,16 @@ public sealed record SceneNode(
 /// <summary>FFunction inspector data (SDF.Code / SDF.L / SDF.u.*), compiled with UserFnCompiler.</summary>
 /// <param name="Hash">Program hash when <paramref name="Ok"/>.</param>
 /// <param name="Params">Declared params in order; Value = SDF.u.&lt;name&gt; or the default. Empty when the code doesn't compile.</param>
-/// <param name="Lipschitz">SDF.L (field = f / L); 1 when missing or not &gt; 0.</param>
+/// <param name="Lipschitz">SDF.L (field = f / L); 1 when missing or invalid.</param>
+/// <param name="Error">Non-code reason the object isn't drawn (invalid SDF.L), or null.</param>
 public sealed record UserFnInfo(
     string Code,
     bool Ok,
     string? Hash,
     IReadOnlyList<UserFnDiagnosticInfo> Diagnostics,
     IReadOnlyList<UserFnParamInfo> Params,
-    double Lipschitz);
+    double Lipschitz,
+    string? Error = null);
 
 /// 1-based line / column.
 public sealed record UserFnDiagnosticInfo(int Line, int Column, string Message);

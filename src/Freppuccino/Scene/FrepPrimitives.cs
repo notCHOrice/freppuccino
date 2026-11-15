@@ -31,12 +31,13 @@ public static class FrepPrimitives
 
     /// <summary>
     /// Replaces every SDF.* key with the values of <paramref name="p"/> (P packing as documented on <see cref="SdPrimitive"/>).
-    /// SDF.Color is kept. An FFunction whose code doesn't compile keeps its SDF.u.* as they were (param names unknown).
+    /// SDF.Color is kept. An FFunction writes every declared param; if its code doesn't compile, SDF.u.* come from
+    /// <paramref name="rawParams"/> (default: the ones already on <paramref name="attributes"/>), since names are unknown.
     /// </summary>
-    public static void WriteSdf(ObjectAttributes attributes, SdPrimitive p, UnitSystem units)
+    public static void WriteSdf(ObjectAttributes attributes, SdPrimitive p, UnitSystem units, IReadOnlyDictionary<string, string>? rawParams = null)
     {
         var color = attributes.GetUserString(SdfUserText.ColorKey);
-        var rawParams = p.Kind == SdKind.User ? FFunctionCommand.RawParams(attributes) : null;
+        if (p.Kind == SdKind.User) rawParams ??= FFunctionCommand.RawParams(attributes);
         var old = attributes.GetUserStrings();
         foreach (string? key in old.AllKeys)
             if (key != null && key.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal))
@@ -132,13 +133,14 @@ public static class FrepPrimitives
     }
 
     /// <summary>Adds a primitive (proxy Brep + SDF.* user text). Caller handles the undo record and redraw.</summary>
-    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name, System.Drawing.Color? color = null)
+    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name, System.Drawing.Color? color = null,
+        IReadOnlyDictionary<string, string>? rawParams = null)
     {
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = doc.CreateDefaultAttributes();
         if (!string.IsNullOrEmpty(name)) attributes.Name = name;
         if (color is { } c) SetColor(attributes, c);
-        WriteSdf(attributes, p, doc.ModelUnitSystem);
+        WriteSdf(attributes, p, doc.ModelUnitSystem, rawParams);
         var id = doc.Objects.AddBrep(brep, attributes);
         if (id == Guid.Empty) throw new InvalidOperationException($"couldn't add {p.Kind} to the document");
         return id;

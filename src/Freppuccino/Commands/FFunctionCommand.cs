@@ -14,7 +14,7 @@ namespace Freppuccino.Commands;
 /// <summary>
 /// FFunction: a user-written SDF (UserFn DSL) clipped by a box. Same interaction as FBox.
 ///   SDF.Type = sdUser, frame origin = box centre, SDF.b.x/y/z = half-extents (the clip box),
-///   SDF.Code = source, SDF.L = Lipschitz scale (missing = 1), SDF.u.&lt;name&gt; = param values (missing = declared default).
+///   SDF.Code = source, SDF.L = Lipschitz scale (missing = 1), SDF.u.&lt;name&gt; = param values (always written; missing = declared default).
 /// Field = max(f(q) / L, sdBox(q, b)), q = point in the box's local frame (world units).
 /// Transforms: rigid moves the frame; anything else (incl. scale) goes to SDF.Linear.* (b and the code stay as they are).
 /// </summary>
@@ -68,8 +68,8 @@ public class FFunctionCommand : Command
     }
 
     /// <summary>
-    /// Header + b + code + L + param values. Values equal to the declared default are omitted (so a changed default applies).
-    /// <paramref name="raw"/>: SDF.u.* to keep verbatim when the code doesn't compile (names unknown), or extra keys to write.
+    /// Header + b + code + L + every param value (always stored, defaults included).
+    /// <paramref name="raw"/>: SDF.u.* written verbatim when the code doesn't compile (names unknown); ignored otherwise.
     /// </summary>
     public static void WriteSdf(ObjectAttributes attributes, Plane frame, Vector3d b, UserFnInstance fn, UnitSystem units,
         IReadOnlyDictionary<string, string>? raw = null)
@@ -77,14 +77,13 @@ public class FFunctionCommand : Command
         SdfUserText.WriteHeader(attributes, SdfType, frame, units);
         SdfUserText.WriteVec3(attributes, "b", b.X, b.Y, b.Z);
         attributes.SetUserString(SdfUserText.CodeKey, fn.Code);
-        SdfUserText.WriteFloat(attributes, "L", fn.L);
+        SdfUserText.WriteFloatExact(attributes, "L", fn.L);
         if (fn.Program is { } program)
         {
             for (int i = 0; i < program.Params.Length; i++)
             {
                 var prm = program.Params[i];
-                double v = i < fn.Values.Length ? fn.Values[i] : prm.Default;
-                if (v != prm.Default) SdfUserText.WriteFloat(attributes, "u." + prm.Name, v);
+                SdfUserText.WriteFloatExact(attributes, "u." + prm.Name, i < fn.Values.Length ? fn.Values[i] : prm.Default);
             }
         }
         else if (raw != null)
@@ -98,11 +97,17 @@ public class FFunctionCommand : Command
         b = Vector3d.Unset;
         if (!SdfUserText.TryReadFrame(attributes, out frame) || !SdfUserText.TryReadVec3(attributes, "b", out b)) return false;
         if (!(b.X > 0 && b.Y > 0 && b.Z > 0)) return false;
-        double L = 1;
-        if (attributes.GetUserString(SdfUserText.LipschitzKey) is { Length: > 0 } && !SdfUserText.TryReadFloat(attributes, "L", out L)) return false;
-        if (!(L > 0) || double.IsInfinity(L)) return false;
+        if (!TryReadL(attributes, out var L)) return false;
         fn = Instance(attributes.GetUserString(SdfUserText.CodeKey) ?? "", L, RawParams(attributes));
         return true;
+    }
+
+    /// SDF.L: missing = 1; false if present but not a finite number > 0 (the object then isn't drawn).
+    public static bool TryReadL(ObjectAttributes attributes, out double L)
+    {
+        L = 1;
+        if (attributes.GetUserString(SdfUserText.LipschitzKey) is { Length: > 0 } && !SdfUserText.TryReadFloat(attributes, "L", out L)) return false;
+        return L > 0 && double.IsFinite(L);
     }
 
     /// Compiles (cached) and resolves param values: raw[name] if it parses, else the declared default.
@@ -143,5 +148,5 @@ public class FFunctionCommand : Command
     public static bool IsUnitScale(Vector3d scale) =>
         SdfTransforms.NearlyEqual(scale.X, 1) && SdfTransforms.NearlyEqual(scale.Y, 1) && SdfTransforms.NearlyEqual(scale.Z, 1);
 
-    static string Format(double v) => v.ToString("0.##########", CultureInfo.InvariantCulture);
+    static string Format(double v) => SdfUserText.FormatExact(v);
 }

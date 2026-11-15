@@ -22,8 +22,8 @@ primitive: unions skip it, an intersect or a subtract base with it becomes empty
 ## Reaching Rhino (external Claude Code sessions only; the panel agent calls the tools directly)
 
 Rhino's MCP server (`_MCPStart` in Rhino) exposes `run_csharp`. Check its schema for the parameter name (usually
-`script`). Use `RhinoDoc.ActiveDoc` (not `__rhino_doc__`). The script can't reference the plugin assembly, so call the
-tools through reflection; `RunJson` takes and returns JSON text, runs on Rhino's UI thread (it marshals and waits when
+`script`). Its `using` set is limited: fully qualify Rhino types (`Rhino.RhinoDoc.ActiveDoc`, not `__rhino_doc__`). The
+script can't reference the plugin assembly, so call the tools through reflection; `RunJson` takes and returns JSON text, runs on Rhino's UI thread (it marshals and waits when
 called from another thread), and on errors returns `{"error": "..."}`:
 
 ```csharp
@@ -35,7 +35,8 @@ Console.WriteLine(Tool("help"));                       // this guide + every too
 Console.WriteLine(Tool("get_scene"));
 ```
 
-Pass JSON as a C# verbatim string (`@"{""center"": [0,0,0]}"`) or a raw string (`""" {...} """`). `capture_views`
+Pass JSON as a C# verbatim string, quotes doubled: `@"{""center"": [0,0,0]}"`. Raw string literals (`"""`) don't
+compile in `run_csharp`. `capture_views`
 writes PNGs to the temp folder and returns their paths in `image_files`; read them to look at the result (or use the MCP
 `get_viewport_image`). If the plugin assembly can be referenced directly, `Freppuccino.Ai.AiTools.Run(RhinoDoc doc,
 string tool, System.Text.Json.Nodes.JsonObject args)` returns a `JsonNode`; it must run on the UI thread.
@@ -51,11 +52,13 @@ to see F-reps.
 - `set_function_code {target, code, allow_errors?}`: replaces the code. Param values carry over by name; new params
   start at their default. With errors: nothing changes (diagnostics in the error) unless `allow_errors`.
 - `get_function {target}`: `code`, `params` [{name, default, value}], `lipschitz`, the box (`center`, `size`, axes,
-  `linear` if stretched), `ok`, `diagnostics` [{line, column, message}], `hash`, `shader_error` (viewport shader compile
-  error text, if the last shader failed).
+  `linear` if stretched), `ok`, `diagnostics` [{line, column, message}], `hash`, `shader_error` (build error of the
+  doc's current viewport shader, if it fails; it covers every function in the scene).
 - `set_function_params {target, params?: {name: value}, lipschitz?}`: changes values without touching the code (cheap:
   no shader recompile).
-- `update_primitive {ref, center?, size?, x_axis?, y_axis?}` moves / resizes the clip box (code untouched).
+- `update_primitive {ref, center?, size?, x_axis?, y_axis?}` moves / resizes the clip box (code untouched; `code` /
+  `params` / `lipschitz` are an error here, use the tools above). On a stretched function (`stretched: true`) `size` is
+  in the unstretched frame and the stretch stays; changing its axes is an error (use `transform {rotate}`).
 - `get_scene` lists functions as `type: "function"` with `ok`, `error` (first diagnostic), `params`, `lipschitz`.
 - Tree edits: `combine`, `add_operand {node, operand, index?}`, `remove_operand {node, operand}`,
   `move {item, to?, from?, index?}` (no `to` = make it a root), `deform`, `transform`, `delete`.
@@ -77,8 +80,8 @@ float sdf(vec3 p) {            // the entry point: signed distance at p (negativ
 
 - Entry point: `float sdf(vec3 p)`. You may write helper functions above it.
 - Params: `param float name = default;` at top level, in declaration order. The default must be a number literal.
-  Values live on the object (`SDF.u.<name>`); a value equal to the default isn't stored, so changing the default in the
-  code moves every object that hasn't overridden it.
+  Values live on the object (`SDF.u.<name>`, always stored, defaults included), so changing a default in the code
+  only affects params that are new to the object. Code changes carry values over by name; removed params are dropped.
 - Consts: `const float NAME = <constant expression>;` at top level (folded at compile time). `PI` is built in.
 - Types: `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`, `mat2`, `mat3` (column-major, GLSL constructors:
   `mat2(a, b, c, d)`, `mat3(col0, col1, col2)`, `mat3(1.0)` = identity). `int` converts to `float` implicitly.

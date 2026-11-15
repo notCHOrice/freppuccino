@@ -43,6 +43,8 @@ public class DiagnosticTests
     [InlineData("float sdf(vec3 p) { return vec3(1.0, 2.0); }", 1, 28, "vec3 constructor needs 3 components, got 2")]
     [InlineData("float sdf(vec3 p) { int i = 1.5; return 0.0; }", 1, 29, "cannot convert float to int")]
     [InlineData("float sdf(vec3 p) { float a = 1.0; float a = 2.0; return a; }", 1, 42, "'a' is already defined")]
+    [InlineData("float sdf(vec3 p) {\n  for (int i = 0; i < 3; i++) { int i = 5; }\n  return 0.0;\n}", 2, 37, "'i' is already defined")]
+    [InlineData("float sdf(vec3 p) {\n  for (int i = 0; i < 3; i++) int i = 5;\n  return 0.0;\n}", 2, 35, "'i' is already defined")]
     [InlineData("float sdf(vec3 p) { break; return 0.0; }", 1, 21, "'break' outside a loop")]
     [InlineData("const float K = sin(1.0);\nfloat sdf(vec3 p) { float x = 1.0; const float L = x; return K; }", 2, 52, "not a constant expression")]
     [InlineData("float sdf(vec3 p) { while (true) {} return 0.0; }", 1, 21, "'while' loops are not supported")]

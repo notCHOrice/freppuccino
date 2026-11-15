@@ -325,11 +325,18 @@ public sealed class FrepField
             FieldKind.Cone => Cone(x, y, z, s.P),
             FieldKind.Ellipsoid => Ellipsoid(x, y, z, s.P),
             FieldKind.Pyramid => Pyramid(x, y, z, s.P),
-            FieldKind.User => Math.Max(s.Fn!.Eval(x, y, z, s.Fn.U) / s.Fn.L, Box(x, y, z, s.P)), // same as the shader's max(f/L, sdBox)
+            FieldKind.User => UserValue(s, x, y, z),
             _ => throw new ArgumentOutOfRangeException(nameof(s)),
         };
         // σ_min(A). Ellipsoid already folds its own scale in; its lip is 1.
         return value * s.Lip;
+    }
+
+    /// max(f/L, sdBox) like the shader; NaN f → the box (GPU max returns the non-NaN operand).
+    static double UserValue(in Prim s, double x, double y, double z)
+    {
+        double f = s.Fn!.Eval(x, y, z, s.Fn.U) / s.Fn.L, box = Box(x, y, z, s.P);
+        return double.IsNaN(f) ? box : Math.Max(f, box);
     }
 
     static double Box(double x, double y, double z, V3 b)

@@ -12,6 +12,7 @@ public class GlslTests(ITestOutputHelper log)
     {
         { "sphere", "float sdf(vec3 p) { return length(p) - 1.0; }" },
         { "gyroid", "param float scale = 4.0;\nparam float thick = 0.1;\nfloat sdf(vec3 p) { vec3 q = p * scale; return abs(dot(sin(q), cos(q.yzx))) / scale - thick; }" },
+        { "for_body_nested_shadow", "float sdf(vec3 p) {\n  float a = 0.0;\n  for (int i = 0; i < 3; i++) { { int i = 5; a += float(i); } }\n  return a;\n}" },
         { "library", """
             float sdf(vec3 p) {
                 float d = sdTorus(p, vec2(2.0, 0.5));

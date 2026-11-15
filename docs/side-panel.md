@@ -76,7 +76,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setColor {id, color, preview?}` | ✅ write `SDF.Color` (`"#RRGGBB"`) on a primitive; same preview/commit gesture as `setOperation` (one "F-rep color" undo step per picker drag) |
-| `setParam {id, name, value, preview?}` | ✅ write `SDF.<name>` on a primitive and rebuild its proxy brep (`PrimitiveProxy`); same preview/commit gesture as `setOperation` (one "Edit F-rep parameter" undo step per drag). Sizes must be > 0 (cone radii ≥ 0). sdUser also takes `L` (> 0) and `u.<param>` (declared in the code, any finite value) |
+| `setParam {id, name, value, preview?}` | ✅ write `SDF.<name>` on a primitive and rebuild its proxy brep (`PrimitiveProxy`); same preview/commit gesture as `setOperation` (one "Edit F-rep parameter" undo step per drag). Sizes must be > 0 (cone radii ≥ 0). sdUser also takes `L` (> 0) and `u.<param>` (declared in the code, any finite value); both written round-trip exact, always stored |
 | `aiTool {callId, tool, args}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md) |
 | `aiSaveRun {title, transcript, images}` | ✅ writes an AI run log (`Ai/AiRunLog.cs`) |
 
@@ -109,7 +109,8 @@ userFn { code,                          // SDF.Code
          ok, hash?,                     // compiled; hash = UserFnProgram.Hash
          diagnostics: [{line, column, message}],   // 1-based
          params: [{name, value, default}],         // declared order; value = SDF.u.<name> or default; [] if !ok
-         lipschitz }                    // SDF.L; 1 if missing / ≤ 0
+         lipschitz,                     // SDF.L; 1 if missing / invalid
+         error? }                       // set when SDF.L is invalid (not drawn; FrepScene rejects it), shown under the code
 ```
 
 Any user-text edit (panel, `SetUserText`, an AI agent) fires `ModifyObjectAttributes` → the next Idle sends a new `scene`, so code changes show up without reselecting.

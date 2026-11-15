@@ -32,7 +32,7 @@ public static partial class AiTools
         var name = UniqueName(doc, args["name"]?.GetValue<string>() ?? "function");
         var color = AiShapes.Color(args);
         Guid id = Guid.Empty;
-        Mutate(doc, $"create {name}", () => id = FrepPrimitives.Add(doc, prim, name, color));
+        Mutate(doc, $"create {name}", () => id = FrepPrimitives.Add(doc, prim, name, color, raw)); // raw: kept verbatim if the code fails
         var o = Describe(prim.Fn!, false);
         o.Insert(0, "ref", name);
         o.Insert(1, "guid", id.ToString("D"));
@@ -64,7 +64,7 @@ public static partial class AiTools
             o["linear"] = new JsonArray(AiShapes.Json(basis.X), AiShapes.Json(basis.Y), AiShapes.Json(basis.Z));
         foreach (var (key, value) in Describe(prim.Fn!, true)) o[key] = value?.DeepClone();
         if (!obj.Visible) o["visible"] = false;
-        if (Display.ShaderConduit.LastError is { } shaderError) o["shader_error"] = shaderError;
+        if (Display.ShaderConduit.ShaderError(doc) is { } shaderError) o["shader_error"] = shaderError; // the doc's current scene program
         return o;
     }
 
@@ -135,8 +135,8 @@ public static partial class AiTools
 
     /// <summary>
     /// For callers that can only pass strings (Rhino MCP run_csharp via reflection): runs <paramref name="tool"/> on the
-    /// active document, on Rhino's UI thread (marshals and waits up to 2 min if called from another thread). Returns the result
-    /// JSON, or {"error": "..."}. capture_views images are written to PNG files and returned as "image_files" paths.
+    /// active document, on Rhino's UI thread (marshals and waits up to 2 min if called from another thread; skipped if it hasn't
+    /// started by then). Returns the result JSON, or {"error": "..."}. capture_views images are written to PNG files and returned as "image_files" paths.
     /// </summary>
     public static string RunJson(string tool, string argsJson = "{}")
     {
@@ -153,23 +153,33 @@ public static partial class AiTools
                     o.Remove("images");
                     o["image_files"] = SaveImages(images, o["views"] as JsonArray);
                 }
-                return result.ToJsonString();
+                return result.ToJsonString(RunJsonOptions);
             }
             catch (Exception ex)
             {
-                return new JsonObject { ["error"] = ex is AiToolException ? ex.Message : ex.ToString() }.ToJsonString();
+                return new JsonObject { ["error"] = ex is AiToolException ? ex.Message : ex.ToString() }.ToJsonString(RunJsonOptions);
             }
         }
-        if (!RhinoApp.InvokeRequired) return Exec();
+        if (!RhinoApp.InvokeRequired) return Exec(); // already on the UI thread: inline
         string? output = null;
+        int state = 0; // 0 queued, 1 running, 2 abandoned (caller timed out)
         using var done = new ManualResetEventSlim();
         RhinoApp.InvokeOnUiThread((Action)(() =>
         {
+            if (Interlocked.CompareExchange(ref state, 1, 0) != 0) return; // caller gave up: don't run it late
             try { output = Exec(); }
             finally { done.Set(); }
         }));
-        return done.Wait(TimeSpan.FromMinutes(2)) ? output! : new JsonObject { ["error"] = "timed out waiting for Rhino's UI thread" }.ToJsonString();
+        if (done.Wait(TimeSpan.FromMinutes(2))) return output!;
+        if (Interlocked.CompareExchange(ref state, 2, 0) == 0)
+            return new JsonObject { ["error"] = "timed out waiting for Rhino's UI thread; the tool did not run" }.ToJsonString(RunJsonOptions);
+        done.Wait(); // started just now: let it finish so the caller sees what it did
+        return output!;
     }
+
+    /// Readable output for external callers (no \u0027 / \u002B escapes).
+    static readonly System.Text.Json.JsonSerializerOptions RunJsonOptions =
+        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     /// data:image/png;base64 URLs → files under %TEMP%/freppuccino-captures; returns their paths.
     static JsonArray SaveImages(JsonArray images, JsonArray? views)

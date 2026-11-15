@@ -264,7 +264,9 @@ internal sealed class Checker
         }
         if (f.Var != null) f.Var.LoopVar = true;
         loopDepth++;
-        CheckScoped(f.Body);
+        // GLSL: the body doesn't open a scope of its own; its top level shares the init's (nested blocks may shadow).
+        if (f.Body is BlockStmt body) foreach (var s in body.Body) CheckStmt(s);
+        else CheckStmt(f.Body);
         loopDepth--;
         scopes.RemoveAt(scopes.Count - 1);
     }

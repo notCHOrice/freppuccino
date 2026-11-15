@@ -242,5 +242,13 @@ public sealed class D3D11Backend : IGpuBackend
 
     public string? CompileError(ShaderSource program) => failed.GetValueOrDefault(program.Hash);
 
+    public string? Compile(ShaderSource program)
+    {
+        if (!OperatingSystem.IsWindows() || !initOk) return null;
+        try { GetProgram(program); }
+        catch (Exception ex) { LogOnce("compile:" + ex.GetType().Name, "Freppuccino D3D11: " + ex); }
+        return CompileError(program);
+    }
+
     public void Dispose() => ReleaseAll();
 }

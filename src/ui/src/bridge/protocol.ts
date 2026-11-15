@@ -52,8 +52,10 @@ export interface UserFnInfo {
   diagnostics: { line: number; column: number; message: string }[]
   /** declared params in order; value = SDF.u.<name> or the default. Empty when the code doesn't compile. */
   params: { name: string; value: number; default: number }[]
-  /** SDF.L (field = f / L); 1 when missing */
+  /** SDF.L (field = f / L); 1 when missing or invalid */
   lipschitz: number
+  /** non-code reason it isn't drawn (invalid SDF.L) */
+  error?: string
 }
 
 export interface UiSettings {

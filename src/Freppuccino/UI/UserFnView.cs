@@ -19,9 +19,15 @@ static class UserFnView
 
     public static string Code(ObjectAttributes attributes) => attributes.GetUserString(SdfUserText.CodeKey) ?? "";
 
-    /// SDF.L, or 1 when missing / not a positive number.
+    /// SDF.L, or 1 when missing / invalid (see <see cref="LipschitzError"/>).
     public static double Lipschitz(ObjectAttributes attributes) =>
-        SdfUserText.TryReadFloat(attributes, LipschitzName, out var l) && double.IsFinite(l) && l > 0 ? l : 1;
+        Commands.FFunctionCommand.TryReadL(attributes, out var l) ? l : 1;
+
+    /// Why SDF.L makes the object undrawable (same rule as FrepScene), or null.
+    public static string? LipschitzError(ObjectAttributes attributes) =>
+        Commands.FFunctionCommand.TryReadL(attributes, out _)
+            ? null
+            : $"SDF.L is \"{attributes.GetUserString(SdfUserText.LipschitzKey)}\": must be a number > 0. Not drawn until fixed (set Lipschitz L).";
 
     /// Compiler contract says it never throws; guard anyway so a bad compiler can't break the panel.
     public static UserFnResult Compile(string code)
@@ -57,6 +63,7 @@ static class UserFnView
             program?.Hash,
             result.Diagnostics.Select(d => new UserFnDiagnosticInfo(d.Line, d.Column, d.Message)).ToList(),
             parameters,
-            Lipschitz(attributes));
+            Lipschitz(attributes),
+            LipschitzError(attributes));
     }
 }

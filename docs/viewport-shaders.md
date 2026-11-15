@@ -44,7 +44,7 @@ Per-object DSL source (`SDF.Code`, compiled by `UserFn/UserFnCompiler`, cached b
 
 ### Shader compile failures
 
-Backends cache failures per `ShaderSource.Hash` (never retried) and report them via `IGpuBackend.CompileError`. `ShaderConduit` then draws the doc's last successfully drawn scene program instead, but only if its `ShaderSource.Layout` (per-prim row shapes + warp ops + k count) equals the failed one's, so it reads the current uniforms correctly (e.g. function code edited, param count unchanged); otherwise it draws nothing. The error text is `ShaderConduit.LastError` (cleared when the current program draws), shown by `get_function` / get_scene.
+Backends cache failures per `ShaderSource.Hash` (never retried) and report them via `IGpuBackend.CompileError`. `ShaderConduit` then draws the doc's last successfully drawn scene program instead, but only if its `ShaderSource.Layout` (per-prim row shapes + warp ops + k count) equals the failed one's, so it reads the current uniforms correctly (e.g. function code edited, param count unchanged); otherwise it draws nothing. `ShaderConduit.ShaderError(doc)` reports the build error of the doc's current scene program (via `IGpuBackend.Compile`, which builds it on the last-seen device if no draw has yet, so AI tools see it before the redraw), shown by `get_function` / `get_scene`. Metal keeps shader-compile errors per hash and PSO errors per (hash, format); `CompileError` reports the former, else the PSO error for the format it draws with.
 
 ### Warps (FTwist / FBend / FRepeat)
 

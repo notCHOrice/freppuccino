@@ -33,7 +33,7 @@ static class PrimitiveProxy
         edited = null;
         brep = null;
         reason = null;
-        double? missing = null; // value a missing key stands for
+        bool exact = false; // L / u.*: round-trip text, always stored
         if (UserFnView.IsUser(type) && name == UserFnView.LipschitzName)
         {
             if (!double.IsFinite(value) || value <= RhinoMath.ZeroTolerance)
@@ -41,11 +41,11 @@ static class PrimitiveProxy
                 reason = "Lipschitz scale must be greater than zero.";
                 return false;
             }
-            missing = 1;
+            exact = true;
         }
         else if (UserFnView.IsUser(type) && name.StartsWith(UserFnView.ParamPrefix, StringComparison.Ordinal))
         {
-            if (!UserFnView.TryDefault(source, name[UserFnView.ParamPrefix.Length..], out var declared))
+            if (!UserFnView.TryDefault(source, name[UserFnView.ParamPrefix.Length..], out _))
             {
                 reason = $"The code doesn't declare \"{name[UserFnView.ParamPrefix.Length..]}\" (or doesn't compile).";
                 return false;
@@ -55,7 +55,7 @@ static class PrimitiveProxy
                 reason = "Value must be a finite number.";
                 return false;
             }
-            missing = declared;
+            exact = true;
         }
         else
         {
@@ -72,12 +72,13 @@ static class PrimitiveProxy
                 return false;
             }
         }
-        double? current = SdfUserText.TryReadFloat(source, name, out var stored) ? stored : missing;
-        if (current is { } c && Math.Abs(c - value) < 1e-9)
+        // Missing / unreadable key: always write (no default elision; fixes a bad SDF.L).
+        if (SdfUserText.TryReadFloat(source, name, out var current) && (exact ? current == value : Math.Abs(current - value) < 1e-9))
             return false;
 
         edited = source.Duplicate();
-        SdfUserText.WriteFloat(edited, name, value);
+        if (exact) SdfUserText.WriteFloatExact(edited, name, value);
+        else SdfUserText.WriteFloat(edited, name, value);
         if (!TryBrep(type, edited, tolerance, out brep))
         {
             reason = "That value doesn't make a valid primitive.";

@@ -136,6 +136,13 @@ public static class SdfUserText
     public static void WriteFloat(ObjectAttributes attributes, string name, double value) =>
         attributes.SetUserString(Prefix + name, Format(value));
 
+    /// <summary>Like <see cref="WriteFloat"/> but round-trip exact (no rounding / tiny-value snapping): SDF.L, SDF.u.*.</summary>
+    public static void WriteFloatExact(ObjectAttributes attributes, string name, double value) =>
+        attributes.SetUserString(Prefix + name, FormatExact(value));
+
+    /// <summary>Shortest round-trip text, invariant (e.g. "0.1", "1E-15").</summary>
+    public static string FormatExact(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+
     /// <summary>vec2 parameter, e.g. WriteVec2(a, "t", R, r) -> SDF.t.x, SDF.t.y</summary>
     public static void WriteVec2(ObjectAttributes attributes, string name, double x, double y)
     {

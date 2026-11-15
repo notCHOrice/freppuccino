@@ -98,6 +98,12 @@ export function CodeView(props: { fn: UserFnInfo }) {
         </p>
       )}
       {!fn.ok && fn.diagnostics.length === 0 && <p className="type-small text-destructive">Doesn't compile.</p>}
+      {fn.error && (
+        <p className="type-small flex items-start gap-1.5 text-destructive">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 break-words">{fn.error}</span>
+        </p>
+      )}
       {fn.diagnostics.length > 0 && (
         <ul className="grid gap-1" aria-label="Diagnostics">
           {fn.diagnostics.map((d, i) => (
