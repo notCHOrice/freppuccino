@@ -46,10 +46,15 @@ public static class DualContour
     /// ProbeFailures: output triangles with a coarse or merged vertex that a probe (centroid and edge midpoints,
     /// distance estimated as |f| / |grad f|) still finds farther than 0.25 MinCellSize from the surface, after the
     /// refinement passes for them ran out (see MeshAt); 0 without refinement, where it is not checked.
+    /// AccuracyCellSize: the cell of the achieved Refine level, which the accuracy probes use. MinCellSize: the smallest
+    /// cell actually sampled (deeper where ExtraDepth was used). ExtraDepth: deep levels actually used (0 if none).
+    /// DeepCells: fine cells given extra depth. Contradictory: finest vertices whose sheet still holds opposing surface
+    /// normals that its vertex does not fit.
     /// Fragments: small disconnected components, no more than 4 finest cells across. Often these are bits of a
     /// feature thinner than the finest cell whose links were too thin to sample, but not always. Kept, only counted.
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
-        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0, int ProbeFailures = 0);
+        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0, int ProbeFailures = 0,
+        double AccuracyCellSize = 0, int ExtraDepth = 0, int DeepCells = 0, int Contradictory = 0);
 
     const int Block = 8;
 
@@ -376,8 +381,13 @@ public static class DualContour
             Result? result;
             int e = k > 0 ? Math.Clamp(ExtraDepth, 0, 3) : 0;
             while (e > 0 && h / (1 << (k + e)) < minCell) e--;
-            try { result = MeshAt(field, bmin, size, h, simplify, k, e); }
-            catch (BudgetExceeded) when (k > 0) { result = null; }
+            // Over budget: fewer deep levels first (a fresh grid, as positions and caches depend on the depth), then a
+            // lower Refine level.
+            for (result = null; result == null && e >= 0; e--)
+            {
+                try { result = MeshAt(field, bmin, size, h, simplify, k, e); }
+                catch (BudgetExceeded) when (k > 0) { result = null; }
+            }
             if (result != null) return result;
         }
     }
@@ -447,7 +457,8 @@ public static class DualContour
             Mark($"closure: {refined.Count} refined, {near.Count} interface, {g.Blocks.Count} blocks");
 
             bool last = restart >= RefineRestarts;
-            var mesh = Build(g, bases, refined, near, forbidden, simplify * h, last, out var stuck, out var missCells, out var missMerged, out bool over);
+            var mesh = Build(g, bases, refined, near, forbidden, simplify * h, last, NoDeep, NoDeep, out var stuck, out var missCells, out var missMerged,
+                out var deepCandidates, out bool over);
             if (over) return null;
             if (k == 0) return mesh;
             // A coarse cell still in a crossing at its last placement: refine it too and build again.
@@ -461,9 +472,191 @@ public static class DualContour
                 forbidden.UnionWith(missMerged);
                 if (refined.Count + forbidden.Count > before) { again = true; accuracyPass++; }
             }
-            if (!again) return mesh with { UnsafeSamples = unsafeSamples };
+            if (!again)
+            {
+                mesh = mesh with { UnsafeSamples = unsafeSamples };
+                if (e == 0 || deepCandidates.Count == 0) return mesh;
+                return Deepen(g, bases, refined, near, forbidden, simplify * h, mesh, deepCandidates, ref unsafeSamples);
+            }
             refined.UnionWith(stuck);
         }
+    }
+
+    static readonly HashSet<long> NoDeep = [];
+
+    /// Passes of "collect contradictory fine cells, give them extra depth, build again".
+    public static int DeepPasses = 2;
+
+    /// The deep tier: fine cells whose surface evidence the fine lattice cannot represent (one sheet holding opposing
+    /// normals that its vertex does not fit, an all-fine triangle that misses the surface by more than 0.25 of the
+    /// Refine level's cell, or a crossing the repair could not remove) are sampled 2^E times finer, with enough of
+    /// their neighbours to join them (CloseDeep), and the mesh is built again; at most DeepPasses times. Null if over
+    /// budget (the caller retries with fewer deep levels). Returns the last mesh built.
+    static Result? Deepen(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, HashSet<long> forbidden, double tolerance,
+        Result levelMesh, HashSet<long> candidates, ref int unsafeSamples)
+    {
+        var deep = new HashSet<long>(candidates);
+        var deepNear = new HashSet<long>();
+        var mesh = levelMesh;
+        // The level-K mesh is kept as the fallback while the deep tier is built: reserve its memory.
+        long reserved = (long)levelMesh.Vertices.Count * 24 + (long)levelMesh.Triangles.Count * 4;
+        for (int pass = 0; pass < DeepPasses; pass++)
+        {
+            if (!CloseDeep(g, refined, near, bases, deep, deepNear, ref unsafeSamples, reserved)) return null;
+            Mark($"deep closure: {deep.Count} deep, {deepNear.Count} interface, {g.Deep.Count} deep blocks");
+            var built = Build(g, bases, refined, near, forbidden, tolerance, true, deep, deepNear, out _, out _, out _, out var more, out bool over);
+            if (over) return null;
+            mesh = built with { UnsafeSamples = unsafeSamples };
+            more.ExceptWith(deep);
+            if (more.Count == 0) break;
+            deep.UnionWith(more);
+        }
+        return mesh;
+    }
+
+    /// Closes the deep set the way Close closes the refined set, one tier down:
+    /// 1. every fine-lattice neighbour (26) of a deep cell must be a sampled fine cell: its base cell joins the refined
+    ///    set, and the base-level closure is rerun, until none is missing;
+    /// 2. a fine cell next to the deep set and not in it is an interface cell, with a block of deep samples. It stays
+    ///    empty if none of its fine edges changes sign and every deep sample has its corners' sign; it stays one vertex
+    ///    if it has one sheet, no face crossed four times, at most one sign change along each fine edge, no deep sample
+    ///    of a face whose corners agree with another sign, and one loop over its faces on the deep lattice; otherwise it
+    ///    joins the deep set. To a fixed point.
+    /// 3. a deep sample at a fine or base position must have the sign stored there: fine blocks are fully evaluated and
+    ///    the same position is the same point, so a difference is a bug and throws.
+    /// False if over budget.
+    static bool CloseDeep(Grid g, HashSet<int> refined, HashSet<int> near, Dictionary<int, BaseInfo> bases, HashSet<long> deep, HashSet<long> deepNear,
+        ref int unsafeSamples, long reserved)
+    {
+        int sb = g.StepB, side = sb + 1, per = g.PerBase;
+        long deepBytes = (long)side * side * side * 4, fineBytes = (long)(per + 1) * (per + 1) * (per + 1) * 4;
+        var verdict = new Dictionary<long, bool>();
+        while (true)
+        {
+            // 1. Surround the deep set with fine cells.
+            bool grewBase = false;
+            foreach (long cell in deep)
+            {
+                var (fi, fj, fk) = g.FineCoords(cell);
+                for (int dk = -1; dk <= 1; dk++)
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++)
+                        {
+                            int ni = fi + di, nj = fj + dj, nk = fk + dk;
+                            if (!g.HasFineCell(ni, nj, nk)) continue;
+                            if (refined.Add(g.BaseCell(ni >> g.K, nj >> g.K, nk >> g.K))) grewBase = true;
+                        }
+            }
+            if (grewBase)
+            {
+                if (!Close(g, refined, near, bases, ref unsafeSamples)) return false;
+                continue;
+            }
+
+            // 2. Interface cells and deep blocks.
+            deepNear.Clear();
+            foreach (long cell in deep)
+            {
+                var (fi, fj, fk) = g.FineCoords(cell);
+                for (int dk = -1; dk <= 1; dk++)
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++)
+                        {
+                            if (!g.HasFineCell(fi + di, fj + dj, fk + dk)) continue;
+                            long n = g.FineCell(fi + di, fj + dj, fk + dk);
+                            if (!deep.Contains(n)) deepNear.Add(n);
+                        }
+            }
+            var missing = deep.Concat(deepNear).Where(c => !g.Deep.ContainsKey(c)).ToList();
+            long Memory() => (long)g.Deep.Count * deepBytes + (long)g.Blocks.Count * fineBytes + (long)deep.Count * sb * sb * sb * 400 + g.CentreMemory + reserved;
+            if (Memory() + (long)missing.Count * deepBytes > MemoryBudget) return false;
+            Parallel.ForEach(missing, cell =>
+            {
+                var (fi, fj, fk) = g.FineCoords(cell);
+                g.Deep[cell] = g.SampleDeep(fi, fj, fk);
+            });
+            // 3. Sample identity at the fine-lattice corners of every new deep block.
+            foreach (long cell in missing)
+            {
+                var (fi, fj, fk) = g.FineCoords(cell);
+                var block = g.Deep[cell];
+                for (int c = 0; c < 8; c++)
+                {
+                    int ci = (c & 1) * sb, cj = ((c >> 1) & 1) * sb, ck = (c >> 2) * sb;
+                    bool deepSign = block[(ck * side + cj) * side + ci] < 0;
+                    bool stored = g.In(fi * sb + ci, fj * sb + cj, fk * sb + ck);
+                    if (deepSign != stored)
+                        throw new InvalidOperationException($"DualContour: deep sample disagrees with the stored sample at fine cell ({fi}, {fj}, {fk}).");
+                }
+            }
+
+            bool grew = false;
+            foreach (long cell in deepNear.ToList())
+            {
+                if (verdict.TryGetValue(cell, out bool ok) && ok) continue;
+                ok = DeepInterfaceOk(g, cell);
+                verdict[cell] = ok;
+                if (!ok) { deep.Add(cell); grew = true; }
+            }
+            if (Memory() > MemoryBudget) return false;
+            if (!grew) return true;
+            if ((long)deep.Count * sb * sb * sb > 4 * FineCellBudget) return false;
+        }
+    }
+
+    /// Can interface fine cell <paramref name="cell"/> stay empty or one vertex next to deep cells (see CloseDeep)?
+    static bool DeepInterfaceOk(Grid g, long cell)
+    {
+        var (fi, fj, fk) = g.FineCoords(cell);
+        int sb = g.StepB, side = sb + 1, i0 = fi * sb, j0 = fj * sb, k0 = fk * sb;
+        var block = g.Deep[cell];
+        bool At(int i, int j, int k) => block[(k * side + j) * side + i] < 0;
+        Span<bool> corner = stackalloc bool[8];
+        int inside = 0;
+        for (int c = 0; c < 8; c++)
+        {
+            corner[c] = At((c & 1) * sb, ((c >> 1) & 1) * sb, (c >> 2) * sb);
+            if (corner[c]) inside++;
+        }
+        // Each fine edge changes sign at most once along its deep samples.
+        foreach (var (a, b) in Edges)
+        {
+            int ax = a & 1, ay = (a >> 1) & 1, az = a >> 2, dx = (b & 1) - ax, dy = ((b >> 1) & 1) - ay, dz = (b >> 2) - az;
+            int changes = 0;
+            bool prev = corner[a];
+            for (int t = 1; t <= sb; t++)
+            {
+                bool now = At(ax * sb + dx * t, ay * sb + dy * t, az * sb + dz * t);
+                if (now != prev) changes++;
+                prev = now;
+            }
+            if (changes > 1) return false;
+        }
+        if (inside == 0 || inside == 8)
+        {
+            // Stays empty only if nothing changes sign anywhere in it.
+            foreach (float v in block)
+                if ((v < 0) != corner[0]) return false;
+            return true;
+        }
+        // No hidden sign change on a face whose corners agree.
+        for (int f = 0; f < 6; f++)
+        {
+            int[] fc = FaceCorners[f];
+            bool sign = corner[fc[0]];
+            if (corner[fc[1]] != sign || corner[fc[2]] != sign || corner[fc[3]] != sign) continue;
+            int axis = f / 2, at = (f % 2) * sb;
+            for (int u = 0; u <= sb; u++)
+                for (int v = 0; v <= sb; v++)
+                {
+                    bool s = axis == 0 ? At(at, u, v) : axis == 1 ? At(u, at, v) : At(u, v, at);
+                    if (s != sign) return false;
+                }
+        }
+        if (FourCrossingFace(corner)) return false;
+        Span<int> sheet = stackalloc int[12];
+        if (Sheets(corner, sheet, g, i0, j0, k0, sb) != 1) return false;
+        return Octree.BoundaryLoops(g, i0, j0, k0, sb, 1) == 1;
     }
 
     /// Distance estimate from point p to the surface, |f| / |grad f|; +infinity when the gradient is unusable.
@@ -708,12 +901,17 @@ public static class DualContour
     /// refined.
     /// <paramref name="forbidden"/>: merged cells not to merge again. <paramref name="missCells"/> and
     /// <paramref name="missMerged"/> return the owners of output triangles that miss the surface (Result.ProbeFailures).
+    /// <paramref name="deep"/>: fine cells given extra depth (made of deep cells); <paramref name="deepNear"/>: the
+    /// interface cells around them. <paramref name="deepCandidates"/> returns fine cells outside the deep set that
+    /// should join it (see Deepen); empty without deep levels.
     static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, HashSet<long> forbidden, double tolerance, bool last,
-        out HashSet<int> stuck, out HashSet<int> missCells, out HashSet<long> missMerged, out bool over)
+        HashSet<long> deep, HashSet<long> deepNear,
+        out HashSet<int> stuck, out HashSet<int> missCells, out HashSet<long> missMerged, out HashSet<long> deepCandidates, out bool over)
     {
         stuck = [];
         missCells = [];
         missMerged = [];
+        deepCandidates = [];
         over = false;
         int k = g.K, step = g.Step, per = g.PerBase, sb = g.StepB;
         double h = g.Hb;
@@ -731,6 +929,10 @@ public static class DualContour
         var coarseCell = new Dictionary<int, int>();   // that vertex -> its base cell
         // Finest-cell vertices at their in-cell point (placed there, or demoted there by the repair).
         var atInCell = new HashSet<int>();
+        // Per fine or deep vertex, the fine cell that owns it; and the vertices whose sheet holds opposing normals.
+        var fineOwner = new Dictionary<int, long>();
+        var opposingVertex = new HashSet<int>();
+        var contradictoryVertex = new HashSet<int>();
 
         void Add(V3 point, Qef q, V3? stable, V3 min, double sideLength)
         {
@@ -754,7 +956,8 @@ public static class DualContour
         else
         {
             // 4. Fine cells inside the refined set.
-            var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool)> Points, int Bad)[refined.Count];
+            var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad)[refined.Count];
+            long deepBlockBytes = (long)(sb + 1) * (sb + 1) * (sb + 1) * 4;
             var list = refined.OrderBy(c => c).ToArray();
             // The budget is checked on the cells actually made, as they are made: an oscillating field can make far
             // more than an estimate from the refined set's size.
@@ -765,7 +968,7 @@ public static class DualContour
             {
                 var (bi, bj, bk) = g.BaseCoords(list[n]);
                 var cells = new List<(long, int, int)>();
-                var points = new List<(V3, Qef, V3?, V3, bool)>();
+                var points = new List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)>();
                 int bad = 0;
                 Span<bool> s = stackalloc bool[8];
                 Span<int> sheet = stackalloc int[12];
@@ -775,6 +978,34 @@ public static class DualContour
                         for (int fi = bi * per; fi < (bi + 1) * per; fi++)
                         {
                             int i = fi * sb, j = fj * sb, kk = fk * sb;
+                            long owner = g.FineCell(fi, fj, fk);
+                            if (deep.Contains(owner))
+                            {
+                                // A fine cell with extra depth: its deep cells, at level 0.
+                                for (int dk = kk; dk < kk + sb; dk++)
+                                    for (int dj = j; dj < j + sb; dj++)
+                                        for (int di = i; di < i + sb; di++)
+                                        {
+                                            int din = 0;
+                                            for (int c = 0; c < 8; c++)
+                                            {
+                                                s[c] = g.In(di + (c & 1), dj + ((c >> 1) & 1), dk + (c >> 2));
+                                                if (s[c]) din++;
+                                            }
+                                            if (din == 0 || din == 8) continue;
+                                            int dcount = Sheets(s, sheet, g, di, dj, dk, 1), dpacked = 0;
+                                            for (int e = 0; e < 12; e++)
+                                                if (sheet[e] >= 0) dpacked |= sheet[e] << (2 * e);
+                                            for (int c = 0; c < dcount; c++)
+                                            {
+                                                var dx = CellVertex(g, di, dj, dk, 1, g.H, s, sheet, c, out var dq, out var dstable, out _, out bool dfell, out bool dopp, out bool dcontra);
+                                                if (dfell) bad++;
+                                                points.Add((dx, dq, dstable, g.P(di, dj, dk), dfell, g.H, owner, dcontra, dopp));
+                                            }
+                                            cells.Add((new Octree.Node(0, di, dj, dk).Key, dpacked, dcount));
+                                        }
+                                continue;
+                            }
                             int inside = 0;
                             for (int c = 0; c < 8; c++)
                             {
@@ -787,15 +1018,15 @@ public static class DualContour
                                 if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
                             for (int c = 0; c < count; c++)
                             {
-                                var x = CellVertex(g, i, j, kk, sb, g.HB, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack);
+                                var x = CellVertex(g, i, j, kk, sb, g.HB, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack, out bool opp, out bool contra);
                                 if (fellBack) bad++;
-                                points.Add((x, q, stable, g.P(i, j, kk), fellBack));
+                                points.Add((x, q, stable, g.P(i, j, kk), fellBack, g.HB, owner, contra, opp));
                             }
                             cells.Add((new Octree.Node(g.E, fi, fj, fk).Key, packed, count));
                         }
                 cellsOf[n] = (cells, points, bad);
                 long total = Interlocked.Add(ref made, cells.Count);
-                if (total > FineCellBudget || blockBytes + total * 400 + g.CentreMemory > MemoryBudget)
+                if (total > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + total * 400 + g.CentreMemory > MemoryBudget)
                 {
                     overBudget = true;
                     state.Stop();
@@ -815,10 +1046,13 @@ public static class DualContour
                     index[cell] = (at, packed, count);
                     at += count;
                 }
-                foreach (var (x, q, stable, min, fellBack) in points)
+                foreach (var (x, q, stable, min, fellBack, side, owner, contra, opp) in points)
                 {
                     if (fellBack) atInCell.Add(vertices.Count);
-                    Add(x, q, stable, min, g.HB);
+                    fineOwner[vertices.Count] = owner;
+                    if (contra) contradictoryVertex.Add(vertices.Count);
+                    if (opp) opposingVertex.Add(vertices.Count);
+                    Add(x, q, stable, min, side);
                 }
             }
             // Coarse leaves: unrefined base cells with a sign change (one sheet, or they would be refined).
@@ -848,6 +1082,13 @@ public static class DualContour
             var node = new Octree.Node(k + g.E, bi, bj, bk);
             for (int l = k + g.E + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
         }
+        // Above the fine level, nothing containing a deep cell or its interface merges: its boundary is on the deep lattice.
+        foreach (long cell in deep.Concat(deepNear))
+        {
+            var (fi, fj, fk) = g.FineCoords(cell);
+            var node = new Octree.Node(g.E, fi, fj, fk);
+            for (int l = g.E + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
+        }
         var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell)
         {
             Forbidden = forbidden,
@@ -855,7 +1096,7 @@ public static class DualContour
         };
         octree.Build(tolerance);
         // Merging adds face centres (its sheet and loop tests); this is the last place the cache grows.
-        if (k > 0 && g.Blocks.Count * fineBlockBytes + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
+        if (k > 0 && g.Blocks.Count * fineBlockBytes + g.Deep.Count * (long)(sb + 1) * (sb + 1) * (sb + 1) * 4 + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
         {
             over = true;
             return new Result([], [], 0, 0, 0, h);
@@ -985,6 +1226,41 @@ public static class DualContour
             Mark($"probes: {probeFailures} triangles miss; owners {missCells.Count} coarse, {missMerged.Count} merged");
         }
 
+        // Deep candidates (fine cells to give extra depth), with deep levels available: a contradictory sheet whose
+        // vertex is in the output; an output triangle of fine vertices only that misses the surface by more than 0.25 of
+        // the Refine level's cell; a remaining crossing.
+        int contradictory = 0;
+        if (k > 0)
+        {
+            var usedV = new HashSet<int>(tris);
+            foreach (int v in usedV)
+                if (contradictoryVertex.Contains(v) || (atInCell.Contains(v) && opposingVertex.Contains(v))) contradictory++;
+            if (g.E > 0)
+            {
+                foreach (int v in usedV)
+                    if ((contradictoryVertex.Contains(v) || (atInCell.Contains(v) && opposingVertex.Contains(v))) && fineOwner.TryGetValue(v, out long owner))
+                        deepCandidates.Add(owner);
+                var missFine = new ConcurrentBag<long>();
+                Parallel.For(0, tris.Count / 3, t =>
+                {
+                    int a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+                    if (!fineOwner.ContainsKey(a) || !fineOwner.ContainsKey(b) || !fineOwner.ContainsKey(c)) return;
+                    V3 pa = vertices[a], pb = vertices[b], pc = vertices[c];
+                    double tol = 0.25 * g.HB, step = 1e-5 * g.HB;
+                    if (Distance(g, (pa + pb + pc) * (1.0 / 3), step) > tol || Distance(g, (pa + pb) * 0.5, step) > tol ||
+                        Distance(g, (pb + pc) * 0.5, step) > tol || Distance(g, (pc + pa) * 0.5, step) > tol)
+                        foreach (int v in new[] { a, b, c }) missFine.Add(fineOwner[v]);
+                });
+                deepCandidates.UnionWith(missFine);
+                foreach (var (ta, tb) in crossings)
+                    for (int c = 0; c < 3; c++)
+                        foreach (int v in new[] { tris[3 * ta + c], tris[3 * tb + c] })
+                            if (fineOwner.TryGetValue(v, out long owner)) deepCandidates.Add(owner);
+                deepCandidates.ExceptWith(deep);
+                Mark($"deep candidates: {deepCandidates.Count}");
+            }
+        }
+
         // Finest cells in the output that ended at their in-cell point.
         int unresolved = k == 0 ? 0 : tris.Distinct().Count(v => atInCell.Contains(v) && v < cellSide.Count && cellSide[v] <= g.HB);
 
@@ -998,8 +1274,10 @@ public static class DualContour
             if (remap[v] < 0) { remap[v] = used.Count; used.Add(vertices[v]); }
             tris[t] = remap[v];
         }
-        return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, g.H, k, refined.Count, unresolved,
-            Fragments: CountFragments(used, tris, 4 * g.H), ProbeFailures: probeFailures);
+        double minCell = k == 0 ? h : deep.Count > 0 ? g.H : g.HB;
+        return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, minCell, k, refined.Count, unresolved,
+            Fragments: CountFragments(used, tris, 4 * g.HB), ProbeFailures: probeFailures,
+            AccuracyCellSize: k == 0 ? h : g.HB, ExtraDepth: deep.Count > 0 ? g.E : 0, DeepCells: deep.Count, Contradictory: contradictory);
     }
 
     /// Connected pieces of the mesh whose bounding box diagonal is at most <paramref name="size"/>.
@@ -1800,7 +2078,13 @@ public static class DualContour
     /// does not resolve the surface (placement off the surface, a fit residual over 0.05 cells, or two normals more
     /// than 90° apart); <paramref name="fellBack"/>: the placement went to the in-cell point.
     static V3 CellVertex(Grid g, int i, int j, int k, int step, double unit, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which,
-        out Qef q, out V3? stable, out bool unresolved, out bool fellBack)
+        out Qef q, out V3? stable, out bool unresolved, out bool fellBack) =>
+        CellVertex(g, i, j, k, step, unit, inside, sheet, which, out q, out stable, out unresolved, out fellBack, out _, out _);
+
+    /// <paramref name="opposing"/>: the sheet holds two normals more than 90° apart. <paramref name="contradictory"/>:
+    /// that, and its vertex does not fit them (fit residual over 0.05 cells, or the placement fell back to the in-cell point).
+    static V3 CellVertex(Grid g, int i, int j, int k, int step, double unit, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which,
+        out Qef q, out V3? stable, out bool unresolved, out bool fellBack, out bool opposing, out bool contradictory)
     {
         var cellMin = g.P(i, j, k);
         double h = unit;
@@ -1831,9 +2115,12 @@ public static class DualContour
         // A resolved corner: the stable fit keeps all three plane directions, and the fit and the field both put the
         // vertex on them. Normals far apart are expected there, so they alone don't mark the cell unresolved.
         bool clean = !unresolved && stable == null && q.Rank(Cutoff) == 3 && rms <= 0.05 * h && Off(g, x, h) <= 0.02 * h;
-        for (int a = 0; a < count && !unresolved && !clean; a++)
+        opposing = false;
+        for (int a = 0; a < count && !opposing; a++)
             for (int b = a + 1; b < count; b++)
-                if (V3.Dot(normals[a], normals[b]) < 0) { unresolved = true; break; }
+                if (V3.Dot(normals[a], normals[b]) < 0) { opposing = true; break; }
+        if (opposing && !clean) unresolved = true;
+        contradictory = opposing && (fellBack || rms > 0.05 * h);
         x += g.Origin;
         if (stable is { } s) stable = s + g.Origin;
         return x;

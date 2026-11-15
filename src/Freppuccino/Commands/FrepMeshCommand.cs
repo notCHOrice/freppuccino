@@ -143,10 +143,14 @@ public class FrepMeshCommand : Command
         {
             string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
             RhinoApp.WriteLine(
-                $"FrepMesh: refine {result.Refine}{lowered}: {result.RefinedCells} cells sampled at {result.MinCellSize:0.####} {doc.ModelUnitSystem}" +
+                $"FrepMesh: refine {result.Refine}{lowered}: accuracy cell {result.AccuracyCellSize:0.####} {doc.ModelUnitSystem}, {result.RefinedCells} cells refined" +
+                (result.DeepCells > 0 ? $", {result.DeepCells} of those cells sampled {result.ExtraDepth} level(s) deeper" : "") +
+                $"; smallest cell sampled {result.MinCellSize:0.#####} {doc.ModelUnitSystem}" +
                 (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
+            if (result.Contradictory > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.Contradictory} finest vertices still hold opposing surface normals in one sheet.");
             if (result.ProbeFailures > 0)
-                RhinoApp.WriteLine($"FrepMesh: {result.ProbeFailures} triangle(s) at coarse cells are still more than {0.25 * result.MinCellSize:0.####} " +
+                RhinoApp.WriteLine($"FrepMesh: {result.ProbeFailures} triangle(s) at coarse cells are still more than {0.25 * result.AccuracyCellSize:0.####} " +
                     $"{doc.ModelUnitSystem} from the surface by the field's estimate (refinement passes ran out).");
         }
         if (result.Fragments > 0)
