@@ -535,7 +535,7 @@ public static class DualContour
             foreach (long key in unmerge) merged.Remove(key);
             foreach (int v in restore)
             {
-                vertices[v] = fallback[v];
+                Move(v, fallback[v]);
                 fallback.Remove(v);
             }
             return unmerge.Count + restore.Count;
@@ -553,8 +553,8 @@ public static class DualContour
             {
                 if (v >= cellMin.Count) continue;
                 if (owner.TryGetValue(v, out long key)) merged.Remove(key);
-                else if (fallback.Remove(v, out var stable)) vertices[v] = stable;
-                else if (InCell(g, quadrics[v], cellMin[v] - g.Origin, g.H) + g.Origin is var x && x != vertices[v]) vertices[v] = x;
+                else if (fallback.Remove(v, out var stable)) Move(v, stable);
+                else if (InCell(g, quadrics[v], cellMin[v] - g.Origin, g.H) + g.Origin is var x && x != vertices[v]) Move(v, x);
                 else continue;
                 changed++;
             }
@@ -562,6 +562,44 @@ public static class DualContour
         }
 
         public void Contour() => CellProc(new Node(levels, 0, 0, 0));
+
+        // Field samples taken while contouring, kept across the repair rounds, which contour the same mesh again
+        // with few vertices changed. An entry is valid while none of its vertices has moved since (see Move).
+        readonly Dictionary<int, int> moves = [];
+        readonly Dictionary<(int, int, int), (int, int, int, V3)> gradients = [];
+        readonly Dictionary<(int, int), (int, int, double)> midpoints = [];
+
+        int Stamp(int v) => moves.GetValueOrDefault(v);
+
+        void Move(int v, V3 to)
+        {
+            vertices[v] = to;
+            moves[v] = Stamp(v) + 1;
+        }
+
+        /// The field's gradient at the centroid of triangle a, b, c (in any order).
+        V3 CentroidGradient(int a, int b, int c)
+        {
+            if (a > b) (a, b) = (b, a);
+            if (b > c) (b, c) = (c, b);
+            if (a > b) (a, b) = (b, a);
+            int sa = Stamp(a), sb = Stamp(b), sc = Stamp(c);
+            if (gradients.TryGetValue((a, b, c), out var e) && e.Item1 == sa && e.Item2 == sb && e.Item3 == sc) return e.Item4;
+            var grad = g.Field.Gradient((vertices[a] + vertices[b] + vertices[c]) * (1.0 / 3), 1e-5 * g.H);
+            gradients[(a, b, c)] = (sa, sb, sc, grad);
+            return grad;
+        }
+
+        /// |field| at the midpoint of a and b.
+        double Midpoint(int a, int b)
+        {
+            if (a > b) (a, b) = (b, a);
+            int sa = Stamp(a), sb = Stamp(b);
+            if (midpoints.TryGetValue((a, b), out var e) && e.Item1 == sa && e.Item2 == sb) return e.Item3;
+            double f = Math.Abs(g.Field.Value((vertices[a] + vertices[b]) * 0.5));
+            midpoints[(a, b)] = (sa, sb, f);
+            return f;
+        }
 
         // Axis d = 0, 1, 2; the other two in cyclic order, so that d = p × q.
         static int P(int d) => (d + 1) % 3;
@@ -650,7 +688,7 @@ public static class DualContour
             var n = V3.Cross(pb - pa, pc - pa);
             double area = n.Length;
             if (area < 1e-12 * g.H * g.H) return 1;
-            var grad = g.Field.Gradient((pa + pb + pc) * (1.0 / 3), 1e-5 * g.H);
+            var grad = CentroidGradient(a, b, c);
             double len = grad.Length;
             return len > 0 ? V3.Dot(n, grad) / (area * len) : 1;
         }
@@ -719,7 +757,7 @@ public static class DualContour
             // Split along the diagonal that lies closer to the surface, so a crease running through
             // the quad becomes a triangle edge rather than being cut across.
             int a = poly[0], b = poly[1], c = poly[2], e = poly[3];
-            double ac = Math.Abs(g.Field.Value((vertices[a] + vertices[c]) * 0.5)), be = Math.Abs(g.Field.Value((vertices[b] + vertices[e]) * 0.5));
+            double ac = Midpoint(a, c), be = Midpoint(b, e);
             // But never pick a split that folds a triangle over (its normal against the field's gradient)
             // when the other split does not.
             double viaAc = Math.Min(Facing(a, b, c), Facing(a, c, e)), viaBe = Math.Min(Facing(a, b, e), Facing(b, c, e));
