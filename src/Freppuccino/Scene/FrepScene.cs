@@ -39,6 +39,8 @@ public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimit
     public IReadOnlyList<Guid> Ids { get; init; } = [];
     /// Tree node ids, parallel to Warps.
     public IReadOnlyList<int> WarpIds { get; init; } = [];
+    /// Non-empty roots in the shader's map() order (its selection flags follow it).
+    public IReadOnlyList<FrepOperand> Roots { get; init; } = [];
     /// The tree this was compiled from.
     public FrepTree Tree { get; init; } = FrepTree.Empty;
     public int Count => Primitives.Count;
@@ -117,8 +119,8 @@ public static class FrepScene
                 if (Structure(prims[i]) != Structure(scene.Primitives[i])) prims[i] = scene.Primitives[i];
             return next;
         }
-        var (program, ks, _) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
-        return next with { Program = program, Ks = ks };
+        var (program, ks, _, roots) = FrepShaderGen.Compile(prims, scene.Ids, tree, scene.WarpIds.ToHashSet());
+        return next with { Program = program, Ks = ks, Roots = roots };
     }
 
     /// What the shader source depends on per primitive (kind, placed or not).
@@ -222,7 +224,7 @@ public static class FrepScene
                 applied[n.Id] = a;
             }
 
-        var (program, ks, warpIds) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
+        var (program, ks, warpIds, rootOps) = FrepShaderGen.Compile(prims, newIds, tree, refs.Keys.ToHashSet());
         var bounds = new Bounds(doc, tree, refs);
         var warps = new List<SdWarp>();
         var newWarpOwners = new List<RhinoObject>();
@@ -236,7 +238,7 @@ public static class FrepScene
             newWarpApplied.Add(applied[id]);
         }
 
-        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree };
+        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree, Roots = rootOps };
         owners = newOwners;
         warpOwners = newWarpOwners;
         warpApplied = newWarpApplied;

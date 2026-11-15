@@ -18,6 +18,9 @@ public sealed class ShaderConduit : DisplayConduit
     const int TitleClearance = 28;
     bool loggedFailure, loggedCap;
 
+    /// F-rep control breps aren't drawn by Rhino in this mode; we outline them (ControlOutlines).
+    protected override void PreDrawObject(DrawObjectEventArgs e) => ControlOutlines.Suppress(e);
+
     protected override void PostDrawObjects(DrawEventArgs e)
     {
         var dp = e.Display;
@@ -34,8 +37,11 @@ public sealed class ShaderConduit : DisplayConduit
                 RhinoApp.WriteLine($"Freppuccino: uniform budget full, {scene.Dropped} primitives not drawn");
                 loggedCap = true;
             }
+            // Control outlines first, so blends drawn over them hide what they cover.
+            ControlOutlines.Draw(dp, e.RhinoDoc, selected: false);
+            dp.Flush(); // Rhino batches curves; without this they land after (over) our GPU draw
             if (scene.Program != null)
-                drew |= gpu.Draw(dp, scene.Program, FrepShaderGen.SceneUniforms(dp.Viewport, scene));
+                drew |= gpu.Draw(dp, scene.Program, FrepShaderGen.SceneUniforms(dp.Viewport, scene, Selection.FrepSelection.Roots(e.RhinoDoc)));
 
             var (r, size) = BadgeRect(dp);
             drew |= gpu.Draw(dp, PillShader.Source, PillShader.Uniforms(r.Left, r.Top, r.Right, r.Bottom, size.Width, size.Height));
@@ -55,6 +61,8 @@ public sealed class ShaderConduit : DisplayConduit
         if (dp == null || !FreppuccinoDisplayMode.IsActive(dp) || GpuBackends.For(dp) == null) return;
         try
         {
+            // Selected leaves: their outline in the selection colour, over the blends.
+            ControlOutlines.Draw(dp, e.RhinoDoc, selected: true);
             var (r, _) = BadgeRect(dp);
             dp.Draw2dText(Badge, System.Drawing.Color.FromArgb(30, 30, 30), new Point2d((r.Left + r.Right) * 0.5, (r.Top + r.Bottom) * 0.5), true, BadgeTextHeight, "Arial");
         }

@@ -23,6 +23,31 @@ public static class FrepSelection
     /// Per doc: leaf object → the instance it was picked through (absent = primary). Stale entries are ignored on read.
     static readonly Dictionary<uint, Dictionary<Guid, FrepInstance>> picked = [];
 
+    /// Node roots aren't Rhino objects, so Rhino's deselect-all (Esc, click on empty space, SelNone, commands that
+    /// deselect) doesn't reach them; this does, panel open or not. Also drops state of closed documents.
+    public static void Install()
+    {
+        RhinoDoc.DeselectAllObjects += (_, e) => ClearNodes(e.Document);
+        // Esc at the idle prompt (EscapeKeyPressed only fires during long operations).
+        RhinoApp.KeyboardEvent += key =>
+        {
+            if (key == 27 && RhinoDoc.ActiveDoc is { } doc && !Rhino.Commands.Command.InCommand()) ClearNodes(doc);
+        };
+        RhinoDoc.CloseDocument += (_, e) => picked.Remove(e.Document.RuntimeSerialNumber);
+        // SelNone raises DeselectAllObjects only when some Rhino object was selected.
+        Rhino.Commands.Command.BeginCommand += (_, e) =>
+        {
+            if (e.CommandEnglishName == "SelNone" && e.Document is { } doc) ClearNodes(doc);
+        };
+    }
+
+    static void ClearNodes(RhinoDoc doc)
+    {
+        if (UiController.SelectedNodes(doc).Count == 0) return;
+        UiController.SetSelectedNodes(doc, []);
+        doc.Views.Redraw();
+    }
+
     public static (List<FrepOperand> Roots, List<FrepInstance> Instances) Structure(RhinoDoc doc)
     {
         var scene = FrepScene.Get(doc);

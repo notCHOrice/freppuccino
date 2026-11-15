@@ -22,7 +22,12 @@ public static class FrepShaderGen
 {
     /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, prim colors packed 4 per row,
     /// warp rows, then blend k's packed 4 per row.
-    const int HeaderRows = 7;
+    const int HeaderRows = 9; // + selColor, selMask
+
+    /// Roots whose "selected" flag fits the header's selMask row (24 exact bits per float); later roots get no selection band.
+    public const int MaxSelectableRoots = 96;
+    /// Selection band width, screen pixels.
+    public const double SelectionBandPx = 2.0;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
 
     /// Sphere: 1 row (xyz center, w s). Everything else: 3 rows (xyz origin, w P.x), (xyz unit X, w P.y), (xyz unit Y, w P.z).
@@ -79,7 +84,8 @@ public static class FrepShaderGen
     /// <paramref name="ids"/> parallel to <paramref name="prims"/>; prims must fit <see cref="PrimRowBudget"/>.
     /// <paramref name="liveWarps"/>: warp node ids whose reference geometry resolved. Returns Program = null if the root is empty;
     /// Ks (k slot order) and Warps (warp row order) for <see cref="SceneUniforms"/>.
-    public static (ShaderSource? Program, List<double> Ks, List<int> Warps) Compile(
+    /// Roots: the non-empty roots in map() order (selection flags follow it).
+    public static (ShaderSource? Program, List<double> Ks, List<int> Warps, List<FrepOperand> Roots) Compile(
         IReadOnlyList<SdPrimitive> prims, IReadOnlyList<Guid> ids, FrepTree tree, IReadOnlySet<int> liveWarps)
     {
         var index = new Dictionary<Guid, int>();
@@ -204,11 +210,28 @@ public static class FrepShaderGen
 
         var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
         var roots = new List<string>();
+        var rootOps = new List<FrepOperand>();
         for (int i = 0; i < prims.Count; i++)
-            if (!referenced.Contains(FrepOperand.Object(ids[i])) && Eval(FrepOperand.Object(ids[i]), 0) is { } v) roots.Add(v);
+            if (!referenced.Contains(FrepOperand.Object(ids[i])) && Eval(FrepOperand.Object(ids[i]), 0) is { } v)
+            {
+                roots.Add(v);
+                rootOps.Add(FrepOperand.Object(ids[i]));
+            }
         foreach (var n in tree.Nodes)
-            if (!referenced.Contains(FrepOperand.Node(n.Id)) && Eval(FrepOperand.Node(n.Id), 0) is { } v) roots.Add(v);
-        if (roots.Count == 0) return (null, ks, warps);
+            if (!referenced.Contains(FrepOperand.Node(n.Id)) && Eval(FrepOperand.Node(n.Id), 0) is { } v)
+            {
+                roots.Add(v);
+                rootOps.Add(FrepOperand.Node(n.Id));
+            }
+        if (roots.Count == 0) return (null, ks, warps, rootOps);
+
+        // Distance to the selected roots (flags = bits of u.selMask, 24 per float); drives the selection band.
+        map.Append("    s = 1e20;\n");
+        for (int i = 0; i < Math.Min(roots.Count, MaxSelectableRoots); i++)
+        {
+            double scale = 1.0 / (1 << (i % 24)); // exact power of two
+            map.Append($"    if (mod(floor(u.selMask.{"xyzw"[i / 24]} * {scale.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}), 2.0) > 0.5) s = min(s, {roots[i]});\n");
+        }
 
         map.Append($"    float d = {roots[0]};\n");
         color.Append($"    vec4 c = {roots[0]};\n");
@@ -222,7 +245,7 @@ public static class FrepShaderGen
         var key = dataRows + "\n" + map + "\n" + color;
         if (!cache.TryGetValue(key, out var src))
             cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString(), color.ToString()));
-        return (src, ks, warps);
+        return (src, ks, warps, rootOps);
     }
 
     static string Fragment(int dataRows, string map, string color) => $$"""
@@ -238,6 +261,8 @@ public static class FrepShaderGen
             vec4 frustum;    // left, right, bottom, top (camera coords, at near)
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
             vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
+            vec4 selColor;   // rgb selection color, w = selection band width (screen px)
+            vec4 selMask;    // root "selected" flags, 24 bits per float (root i: component i / 24, bit i % 24)
             // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
             // then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
@@ -393,10 +418,12 @@ public static class FrepShaderGen
             vec3 i = clamp(round(toLocal(p, o, x, y) / max(s, vec3(1e-9))), lo.xyz, hi.xyz) * s;
             return p - x.xyz * i.x - y.xyz * i.y - cross(x.xyz, y.xyz) * i.z;
         }
-        float map(vec3 p)
+        // s = distance to the selected roots (1e20 if none). map() drops it, so its code is dead there.
+        float mapSel(vec3 p, out float s)
         {
         {{map}}    return d;
         }
+        float map(vec3 p) { float s; return mapSel(p, s); }
         // Only evaluated once per hit pixel, so the hot march loop stays float-only.
         vec3 sceneColor(vec3 p)
         {
@@ -434,15 +461,20 @@ public static class FrepShaderGen
             if (tMax < t) discard;
             float eps = 0.0;
             bool hit = false;
+            float nearSel = 1e20, s = 1e20; // closest approach to a selected root in front of the hit, in pixels
             for (int i = 0; i < 256; i++)
             {
                 eps = u.params.z + u.params.y * t; // half-pixel footprint at t
                 // Shrink the surface by params.x pixels so Rhino's wires stay visible around the shading.
-                float d = map(ro + rd * t) + u.params.x * 2.0 * eps;
+                float d = mapSel(ro + rd * t, s) + u.params.x * 2.0 * eps;
                 if (d < eps) { hit = true; break; }
+                nearSel = min(nearSel, s / (2.0 * eps));
                 t += d;
                 if (t > tMax) break;
             }
+            // Selection band: just outside a selected root's silhouette, in front of whatever the ray hits (not on the root).
+            bool onSelected = hit && s < 2.0 * eps; // the hit surface is a selected root's (it is the field's min there)
+            if (!onSelected && nearSel < u.selColor.w) { outColor = vec4(u.selColor.rgb, 1.0); return; }
             if (!hit) discard;
             vec3 p = ro + rd * t;
             const vec2 k = vec2(1.0, -1.0);
@@ -453,7 +485,8 @@ public static class FrepShaderGen
         }
         """;
 
-    public static byte[] SceneUniforms(RhinoViewport vp, FrepSceneData scene)
+    /// <paramref name="selectedRoots"/>: roots drawn with the selection band.
+    public static byte[] SceneUniforms(RhinoViewport vp, FrepSceneData scene, IReadOnlyCollection<FrepOperand>? selectedRoots = null)
     {
         vp.GetFrustum(out var l, out var r, out var b, out var t, out var near, out var far);
         var persp = vp.IsPerspectiveProjection;
@@ -469,6 +502,13 @@ public static class FrepShaderGen
             .Vec4(SilhouetteInsetPx, persp ? slope / near : 0, persp ? 0 : slope, 0);
         var (center, radius) = Bound(scene);
         u.Vec4(center.X, center.Y, center.Z, radius);
+        var sc = Rhino.ApplicationSettings.AppearanceSettings.SelectedObjectColor;
+        u.Vec4(sc.R / 255.0, sc.G / 255.0, sc.B / 255.0, SelectionBandPx);
+        var mask = new double[4];
+        if (selectedRoots is { Count: > 0 })
+            for (int i = 0; i < Math.Min(scene.Roots.Count, MaxSelectableRoots); i++)
+                if (selectedRoots.Contains(scene.Roots[i])) mask[i / 24] += 1 << (i % 24);
+        u.Vec4(mask[0], mask[1], mask[2], mask[3]);
         // Same order as Compile(): prim rows, colors, warp rows, then k's.
         foreach (var prim in scene.Primitives)
         {
