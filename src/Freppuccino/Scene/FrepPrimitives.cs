@@ -28,12 +28,15 @@ public static class FrepPrimitives
     /// <summary>Reads a drawable primitive from SDF.* user text (same validation as the viewport).</summary>
     public static bool TryRead(ObjectAttributes attributes, out SdPrimitive prim) => FrepScene.TryRead(attributes, out prim);
 
-    /// <summary>Replaces every SDF.* key with the values of <paramref name="p"/> (P packing as documented on <see cref="SdPrimitive"/>).</summary>
+    /// <summary>
+    /// Replaces every SDF.* shape key with the values of <paramref name="p"/> (P packing as documented on <see cref="SdPrimitive"/>).
+    /// SDF.Color is not shape data and is kept, so moving / resizing a primitive keeps its color.
+    /// </summary>
     public static void WriteSdf(ObjectAttributes attributes, SdPrimitive p, UnitSystem units)
     {
         var old = attributes.GetUserStrings();
         foreach (string? key in old.AllKeys)
-            if (key != null && key.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal))
+            if (key != null && key.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal) && key != SdfUserText.ColorKey)
                 attributes.DeleteUserString(key);
 
         var f = p.Frame;
@@ -104,8 +107,9 @@ public static class FrepPrimitives
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = doc.CreateDefaultAttributes();
         if (!string.IsNullOrEmpty(name)) attributes.Name = name;
-        if (color is { } c) SetColor(attributes, c);
         WriteSdf(attributes, p, doc.ModelUnitSystem);
+        // Like the F* commands: every new primitive carries an SDF.Color (default white).
+        SetColor(attributes, color ?? SdfUserText.DefaultColor);
         var id = doc.Objects.AddBrep(brep, attributes);
         if (id == Guid.Empty) throw new InvalidOperationException($"couldn't add {p.Kind} to the document");
         return id;
@@ -117,17 +121,24 @@ public static class FrepPrimitives
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = obj.Attributes.Duplicate();
         if (name != null) attributes.Name = name;
-        if (color is { } c) SetColor(attributes, c);
         WriteSdf(attributes, p, doc.ModelUnitSystem);
+        if (color is { } c) SetColor(attributes, c);
         var id = obj.Id;
         if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
         if (!doc.Objects.ModifyAttributes(id, attributes, true)) throw new InvalidOperationException("couldn't update the object's SDF values");
     }
 
-    /// <summary>Object color (the viewport shader draws each primitive in its display color; blends mix them).</summary>
-    public static void SetColor(ObjectAttributes attributes, System.Drawing.Color color)
+    /// <summary>
+    /// Shader color: SDF.Color, the same key the panel's color picker writes (the viewport shader draws each primitive in
+    /// it; blends mix them). Not the Rhino object / layer color, which only tints the proxy wireframe.
+    /// </summary>
+    public static void SetColor(ObjectAttributes attributes, System.Drawing.Color color) => SdfUserText.WriteColor(attributes, color);
+
+    /// <summary>Sets SDF.Color on an existing primitive. Caller handles the undo record and redraw.</summary>
+    public static void SetColor(RhinoDoc doc, RhinoObject obj, System.Drawing.Color color)
     {
-        attributes.ColorSource = ObjectColorSource.ColorFromObject;
-        attributes.ObjectColor = color;
+        var attributes = obj.Attributes.Duplicate();
+        SetColor(attributes, color);
+        if (!doc.Objects.ModifyAttributes(obj.Id, attributes, true)) throw new InvalidOperationException("couldn't update the object's color");
     }
 }
