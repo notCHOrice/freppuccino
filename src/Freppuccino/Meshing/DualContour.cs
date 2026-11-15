@@ -985,13 +985,16 @@ public static class DualContour
     }
 
     /// Distance estimate from <paramref name="x"/> (relative to the grid origin) to the surface: |f| / |grad f|.
+    /// A field may be scaled down by any factor and stay valid, so a small gradient is not a small distance:
+    /// without a usable gradient the distance is unknown, which counts as far.
     static double Off(Grid g, V3 x)
     {
         var p = x + g.Origin;
         double f = Math.Abs(g.Field.Value(p));
         if (f == 0) return 0;
         double len = g.Field.Gradient(p, 1e-5 * g.H).Length;
-        return len > 1e-9 ? f / len : f;
+        double d = f / len;
+        return len > 0 && double.IsFinite(d) ? d : double.PositiveInfinity;
     }
 
     /// The mass point of the crossings, walked onto the surface by Newton steps that never leave the cell.
@@ -1002,10 +1005,11 @@ public static class DualContour
         {
             var p = x + g.Origin;
             double f = g.Field.Value(p);
-            if (Math.Abs(f) < 1e-4 * g.H) break;
+            if (f == 0) break;
             var grad = g.Field.Gradient(p, 1e-5 * g.H);
             double g2 = V3.Dot(grad, grad);
-            if (g2 < 1e-12) break;
+            // Stop on the surface by the distance estimate, not by |f|, which any valid scaling of the field shrinks.
+            if (!(g2 > 0) || !double.IsFinite(f / g2) || Math.Abs(f) / Math.Sqrt(g2) < 1e-4 * g.H) break;
             x = ClampIn(x - grad * (f / g2), min, size);
         }
         return x;
