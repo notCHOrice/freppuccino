@@ -31,7 +31,11 @@ public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
 /// Extent: child's max distance from the axis (Lipschitz bound clamp). Anchor: child bbox center (Repeat lattice origin).
-public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P);
+/// Half: child bbox half-extents along the Region axes (Repeat neighbor search).
+public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P)
+{
+    public Vector3d Half { get; init; }
+}
 
 /// Program == null: nothing to draw. Primitives/Colors/Warps/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
 /// Colors parallel to Primitives: each owner's SDF.Color (white if missing).

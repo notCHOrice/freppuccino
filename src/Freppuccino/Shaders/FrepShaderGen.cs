@@ -53,7 +53,7 @@ public static class FrepShaderGen
     /// GLSL name of a compiled FFunction (one definition per distinct program).
     static string UserFnName(UserFnProgram program) => "ufn_" + program.Hash;
     /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
-    static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
+    static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 6, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
     /// Rows holding the colors of <paramref name="prims"/> primitives (one packed 0xRRGGBB float each, 4 per row).
     public static int ColorRows(int prims) => (prims + 3) / 4;
@@ -202,12 +202,29 @@ public static class FrepShaderGen
                 if (!warpRow.TryGetValue(id, out var r)) return Eval(n.Operands[0], c); // line/box deleted: unwarped
                 int cc = contexts++;
                 string p = Point(c), q = Point(cc), l = $"l{cc}";
-                Both(n.Op switch
+                if (n.Op == FrepOp.Repeat)
                 {
-                    FrepOp.Twist => $"    float {l}; vec3 {q} = opTwist({p}, {Row(r)}, {Row(r + 1)}, {l});\n",
-                    FrepOp.Bend => $"    float {l}; vec3 {q} = opBend({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {l});\n",
-                    _ => $"    float {l} = 1.0; vec3 {q} = opRepeat({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {Row(r + 3)}, {Row(r + 4)});\n",
-                });
+                    // Min over every copy that can be nearest (repeatCells); child re-emitted once, inside the cell loop.
+                    string a = $"a{cc}", b = $"b{cc}", rows = $"{Row(r)}, {Row(r + 1)}, {Row(r + 2)}";
+                    map.Append($"    float {v} = 1e20;\n");
+                    color.Append($"    vec4 {v} = vec4(0.0, 0.0, 0.0, 1e20);\n");
+                    Both($"    ivec3 {a}, {b}; repeatCells({p}, {rows}, {Row(r + 3)}, {Row(r + 4)}, {Row(r + 5)}, {a}, {b});\n" +
+                         $"    for (int k{cc} = {a}.z; k{cc} <= {b}.z; k{cc}++)\n" +
+                         $"    for (int j{cc} = {a}.y; j{cc} <= {b}.y; j{cc}++)\n" +
+                         $"    for (int i{cc} = {a}.x; i{cc} <= {b}.x; i{cc}++)\n" +
+                         $"    {{\n    vec3 {q} = repeatAt({p}, {rows}, ivec3(i{cc}, j{cc}, k{cc}));\n");
+                    var copy = Eval(n.Operands[0], cc);
+                    if (copy != null)
+                    {
+                        map.Append($"    {v} = min({v}, {copy});\n");
+                        color.Append($"    {v} = cmin({v}, {copy}, 0.0);\n");
+                    }
+                    Both("    }\n");
+                    return copy == null ? null : v;
+                }
+                Both(n.Op == FrepOp.Twist
+                    ? $"    float {l}; vec3 {q} = opTwist({p}, {Row(r)}, {Row(r + 1)}, {l});\n"
+                    : $"    float {l}; vec3 {q} = opBend({p}, {Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {l});\n");
                 if (Eval(n.Operands[0], cc) is not { } child) return null;
                 // Twist/bend stretch space; dividing by the local Lipschitz bound keeps steps conservative. Color = child's.
                 map.Append($"    float {v} = {child} / {l};\n");
@@ -383,12 +400,22 @@ public static class FrepShaderGen
             }
             return a.xyz + d.xyz * h0 + n.xyz * y0 + b;
         }
-        // Limited repetition: o = (anchor = child center, spacing x), x = (unit box X, spacing y), y = (unit box Y, spacing z),
-        // lo/hi = copy index range per axis (box axes). Cells are centered on the anchor; the child must fit within one spacing.
-        vec3 opRepeat(vec3 p, vec4 o, vec4 x, vec4 y, vec4 lo, vec4 hi)
+        // Limited repetition (iquilezles.org/articles/sdfrepetition): o = (anchor = child center, spacing x), x = (unit box X,
+        // spacing y), y = (unit box Y, spacing z), lo/hi = copy index range per axis (box axes), r = child half-extent in cells.
+        // [c0, c1] = cells whose copy can be nearest to p: nearest cell + its neighbor on p's side (2x2x2), wider if copies
+        // overlap (r > 0.5). Past that range a copy is always farther than its neighbor one cell closer to p.
+        void repeatCells(vec3 p, vec4 o, vec4 x, vec4 y, vec4 lo, vec4 hi, vec4 r, out ivec3 c0, out ivec3 c1)
         {
-            vec3 s = vec3(o.w, x.w, y.w);
-            vec3 i = clamp(round(toLocal(p, o, x, y) / max(s, vec3(1e-9))), lo.xyz, hi.xyz) * s;
+            vec3 l = toLocal(p, o, x, y) / max(vec3(o.w, x.w, y.w), vec3(1e-9));
+            vec3 a = clamp(round(l), lo.xyz, hi.xyz);
+            vec3 fwd = ceil(r.xyz), back = max(ceil(r.xyz - 0.5), 0.0);
+            bvec3 up = greaterThanEqual(l, a);
+            c0 = ivec3(max(a - mix(fwd, back, up), lo.xyz));
+            c1 = ivec3(min(a + mix(back, fwd, up), hi.xyz));
+        }
+        vec3 repeatAt(vec3 p, vec4 o, vec4 x, vec4 y, ivec3 c)
+        {
+            vec3 i = vec3(c) * vec3(o.w, x.w, y.w);
             return p - x.xyz * i.x - y.xyz * i.y - cross(x.xyz, y.xyz) * i.z;
         }
         // FFunctions (user code, see UserFn/), one per distinct program.
