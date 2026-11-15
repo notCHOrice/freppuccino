@@ -233,6 +233,21 @@ public static class DualContour
             return x;
         }
 
+        /// Number of eigenvalues above <paramref name="cutoff"/> × the largest: how many independent plane
+        /// directions the fit keeps (3 at a corner, 2 along a crease, 1 on a smooth patch).
+        public readonly int Rank(double cutoff)
+        {
+            Span<double> a = stackalloc double[6] { xx, xy, xz, yy, yz, zz };
+            Span<double> val = stackalloc double[3];
+            Span<V3> vec = stackalloc V3[3];
+            SymmetricEigen(a, val, vec);
+            double max = Math.Max(val[0], Math.Max(val[1], val[2]));
+            int rank = 0;
+            for (int e = 0; e < 3; e++)
+                if (val[e] > cutoff * max) rank++;
+            return rank;
+        }
+
         /// Root-mean-square distance from <paramref name="x"/> to the planes.
         public readonly double Rms(V3 x) =>
             Math.Sqrt(Math.Max(V3.Dot(x, Times(x)) - 2 * V3.Dot(x, new V3(bx, by, bz)) + c, 0) / N);
@@ -543,7 +558,12 @@ public static class DualContour
             // 4. Fine cells inside the refined set.
             var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3)> Points, int Bad)[refined.Count];
             var list = refined.OrderBy(c => c).ToArray();
-            Parallel.For(0, list.Length, n =>
+            // The budget is checked on the cells actually made, as they are made: an oscillating field can make far
+            // more than an estimate from the refined set's size.
+            long blockBytes = g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4;
+            long made = 0;
+            bool overBudget = false;
+            Parallel.For(0, list.Length, (n, state) =>
             {
                 var (bi, bj, bk) = g.BaseCoords(list[n]);
                 var cells = new List<(long, int, int)>();
@@ -574,15 +594,21 @@ public static class DualContour
                             cells.Add((g.Cell(i, j, kk), packed, count));
                         }
                 cellsOf[n] = (cells, points, bad);
+                long total = Interlocked.Add(ref made, cells.Count);
+                if (total > FineCellBudget || blockBytes + total * 400 > MemoryBudget)
+                {
+                    overBudget = true;
+                    state.Stop();
+                }
             });
-            long fineCells = cellsOf.Sum(c => (long)c.Cells.Count);
-            if (fineCells > FineCellBudget || g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4 + fineCells * 400 > MemoryBudget)
+            if (overBudget)
             {
                 over = true;
                 return new Result([], [], 0, 0, 0, h);
             }
             foreach (var (cells, points, bad) in cellsOf)
             {
+                if (cells == null) continue;
                 int at = vertices.Count;
                 foreach (var (cell, packed, count) in cells)
                 {
@@ -1427,8 +1453,12 @@ public static class DualContour
             q.Add(n, p - g.Origin);
         }
         var x = Place(g, q, cellMin - g.Origin, h, h, out stable, out fellBack);
-        unresolved = fellBack || q.Rms(x) > 0.05 * h;
-        for (int a = 0; a < count && !unresolved; a++)
+        double rms = q.Rms(x);
+        unresolved = fellBack || rms > 0.05 * h;
+        // A resolved corner: the stable fit keeps all three plane directions, and the fit and the field both put the
+        // vertex on them. Normals far apart are expected there, so they alone don't mark the cell unresolved.
+        bool clean = !unresolved && stable == null && q.Rank(Cutoff) == 3 && rms <= 0.05 * h && Off(g, x, h) <= 0.02 * h;
+        for (int a = 0; a < count && !unresolved && !clean; a++)
             for (int b = a + 1; b < count; b++)
                 if (V3.Dot(normals[a], normals[b]) < 0) { unresolved = true; break; }
         x += g.Origin;
