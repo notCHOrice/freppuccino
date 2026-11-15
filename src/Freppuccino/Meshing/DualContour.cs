@@ -175,6 +175,12 @@ public static class DualContour
         /// Fine cells built for a refined base cell without deep cells, reused by later builds (same samples, same result).
         public readonly ConcurrentDictionary<int, (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad)> FineCellCache = new();
 
+        /// Estimated bytes held by FineCellCache (16 per cell entry, 160 per point entry), charged in the closures' budget
+        /// checks; a build counts the entries it uses through its own cell count instead.
+        public long FineCacheBytes;
+        public static long CacheBytes((List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3, bool, double, long, bool, bool)> Points, int Bad) e) =>
+            (long)e.Cells.Count * 16 + (long)e.Points.Count * 160;
+
         /// Base cells already accepted as interface cells by Close (see InterfaceOk); kept across closures.
         public readonly HashSet<int> InterfaceAccepted = [];
 
@@ -606,7 +612,7 @@ public static class DualContour
                         }
             }
             var missing = deep.Concat(deepNear).Where(c => !g.Deep.ContainsKey(c)).ToList();
-            long Memory() => (long)g.Deep.Count * deepBytes + (long)g.Blocks.Count * fineBytes + (long)deep.Count * sb * sb * sb * 400 + g.CentreMemory + reserved;
+            long Memory() => (long)g.Deep.Count * deepBytes + (long)g.Blocks.Count * fineBytes + (long)deep.Count * sb * sb * sb * 400 + g.CentreMemory + g.FineCacheBytes + reserved;
             if (Memory() + (long)missing.Count * deepBytes > MemoryBudget) return false;
             Parallel.ForEach(missing, cell =>
             {
@@ -850,7 +856,7 @@ public static class DualContour
             }
             // Sample every block not yet sampled.
             var missing = refined.Concat(near).Where(c => !g.Blocks.ContainsKey(c)).ToList();
-            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + resident > MemoryBudget)
+            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + g.FineCacheBytes + resident > MemoryBudget)
                 return false;
             Parallel.ForEach(missing, cell =>
             {
@@ -887,7 +893,7 @@ public static class DualContour
                     else { refined.Add(cell); grew = true; }
                 }
             // Interface checks above may have added face centres since the estimate: charge them before going on.
-            if (g.Blocks.Count * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + resident > MemoryBudget)
+            if (g.Blocks.Count * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory + g.FineCacheBytes + resident > MemoryBudget)
                 return false;
             if (!grew) return true;
             if ((long)refined.Count * per * per * per > 4 * FineCellBudget) return false;
@@ -1060,6 +1066,8 @@ public static class DualContour
                         for (int fj = bj * per; fj < (bj + 1) * per && !anyDeep; fj++)
                             for (int fi = bi * per; fi < (bi + 1) * per && !anyDeep; fi++)
                                 anyDeep = deep.Contains(g.FineCell(fi, fj, fk));
+                // A base cell that gained deep cells never uses its old record again: drop it.
+                if (anyDeep && g.FineCellCache.TryRemove(list[n], out var stale)) Interlocked.Add(ref g.FineCacheBytes, -Grid.CacheBytes(stale));
                 if (!anyDeep && g.FineCellCache.TryGetValue(list[n], out var cached))
                 {
                     cellsOf[n] = cached;
@@ -1129,7 +1137,7 @@ public static class DualContour
                             cells.Add((new Octree.Node(g.E, fi, fj, fk).Key, packed, count));
                         }
                 cellsOf[n] = (cells, points, bad);
-                if (!anyDeep) g.FineCellCache[list[n]] = cellsOf[n];
+                if (!anyDeep && g.FineCellCache.TryAdd(list[n], cellsOf[n])) Interlocked.Add(ref g.FineCacheBytes, Grid.CacheBytes(cellsOf[n]));
                 long total = Interlocked.Add(ref made, cells.Count);
                 if (total > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + total * 400 + g.CentreMemory + reserved > MemoryBudget)
                 {
