@@ -144,12 +144,12 @@ public class FrepMeshCommand : Command
             string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
             RhinoApp.WriteLine(
                 $"FrepMesh: refine {result.Refine}{lowered}: accuracy cell {result.AccuracyCellSize:0.####} {doc.ModelUnitSystem}, {result.RefinedCells} cells refined" +
-                (result.DeepCells > 0 ? $", {result.DeepCells} of those cells sampled {result.ExtraDepth} level(s) deeper" : "") +
+                (result.DeepCells > 0 ? $", {result.DeepCells} finer cells sampled {result.ExtraDepth} level(s) deeper" : "") +
                 $"; smallest cell sampled {result.MinCellSize:0.#####} {doc.ModelUnitSystem}" +
                 (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
             if (result.DeepPassesRejected > 0)
                 RhinoApp.WriteLine($"FrepMesh: {result.DeepPassesRejected} deeper pass(es) were discarded because they left more self-intersections; " +
-                    "the mesh kept is the best earlier one, with the depth reported above.");
+                    (result.DeepCells > 0 ? "the mesh kept is an earlier deep pass, with the depth reported above." : "the mesh kept has no extra depth."));
             if (result.Contradictory > 0)
                 RhinoApp.WriteLine($"FrepMesh: {result.Contradictory} finest vertices still hold opposing surface normals in one sheet.");
             if (result.ProbeFailures > 0)
@@ -157,7 +157,7 @@ public class FrepMeshCommand : Command
                     $"{doc.ModelUnitSystem} from the surface by the field's estimate (refinement passes ran out).");
         }
         if (result.Fragments > 0)
-            RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small disconnected component(s), at most {4 * result.MinCellSize:0.####} {doc.ModelUnitSystem} " +
+            RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small disconnected component(s), at most {4 * result.AccuracyCellSize:0.####} {doc.ModelUnitSystem} " +
                 "across, kept as meshed. Some may be parts of features thinner than the finest cell; a higher resolution or refine level can join those.");
         if (result.UnsafeSamples > 0)
             RhinoApp.WriteLine($"FrepMesh: {result.UnsafeSamples} sample(s) changed sign when evaluated again: the field changes faster " +

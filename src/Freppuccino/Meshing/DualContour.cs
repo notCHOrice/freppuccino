@@ -520,12 +520,13 @@ public static class DualContour
         var mesh = levelMesh;
         int rejected = 0;
         // The level-K mesh is kept as the fallback while the deep tier is built: reserve its memory.
-        long reserved = (long)levelMesh.Vertices.Count * 24 + (long)levelMesh.Triangles.Count * 4;
+        static long Bytes(Result r) => (long)r.Vertices.Count * 24 + (long)r.Triangles.Count * 4;
+        long reserved = Bytes(levelMesh);
         for (int pass = 0; pass < DeepPasses; pass++)
         {
             if (!CloseDeep(g, refined, near, bases, deep, deepNear, ref unsafeSamples, reserved)) return null;
             Mark($"deep closure: {deep.Count} deep, {deepNear.Count} interface, {g.Deep.Count} deep blocks");
-            var built = Build(g, bases, refined, near, forbidden, tolerance, true, deep, deepNear, out _, out _, out _, out var more, out bool over);
+            var built = Build(g, bases, refined, near, forbidden, tolerance, true, deep, deepNear, out _, out _, out _, out var more, out bool over, reserved);
             if (over) return null;
             // A deeper pass is kept only if it leaves no more crossing pairs than the best mesh so far (the level mesh
             // to begin with): extra depth must not trade validity for accuracy.
@@ -535,6 +536,7 @@ public static class DualContour
                 rejected++;
                 Mark($"deep pass {pass}: {built.Crossings} crossing pairs, against {mesh.Crossings}; kept the previous mesh");
             }
+            reserved = Bytes(mesh); // the mesh kept so far is retained for the next pass
             more.ExceptWith(deep);
             if (more.Count == 0) break;
             deep.UnionWith(more);
@@ -980,7 +982,7 @@ public static class DualContour
     /// should join it (see Deepen); empty without deep levels.
     static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, HashSet<long> forbidden, double tolerance, bool last,
         HashSet<long> deep, HashSet<long> deepNear,
-        out HashSet<int> stuck, out HashSet<int> missCells, out HashSet<long> missMerged, out HashSet<long> deepCandidates, out bool over)
+        out HashSet<int> stuck, out HashSet<int> missCells, out HashSet<long> missMerged, out HashSet<long> deepCandidates, out bool over, long reserved = 0)
     {
         stuck = [];
         missCells = [];
@@ -1100,7 +1102,7 @@ public static class DualContour
                         }
                 cellsOf[n] = (cells, points, bad);
                 long total = Interlocked.Add(ref made, cells.Count);
-                if (total > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + total * 400 + g.CentreMemory > MemoryBudget)
+                if (total > FineCellBudget || blockBytes + g.Deep.Count * deepBlockBytes + total * 400 + g.CentreMemory + reserved > MemoryBudget)
                 {
                     overBudget = true;
                     state.Stop();
@@ -1170,7 +1172,7 @@ public static class DualContour
         };
         octree.Build(tolerance);
         // Merging adds face centres (its sheet and loop tests); this is the last place the cache grows.
-        if (k > 0 && g.Blocks.Count * fineBlockBytes + g.Deep.Count * (long)(sb + 1) * (sb + 1) * (sb + 1) * 4 + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
+        if (k > 0 && g.Blocks.Count * fineBlockBytes + g.Deep.Count * (long)(sb + 1) * (sb + 1) * (sb + 1) * 4 + (long)index.Count * 400 + g.CentreMemory + reserved > MemoryBudget)
         {
             over = true;
             return new Result([], [], 0, 0, 0, h);
@@ -1348,7 +1350,8 @@ public static class DualContour
             if (remap[v] < 0) { remap[v] = used.Count; used.Add(vertices[v]); }
             tris[t] = remap[v];
         }
-        double minCell = k == 0 ? h : deep.Count > 0 ? g.H : g.HB;
+        // The smallest cell of the support grid actually built (not the accuracy target).
+        double minCell = deep.Count > 0 ? g.H : g.Blocks.Count > 0 ? g.HB : h;
         return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, minCell, k, refined.Count, unresolved,
             Fragments: CountFragments(used, tris, 4 * g.HB), ProbeFailures: probeFailures,
             AccuracyCellSize: k == 0 ? h : g.HB, ExtraDepth: deep.Count > 0 ? g.E : 0, DeepCells: deep.Count, Contradictory: contradictory);
