@@ -70,6 +70,7 @@ This builds Release, bundles the plugin, side panel UI and native shader librari
 
 - Install locally: drag the `.yak` onto Rhino 9, or run `"C:\Program Files\Rhino 9\System\Yak.exe" install artifacts\yak\<file>.yak`
 - Options: `-Platform win|mac|any` (default `any`), `-Version 0.2.0` (default: `<Version>` in Freppuccino.csproj), `-Yak <path to Yak.exe>`
+- Private repository: `-Repo \\server\share\rhino-packages` copies the `.yak` into that folder and runs `yak cache`. Add the folder to `Rhino.Options.PackageManager.Sources` (Options → Advanced), separated from `https://yak.rhino3d.com` by `;`.
 - Package metadata (authors, description, keywords, icon) lives in `yak/manifest.yml` and `yak/icon.png`.
 
 ## CI/CD
