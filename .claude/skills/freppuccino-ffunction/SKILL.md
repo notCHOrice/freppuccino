@@ -63,8 +63,6 @@ to see F-reps.
 
 ## The DSL
 
-<!-- TODO(integrator): check every line of this section against UserFn/ (agent A's compiler) after merging. -->
-
 A small GLSL subset, compiled to GLSL for the viewport and to C# for the mesher (FrepMesh), so both agree.
 
 ```glsl
@@ -81,12 +79,21 @@ float sdf(vec3 p) {            // the entry point: signed distance at p (negativ
 - Params: `param float name = default;` at top level, in declaration order. The default must be a number literal.
   Values live on the object (`SDF.u.<name>`); a value equal to the default isn't stored, so changing the default in the
   code moves every object that hasn't overridden it.
-- Types: `float`, `vec2`, `vec3`, `vec4`, `bool`, `int` (loop counters). Constructors `vec3(x)`, `vec3(x, y, z)`, ...
-- Swizzles (`p.xz`, `q.zyx`), `+ - * /` (component-wise, scalar broadcast), comparisons, `&& || !`, `?:`.
-- Statements: local declarations, assignment (`=`, `+=`, ...), `if / else`, `for (int i = 0; i < N; i++)` with a
-  constant bound, `return`. No recursion, no arrays, no textures, no uniforms of your own (use params).
-- Builtins: `abs sign floor ceil fract mod min max clamp mix step smoothstep sqrt pow exp log sin cos tan asin acos
-  atan length distance dot cross normalize`.
+- Consts: `const float NAME = <constant expression>;` at top level (folded at compile time). `PI` is built in.
+- Types: `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`, `mat2`, `mat3` (column-major, GLSL constructors:
+  `mat2(a, b, c, d)`, `mat3(col0, col1, col2)`, `mat3(1.0)` = identity). `int` converts to `float` implicitly.
+  No `mat4`, int/bool vectors, arrays or structs.
+- Expressions: `+ - * /` (component-wise, scalar broadcast; `mat * vec`, `vec * mat`, `mat * mat`), comparisons,
+  `&& || !`, `?:`, swizzles (`p.xz`, `q.zyx`; also `rgba`), indexing `v[i]` / `m[i]` (read only).
+- Statements: locals (`float a = 1.0, b;` uninitialized = 0), assignment `= += -= *= /=` (also to swizzles of locals,
+  `q.xz = ...`), `++ --` (statements only, not inside expressions), `if / else`, `break`, `continue`, `return`.
+  Every path of a non-void function must return.
+- Loops: only `for (int i = A; i < B; i++)` style: `< <= > >= !=`, step `i++ i-- i += c i -= c`, A/B/c constant ints,
+  at most 256 iterations, don't assign `i` in the body. No `while`, `do`, `switch`.
+- Functions: helpers must be defined before use; no recursion; no `out` / `inout`. Params are readable in any function.
+- Builtins (GLSL semantics, float and vector overloads): `radians degrees sin cos tan asin acos atan (1 or 2 args) sinh
+  cosh tanh pow exp log exp2 log2 sqrt inversesqrt abs sign floor ceil fract mod min max clamp mix step smoothstep
+  length distance dot cross normalize reflect transpose determinant inverse` (last three: mat2 / mat3).
 - Library (same functions the built-in primitives use, local space, Y up):
   `smin(a, b, k)` / `smax(a, b, k)` (IQ quadratic smooth min/max, k = blend radius), `dot2(v)`,
   `sdBox(p, b)`, `sdTorus(p, vec2(R, r))`, `sdCappedCylinder(p, h, r)`, `sdCappedCone(p, h, r1, r2)`,

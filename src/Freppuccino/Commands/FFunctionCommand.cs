@@ -23,7 +23,7 @@ public class FFunctionCommand : Command
 {
     public const string SdfType = SdfUserText.UserType;
 
-    /// TODO(integrator): verify against agent A's DSL (entry point name, param syntax, swizzles).
+    /// Compiled by tests/UserFn.Tests/DocSampleTests.
     public const string DefaultCode = """
         // Gyroid lattice, clipped by the FFunction box.
         // p = point in the box's local frame (world units, origin = box centre).
