@@ -41,8 +41,10 @@ public static class DualContour
     /// RefinedCells: base cells sampled finer. Unresolved: finest-level vertices whose placement fell back to
     /// their in-cell point (features thinner than MinCellSize). UnsafeSamples: base samples whose sign changed when
     /// evaluated again (the field changed faster than its Lipschitz bound, so skipping samples was unsafe there).
+    /// Fragments: separate pieces of the mesh no more than 4 finest cells across, often bits of a feature thinner
+    /// than the finest cell whose links to the rest were too thin to sample. They are kept, only counted.
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
-        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0);
+        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0);
 
     const int Block = 8;
 
@@ -734,7 +736,36 @@ public static class DualContour
             if (remap[v] < 0) { remap[v] = used.Count; used.Add(vertices[v]); }
             tris[t] = remap[v];
         }
-        return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, g.H, k, refined.Count, unresolved);
+        return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, g.H, k, refined.Count, unresolved,
+            Fragments: CountFragments(used, tris, 4 * g.H));
+    }
+
+    /// Connected pieces of the mesh whose bounding box diagonal is at most <paramref name="size"/>.
+    static int CountFragments(List<V3> vertices, List<int> tris, double size)
+    {
+        var parent = new int[vertices.Count];
+        for (int v = 0; v < parent.Length; v++) parent[v] = v;
+        int Root(int v)
+        {
+            while (parent[v] != v) v = parent[v] = parent[parent[v]];
+            return v;
+        }
+        for (int t = 0; t < tris.Count; t += 3)
+        {
+            int a = Root(tris[t]), b = Root(tris[t + 1]), c = Root(tris[t + 2]);
+            parent[b] = a;
+            parent[c] = a;
+        }
+        var boxes = new Dictionary<int, (V3 Lo, V3 Hi)>();
+        for (int v = 0; v < vertices.Count; v++)
+        {
+            int r = Root(v);
+            var p = vertices[v];
+            boxes[r] = boxes.TryGetValue(r, out var b)
+                ? (new V3(Math.Min(b.Lo.X, p.X), Math.Min(b.Lo.Y, p.Y), Math.Min(b.Lo.Z, p.Z)), new V3(Math.Max(b.Hi.X, p.X), Math.Max(b.Hi.Y, p.Y), Math.Max(b.Hi.Z, p.Z)))
+                : (p, p);
+        }
+        return boxes.Values.Count(b => (b.Hi - b.Lo).Length <= size);
     }
 
     /// A triangle's vertices in ascending order, to recognise it after contouring again.

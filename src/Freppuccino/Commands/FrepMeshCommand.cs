@@ -146,6 +146,10 @@ public class FrepMeshCommand : Command
                 $"FrepMesh: refine {result.Refine}{lowered}: {result.RefinedCells} cells sampled at {result.MinCellSize:0.####} {doc.ModelUnitSystem}" +
                 (result.Unresolved > 0 ? $"; {result.Unresolved} vertices there still fell back (features thinner than that)" : "") + ".");
         }
+        if (result.Fragments > 0)
+            RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small separate piece(s), at most {4 * result.MinCellSize:0.####} {doc.ModelUnitSystem} across: " +
+                "often parts of features thinner than the finest cell whose links were too thin to sample. They are kept; refine further or " +
+                "raise the resolution to join them.");
         if (result.UnsafeSamples > 0)
             RhinoApp.WriteLine($"FrepMesh: {result.UnsafeSamples} sample(s) changed sign when evaluated again: the field changes faster " +
                 "than its Lipschitz bound there, so skipping samples was unsafe. Those cells were refined.");
