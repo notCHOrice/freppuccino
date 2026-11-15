@@ -3,9 +3,11 @@ using System.Text.Json.Nodes;
 using Freppuccino.Ai;
 using Freppuccino.Commands;
 using Freppuccino.Csg;
+using Freppuccino.Display;
 using Freppuccino.Sdf;
 using Rhino;
 using Rhino.Commands;
+using Rhino.Display;
 using Rhino.DocObjects;
 using Rhino.Geometry;
 
@@ -75,6 +77,7 @@ public sealed class UiController : IDisposable
     /// Set by ReplaceRhinoObject. The delete that follows is the old object making way for its replacement, not a removal.
     Guid? replaceOldId;
     uint sentDocSerial;
+    bool sentFrepMode;
     /// Open slider drag: the primitive as it was before the first preview tick. One undo step on release.
     ParamEdit? paramEdit;
 
@@ -211,7 +214,15 @@ public sealed class UiController : IDisposable
             selectionDirty = false;
             web.Send(new SelectionMessage(SelectedIds(doc)));
         }
+        if (FrepMode(doc) != sentFrepMode)
+        {
+            sentFrepMode = !sentFrepMode;
+            web.Send(new ViewMessage(sentFrepMode));
+        }
     }
+
+    static bool FrepMode(RhinoDoc doc) =>
+        FreppuccinoDisplayMode.Id != Guid.Empty && doc.Views.ActiveView?.ActiveViewport.DisplayMode?.Id == FreppuccinoDisplayMode.Id;
 
     void SendState(RhinoDoc doc)
     {
@@ -221,8 +232,9 @@ public sealed class UiController : IDisposable
         PruneDangling(doc);
         sentDocSerial = doc.RuntimeSerialNumber;
         sceneDirty = selectionDirty = false;
+        sentFrepMode = FrepMode(doc);
         var theme = Rhino.Runtime.HostUtils.RunningInDarkMode ? "dark" : "light";
-        web.Send(new StateMessage(BuildScene(doc), SelectedIds(doc), new UiSettings(doc.ModelUnitSystem.ToString()), theme));
+        web.Send(new StateMessage(BuildScene(doc), SelectedIds(doc), new UiSettings(doc.ModelUnitSystem.ToString()), theme, sentFrepMode));
     }
 
     static string NodeKey(int id) => FrepTree.NodeName(id);
@@ -426,6 +438,9 @@ public sealed class UiController : IDisposable
                     break;
                 case "runCommand":
                     RunCommand(Parse<RunCommandRequest>(message));
+                    break;
+                case "showFrepMode":
+                    ShowFrepMode(doc);
                     break;
                 case "setParam":
                     SetParam(doc, Parse<SetParamRequest>(message));
@@ -919,6 +934,18 @@ public sealed class UiController : IDisposable
         // Fails (returns false) if another command is already running.
         if (!RhinoApp.RunScript("_" + request.Command, false))
             web.Send(new NoticeMessage("warning", $"Couldn't start {request.Command}; finish the current command first."));
+    }
+
+    void ShowFrepMode(RhinoDoc doc)
+    {
+        var mode = DisplayModeDescription.GetDisplayMode(FreppuccinoDisplayMode.Id);
+        if (mode == null || doc.Views.ActiveView is not { } view)
+        {
+            web.Send(new NoticeMessage("error", "The Freppuccino display mode is missing."));
+            return;
+        }
+        view.ActiveViewport.DisplayMode = mode;
+        view.Redraw();
     }
 
     // ─────────────── AI agent (src/ui/src/ai, docs/ai.md) ───────────────
