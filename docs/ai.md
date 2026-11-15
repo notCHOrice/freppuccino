@@ -35,7 +35,9 @@ src/Freppuccino/Ai/
   AiTools.cs      tool implementations ("aiTool" message → AiToolResultMessage)
   AiWarps.cs      deform tool: twist / bend / repeat nodes + the axis lines / boxes that drive them
   AiShapes.cs     LLM-friendly shape specs ⇄ SdPrimitive (cylinder = start/end/radius, box = center/size, …)
-  AiCapture.cs    offscreen screenshots in the hidden "Freppuccino Capture" display mode (proxy Breps invisible)
+  AiCapture.cs    offscreen screenshots in the hidden "Freppuccino Capture" display mode (proxy Breps invisible); while
+                  capturing (AiCapture.Active) the conduit draws just the model: no FREP MODE badge, no control outlines.
+                  AiCapture.CleanCapture() gives other capture code (the sizzle-capture skill's scripts) the same scope
   AiRunLog.cs     saves each run (transcript + PNGs)
 src/Freppuccino/Scene/FrepPrimitives.cs   SdPrimitive → SDF.* user text + proxy Brep, add / replace in the doc
 ```

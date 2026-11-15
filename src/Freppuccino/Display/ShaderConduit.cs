@@ -46,8 +46,9 @@ public sealed class ShaderConduit : DisplayConduit
                 RhinoApp.WriteLine($"Freppuccino: uniform budget full, {scene.Dropped} primitives not drawn");
                 loggedCap = true;
             }
-            // Control outlines first, so blends drawn over them hide what they cover.
-            ControlOutlines.Draw(dp, e.RhinoDoc, selected: false);
+            // Control outlines first, so blends drawn over them hide what they cover. Captures (AI screenshots,
+            // AiCapture.CleanCapture) show just the model.
+            if (!AiCapture.Active) ControlOutlines.Draw(dp, e.RhinoDoc, selected: false);
             dp.Flush(); // Rhino batches curves; without this they land after (over) our GPU draw
             if (scene.Program != null)
                 drew |= DrawScene(gpu, dp, e.RhinoDoc, scene);
