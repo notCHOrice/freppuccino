@@ -26,7 +26,7 @@ if (-not $Version) {
     $Version = ([xml](Get-Content $project)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
 }
 
-dotnet build $project -c Release -clp:NoSummary -p:IncludeSourceRevisionInInformationalVersion=false
+dotnet build $project -c Release -clp:NoSummary -p:IncludeSourceRevisionInInformationalVersion=false -p:Version=$Version
 if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed.' }
 
 if (-not (Test-Path (Join-Path $outDir 'ui\index.html'))) { throw 'Side panel UI missing from build output (src/ui/dist). Run npm ci in src/ui.' }
@@ -43,20 +43,9 @@ $rids = switch ($Platform) {
     default { @('win-x64', 'win-arm64', 'osx-x64', 'osx-arm64') }
 }
 Get-ChildItem -LiteralPath (Join-Path $stage 'runtimes') -Directory | Where-Object { $rids -notcontains $_.Name } | Remove-Item -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'manifest.yml') -Destination $stage
-
-$ico = [IO.File]::ReadAllBytes((Join-Path $root 'src\Freppuccino\EmbeddedResources\plugin-freppuccino.ico'))
-$best = $null
-for ($i = 0; $i -lt [BitConverter]::ToUInt16($ico, 4); $i++) {
-    $entry = 6 + 16 * $i
-    $size = if ($ico[$entry] -eq 0) { 256 } else { $ico[$entry] }
-    if ($size -le 128 -and (-not $best -or $size -gt $best.Size)) {
-        $best = @{ Size = $size; Length = [BitConverter]::ToUInt32($ico, $entry + 8); Offset = [BitConverter]::ToUInt32($ico, $entry + 12) }
-    }
-}
-$png = New-Object byte[] $best.Length
-[Array]::Copy($ico, $best.Offset, $png, 0, $best.Length)
-[IO.File]::WriteAllBytes((Join-Path $stage 'icon.png'), $png)
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'manifest.yml'), (Join-Path $PSScriptRoot 'icon.png') -Destination $stage
+$misc = New-Item -ItemType Directory -Path (Join-Path $stage 'misc')
+Copy-Item -LiteralPath (Join-Path $root 'README.md'), (Join-Path $root 'LICENSE') -Destination $misc
 
 Get-ChildItem -LiteralPath $artifacts -Filter *.yak -ErrorAction SilentlyContinue | Remove-Item -Force
 
