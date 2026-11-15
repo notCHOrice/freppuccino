@@ -19,7 +19,8 @@ namespace Freppuccino.Selection;
 ///                but does hit a control shape (an exposed cutter), that shape's root.
 ///   Shift+click: the nearest control instance (the leaf's own pre-warp shape under T × P, i.e. what its outline shows),
 ///                with the root and path it was reached through; replaces the selection. A Shift+click on nothing F-rep
-///                is left to Rhino (add to selection). Coincident shapes from different roots: no pick, a message.
+///                is left to Rhino (add to selection). Coincident shapes from different roots (including one shape shared
+///                by several roots, where no root's surface is hit first): no pick, a message.
 /// The hit is decided on mouse-down (which is when Rhino's own pick has to be cancelled), the selection is made on
 /// mouse-up, after Rhino has finished with the click.
 public sealed class FrepPicker : MouseCallback
@@ -153,15 +154,15 @@ public sealed class FrepPicker : MouseCallback
         var best = hits[0];
         double tieTol = 4 * (ray.EpsConst + ray.EpsSlope * best.T);
         var tied = hits.Where(h => h.T - best.T <= tieTol).ToList();
-        // Ties between instances of one object at one place (a shared leaf with no transforms between) are the same
-        // shape: its primary instance. Anything else is a real ambiguity.
-        if (tied.Any(h => h.Inst.Object != best.Inst.Object || !FrepInstances.Same(h.Inst.T, best.Inst.T)))
+        // A click resolves the actual root (and instance): equal-depth hits from different roots, objects or transforms
+        // are ambiguous, even for one shared shape at one place (agreed rule, #118). Within a root, instances are
+        // already deduplicated by (object, T).
+        if (tied.Any(h => h.Inst.Root != best.Inst.Root || h.Inst.Object != best.Inst.Object || !FrepInstances.Same(h.Inst.T, best.Inst.T)))
         {
             ambiguous = true;
             return null;
         }
-        var (_, all) = FrepInstances.Compute(scene.Tree, scene.Ids);
-        return tied.Count > 1 ? all.First(i => i.Object == best.Inst.Object) : best.Inst;
+        return best.Inst;
     }
 
 

@@ -22,10 +22,12 @@ public static class FrepShaderGen
 {
     /// Uniform header = 7 vec4 rows; the rest of Uniforms.MaxBytes is data: prim rows, prim colors packed 4 per row,
     /// warp rows, then blend k's packed 4 per row.
-    const int HeaderRows = 9; // + selColor, selMask
+    const int HeaderRows = 7 + 1 + SelMaskRows; // + selColor, selMask[]
 
-    /// Roots whose "selected" flag fits the header's selMask row (24 exact bits per float); later roots get no selection band.
-    public const int MaxSelectableRoots = 96;
+    /// Rows of root "selected" flags (24 exact bits per float, 96 per row). Every root fits: a root needs at least a
+    /// sphere row plus a quarter color row, so the data rows hold fewer than 288 roots.
+    const int SelMaskRows = 3;
+    public const int MaxSelectableRoots = SelMaskRows * 96;
     /// Selection band width, screen pixels.
     public const double SelectionBandPx = 2.0;
     const int MaxDataRows = Uniforms.MaxBytes / 16 - HeaderRows;
@@ -255,7 +257,7 @@ public static class FrepShaderGen
         for (int i = 0; i < Math.Min(roots.Count, MaxSelectableRoots); i++)
         {
             double scale = 1.0 / (1 << (i % 24)); // exact power of two
-            map.Append($"    if (mod(floor(u.selMask.{"xyzw"[i / 24]} * {scale.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}), 2.0) > 0.5) s = min(s, {roots[i]});\n");
+            map.Append($"    if (mod(floor(u.selMask[{i / 96}].{"xyzw"[i / 24 % 4]} * {scale.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}), 2.0) > 0.5) s = min(s, {roots[i]});\n");
         }
 
         map.Append($"    float d = {roots[0]};\n");
@@ -287,7 +289,7 @@ public static class FrepShaderGen
             vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
             vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
             vec4 selColor;   // rgb selection color, w = selection band width (screen px)
-            vec4 selMask;    // root "selected" flags, 24 bits per float (root i: component i / 24, bit i % 24)
+            vec4 selMask[{{SelMaskRows}}]; // root "selected" flags, 24 bits per float (root i: row i / 96, component i / 24 % 4, bit i % 24)
             // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
             // then node blend k's (4 per row)
             // sphere: 1 row  (xyz center, w radius s)
@@ -449,6 +451,7 @@ public static class FrepShaderGen
         {{map}}    return d;
         }
         float map(vec3 p) { float s; return mapSel(p, s); }
+        float selDist(vec3 p) { float s; mapSel(p, s); return s; }
         // Only evaluated once per hit pixel, so the hot march loop stays float-only.
         vec3 sceneColor(vec3 p)
         {
@@ -486,20 +489,33 @@ public static class FrepShaderGen
             if (tMax < t) discard;
             float eps = 0.0;
             bool hit = false;
-            float nearSel = 1e20, s = 1e20; // closest approach to a selected root in front of the hit, in pixels
+            // Closest approach to a selected root in front of the hit: field value / pixel at the step where it was smallest.
+            float nearSel = 1e20, tNear = 0.0, s = 1e20;
             for (int i = 0; i < 256; i++)
             {
                 eps = u.params.z + u.params.y * t; // half-pixel footprint at t
                 // Shrink the surface by params.x pixels so Rhino's wires stay visible around the shading.
                 float d = mapSel(ro + rd * t, s) + u.params.x * 2.0 * eps;
                 if (d < eps) { hit = true; break; }
-                nearSel = min(nearSel, s / (2.0 * eps));
+                float ratio = s / (2.0 * eps);
+                if (ratio < nearSel) { nearSel = ratio; tNear = t; }
                 t += d;
                 if (t > tMax) break;
             }
             // Selection band: just outside a selected root's silhouette, in front of whatever the ray hits (not on the root).
+            // Fields that underestimate distance (ellipsoids, placements, node transforms) would widen it, so the width
+            // is measured as value / |gradient| (first-order distance to the surface) at the closest approach.
             bool onSelected = hit && s < 2.0 * eps; // the hit surface is a selected root's (it is the field's min there)
-            if (!onSelected && nearSel < u.selColor.w) { outColor = vec4(u.selColor.rgb, 1.0); return; }
+            if (!onSelected && nearSel < 4.0 * u.selColor.w)
+            {
+                float en = u.params.z + u.params.y * tNear;
+                vec3 pn = ro + rd * tNear;
+                const vec2 kk = vec2(1.0, -1.0);
+                vec3 g = (kk.xyy * selDist(pn + kk.xyy * en) + kk.yyx * selDist(pn + kk.yyx * en) +
+                          kk.yxy * selDist(pn + kk.yxy * en) + kk.xxx * selDist(pn + kk.xxx * en)) / (4.0 * en);
+                float dist = nearSel * 2.0 * en / max(length(g), 1e-6);
+                if (dist / (2.0 * en) < u.selColor.w) { outColor = vec4(u.selColor.rgb, 1.0); return; }
+            }
             if (!hit) discard;
             vec3 p = ro + rd * t;
             const vec2 k = vec2(1.0, -1.0);
@@ -529,11 +545,11 @@ public static class FrepShaderGen
         u.Vec4(center.X, center.Y, center.Z, radius);
         var sc = Rhino.ApplicationSettings.AppearanceSettings.SelectedObjectColor;
         u.Vec4(sc.R / 255.0, sc.G / 255.0, sc.B / 255.0, SelectionBandPx);
-        var mask = new double[4];
+        var mask = new double[4 * SelMaskRows];
         if (selectedRoots is { Count: > 0 })
             for (int i = 0; i < Math.Min(scene.Roots.Count, MaxSelectableRoots); i++)
                 if (selectedRoots.Contains(scene.Roots[i])) mask[i / 24] += 1 << (i % 24);
-        u.Vec4(mask[0], mask[1], mask[2], mask[3]);
+        for (int i = 0; i < mask.Length; i += 4) u.Vec4(mask[i], mask[i + 1], mask[i + 2], mask[i + 3]);
         // Same order as Compile(): prim rows, colors, warp rows, then k's.
         foreach (var prim in scene.Primitives)
         {
