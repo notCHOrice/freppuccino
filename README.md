@@ -29,6 +29,7 @@ Implicit geometry is a geometry type that is made parametrically using functions
 # How do I use it?
 
 1. Run the `Freppuccino` command to open the Panel.
+1. If the panel shows "This view isn't showing F-reps" at the top, click **F-rep display mode** to switch the active viewport to the Freppuccino display mode
 1. Use the buttons on the panel to create simple geometry types like a box or a sphere
 1. Select 2+ F-reps and choose a blend style – Union, subtract or intersect.
 1. Click "Apply Union"
@@ -43,7 +44,7 @@ Implicit geometry is a geometry type that is made parametrically using functions
 | Q/A | Answer |
 |---|---|
 | Q | I can't see the F-reps! |
-| A | At the bottom of the panel is an "F-rep display mode button", try clicking that |
+| A | Click the "F-rep display mode" button at the top of the panel. It shows whenever the active viewport isn't in the Freppuccino display mode. You can also pick "Freppuccino" from Rhino's display mode menu |
 | | |
 | Q | I can't seem to connect two geometries? |
 | A | The objects MUST be F-reps, regular boxes are not compatible (yet). |

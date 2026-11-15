@@ -64,6 +64,7 @@ export interface HostState {
   selection: Id[]
   settings: UiSettings
   theme: Theme
+  frepMode: boolean
   notice: Notice | null
 }
 
@@ -76,6 +77,7 @@ let state: HostState = {
   selection: [],
   settings: { units: '' },
   theme: window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+  frepMode: true,
   notice: null,
 }
 const listeners = new Set<() => void>()
@@ -97,10 +99,13 @@ function orderSelection(prev: Id[], next: Id[]): Id[] {
 transport.listen((m) => {
   switch (m.type) {
     case 'state':
-      set({ synced: true, scene: m.scene, selection: m.selection, settings: m.settings, theme: m.theme })
+      set({ synced: true, scene: m.scene, selection: m.selection, settings: m.settings, theme: m.theme, frepMode: m.frepMode })
       break
     case 'scene':
       set({ scene: m.scene })
+      break
+    case 'view':
+      set({ frepMode: m.frepMode })
       break
     case 'selection':
       set({ selection: orderSelection(state.selection, m.ids) })

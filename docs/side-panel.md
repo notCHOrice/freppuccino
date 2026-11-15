@@ -62,7 +62,8 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 
 | Host → page | When |
 |---|---|
-| `state {scene, selection, settings: {units}, theme}` | reply to `ready`; active document changed |
+| `state {scene, selection, settings: {units}, theme, frepMode}` | reply to `ready`; active document changed. `frepMode` = the active view shows the Freppuccino display mode |
+| `view {frepMode}` | the active view switched into or out of the Freppuccino display mode, or another view became active (checked on Idle) |
 | `scene {scene}` | object added/deleted/replaced/attributes changed, CSG tree changed (coalesced on Idle) |
 | `selection {ids}` | Rhino selection or panel node selection changed |
 | `notice {level, text}` | feedback, e.g. a rejected `setParam` value |
@@ -74,6 +75,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `select {ids, mode: replace\|add\|toggle}` | ✅ primitives → Rhino selection; nodes → panel node selection. While FUnion/FIntersect/FDifference wait for operands, a node click is sent to the command line instead |
 | `setVisible {id, visible}` | ✅ primitive: Rhino show/hide; node: `FrepNode.Hidden`, dropped from the shader like a hidden primitive (undoable) |
 | `runCommand {command}` | ✅ whitelist only (`UiController.AllowedCommands`): `FBox`, `FSphere`, `FCylinder`, `FCone`, `FPyramid`, `FEllipsoid`, `FTorus`, `FFunction`, `FTwist`, `FBend`, `FRepeat`, `Freppuccino` |
+| `showFrepMode` | ✅ switch the active view to the Freppuccino display mode. Sent by the "F-rep display mode" button, shown under the header while `frepMode` is false |
 | `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |

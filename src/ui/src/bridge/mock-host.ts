@@ -99,7 +99,10 @@ export function createMockHost(): Transport {
   function handle(m: UiMessage) {
     switch (m.type) {
       case 'ready':
-        emit({ type: 'state', scene, selection, settings: { units: 'Millimeters' }, theme })
+        emit({ type: 'state', scene, selection, settings: { units: 'Millimeters' }, theme, frepMode: false })
+        break
+      case 'showFrepMode':
+        emit({ type: 'view', frepMode: true })
         break
       case 'select':
         if (m.mode === 'replace') selection = [...m.ids]

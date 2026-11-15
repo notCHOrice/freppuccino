@@ -66,8 +66,9 @@ export type Theme = 'light' | 'dark'
 
 // ── Host → UI ──
 export type HostMessage =
-  | { type: 'state'; scene: SceneNode[]; selection: Id[]; settings: UiSettings; theme: Theme }
+  | { type: 'state'; scene: SceneNode[]; selection: Id[]; settings: UiSettings; theme: Theme; frepMode: boolean }
   | { type: 'scene'; scene: SceneNode[] }
+  | { type: 'view'; frepMode: boolean }
   /** selected primitives (Rhino selection) + operation nodes (kept by the host) */
   | { type: 'selection'; ids: Id[] }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; text: string }
@@ -89,6 +90,7 @@ export type UiMessage =
   /** primitive: Rhino show/hide; operation: hides the node's result (undoable) */
   | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
+  | { type: 'showFrepMode' }
   /** preview: live drag tick, no undo; the next non-preview setParam ends the gesture as one undo step.
    *  sdUser also takes name "L" (> 0) and "u.<param>" (declared param, any finite value). */
   | { type: 'setParam'; id: Id; name: string; value: number; preview?: boolean }
