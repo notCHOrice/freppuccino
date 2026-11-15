@@ -87,6 +87,10 @@ public static class DualContour
     /// Passes of refinement for output triangles that miss the surface by more than 0.25 finest cells (see MeshAt).
     public static int AccuracyPasses = 2;
 
+    /// Deep levels below the Refine level, used only in fine cells that still hold contradictory surface evidence
+    /// (see MeshAt). Internal; 0 to 3.
+    public static int ExtraDepth = 2;
+
     /// In a crossing pair, only the vertices highest on the ladder take a step (a merge before a sharp placement
     /// before a stable one), instead of all six; vertices already on their feature are not moved for a neighbour.
     public static bool GentleDemotion = true;
@@ -144,23 +148,35 @@ public static class DualContour
     {
         public readonly FrepField Field;
         public readonly V3 Origin;
-        public readonly double H, Hb;
-        public readonly int K, Step;
+        /// H: finest (deep, C) spacing; HB: fine (B) spacing, the Refine level's cell; Hb: base (A) spacing.
+        public readonly double H, HB, Hb;
+        /// K: fine levels below base; E: deep levels below fine. Step = base cell in finest units (2^(K+E));
+        /// StepB = fine cell in finest units (2^E); PerBase = fine cells per base cell edge (2^K).
+        public readonly int K, E, Step, StepB, PerBase;
         public readonly int Nbx, Nby, Nbz;                // base cells
+        public readonly int NBx, NBy, NBz;                // fine (B) cells
         public readonly int Nx, Ny, Nz, Sx, Sy, Sz;       // finest cells and samples
         public readonly float[] F;                        // base samples
+        /// Fine samples, (PerBase + 1)³ per refined or interface base cell, on the B lattice.
         public readonly ConcurrentDictionary<int, float[]> Blocks = new();
+        /// Deep samples, (StepB + 1)³ per fine cell given extra depth or next to one, on the C lattice.
+        public readonly ConcurrentDictionary<long, float[]> Deep = new();
 
-        public Grid(FrepField field, V3 origin, double hb, int k, int nbx, int nby, int nbz)
+        public Grid(FrepField field, V3 origin, double hb, int k, int e, int nbx, int nby, int nbz)
         {
             Field = field;
             Origin = origin;
             K = k;
-            Step = 1 << k;
+            E = e;
+            Step = 1 << (k + e);
+            StepB = 1 << e;
+            PerBase = 1 << k;
             Hb = hb;
+            HB = hb / PerBase;
             H = hb / Step;
             Nbx = nbx; Nby = nby; Nbz = nbz;
-            Nx = nbx << k; Ny = nby << k; Nz = nbz << k;
+            NBx = nbx << k; NBy = nby << k; NBz = nbz << k;
+            Nx = nbx << (k + e); Ny = nby << (k + e); Nz = nbz << (k + e);
             Sx = Nx + 1; Sy = Ny + 1; Sz = Nz + 1;
             F = new float[(long)(nbx + 1) * (nby + 1) * (nbz + 1)];
         }
@@ -169,23 +185,46 @@ public static class DualContour
 
         public long BaseSample(int bi, int bj, int bk) => ((long)bk * (Nby + 1) + bj) * (Nbx + 1) + bi;
 
-        /// The sample at a finest-lattice index on the grid.
+        /// The sample at a finest-lattice index on the grid: base array, fine block or deep block, by lattice.
         public float Value(int i, int j, int k)
         {
-            int m = Step - 1;
-            if (((i | j | k) & m) == 0) return F[BaseSample(i >> K, j >> K, k >> K)];
-            int bi = i >> K, bj = j >> K, bk = k >> K, side = Step + 1;
-            // A point on a base cell's face belongs to the blocks on both sides; either holds it.
-            for (int c = 0; c < 8; c++)
+            int ma = Step - 1;
+            if (((i | j | k) & ma) == 0) return F[BaseSample(i >> (K + E), j >> (K + E), k >> (K + E))];
+            int mb = StepB - 1;
+            if (((i | j | k) & mb) == 0)
             {
-                if (((c & 1) != 0 && (i & m) != 0) || ((c & 2) != 0 && (j & m) != 0) || ((c & 4) != 0 && (k & m) != 0)) continue;
-                int ci = bi - (c & 1), cj = bj - ((c >> 1) & 1), ck = bk - (c >> 2);
-                if ((uint)ci >= (uint)Nbx || (uint)cj >= (uint)Nby || (uint)ck >= (uint)Nbz) continue;
-                if (Blocks.TryGetValue(BaseCell(ci, cj, ck), out var block))
-                    return block[((k - (ck << K)) * side + (j - (cj << K))) * side + (i - (ci << K))];
+                // A fine-lattice point: a fine block, by fine index.
+                int fi = i >> E, fj = j >> E, fk = k >> E, m = PerBase - 1, side = PerBase + 1;
+                int bi = fi >> K, bj = fj >> K, bk = fk >> K;
+                // A point on a base cell's face belongs to the blocks on both sides; either holds it.
+                for (int c = 0; c < 8; c++)
+                {
+                    if (((c & 1) != 0 && (fi & m) != 0) || ((c & 2) != 0 && (fj & m) != 0) || ((c & 4) != 0 && (fk & m) != 0)) continue;
+                    int ci = bi - (c & 1), cj = bj - ((c >> 1) & 1), ck = bk - (c >> 2);
+                    if ((uint)ci >= (uint)Nbx || (uint)cj >= (uint)Nby || (uint)ck >= (uint)Nbz) continue;
+                    if (Blocks.TryGetValue(BaseCell(ci, cj, ck), out var block))
+                        return block[((fk - (ck << K)) * side + (fj - (cj << K))) * side + (fi - (ci << K))];
+                }
+                throw new InvalidOperationException($"DualContour: no fine sample at ({i}, {j}, {k}).");
             }
-            throw new InvalidOperationException($"DualContour: no sample at ({i}, {j}, {k}).");
+            {
+                // A deep-lattice point: a deep block, by fine cell.
+                int di = i >> E, dj = j >> E, dk = k >> E, side = StepB + 1;
+                for (int c = 0; c < 8; c++)
+                {
+                    if (((c & 1) != 0 && (i & mb) != 0) || ((c & 2) != 0 && (j & mb) != 0) || ((c & 4) != 0 && (k & mb) != 0)) continue;
+                    int ci = di - (c & 1), cj = dj - ((c >> 1) & 1), ck = dk - (c >> 2);
+                    if (!HasFineCell(ci, cj, ck)) continue;
+                    if (Deep.TryGetValue(FineCell(ci, cj, ck), out var block))
+                        return block[((k - (ck << E)) * side + (j - (cj << E))) * side + (i - (ci << E))];
+                }
+                throw new InvalidOperationException($"DualContour: no deep sample at ({i}, {j}, {k}).");
+            }
         }
+
+        public long FineCell(int fi, int fj, int fk) => ((long)fk * NBy + fj) * NBx + fi;
+        public bool HasFineCell(int fi, int fj, int fk) => (uint)fi < (uint)NBx && (uint)fj < (uint)NBy && (uint)fk < (uint)NBz;
+        public (int, int, int) FineCoords(long cell) => ((int)(cell % NBx), (int)(cell / NBx % NBy), (int)(cell / ((long)NBx * NBy)));
 
         /// Inside test at a sample; anything off the grid is outside.
         public bool In(int i, int j, int k) =>
@@ -210,16 +249,37 @@ public static class DualContour
         /// Inside test at a point given in doubled finest-lattice coordinates (so face centres are integers). One
         /// formula and one cache for every caller, so every consumer of a face decides it the same way. A value of
         /// exactly 0 counts as outside, as at the samples.
-        public bool InsideDoubled(int x2, int y2, int z2) =>
-            centres.GetOrAdd((x2, y2, z2), key => Field.Value(new V3(
+        public bool InsideDoubled(int x2, int y2, int z2)
+        {
+            if (centres.TryGetValue((x2, y2, z2), out bool known)) return known;
+            // Bounded per insertion: past its allowance the attempt is abandoned (the caller retries coarser).
+            if (centres.Count >= CentreCap) throw new BudgetExceeded();
+            return centres.GetOrAdd((x2, y2, z2), key => Field.Value(new V3(
                 Origin.X + key.Item1 * (H * 0.5), Origin.Y + key.Item2 * (H * 0.5), Origin.Z + key.Item3 * (H * 0.5))) < 0);
+        }
 
-        /// Evaluates the (Step + 1)³ samples of base cell (bi, bj, bk).
+        /// Entries the face-centre cache may hold: a quarter of the memory budget, unless nothing can be coarser.
+        public long CentreCap = long.MaxValue;
+
+        /// Evaluates the (PerBase + 1)³ fine samples of base cell (bi, bj, bk).
         public float[] Sample(int bi, int bj, int bk)
         {
-            int side = Step + 1;
+            int side = PerBase + 1;
             var block = new float[side * side * side];
             int i0 = bi << K, j0 = bj << K, k0 = bk << K;
+            for (int k = 0; k < side; k++)
+                for (int j = 0; j < side; j++)
+                    for (int i = 0; i < side; i++)
+                        block[(k * side + j) * side + i] = (float)Field.Value(P((i0 + i) << E, (j0 + j) << E, (k0 + k) << E));
+            return block;
+        }
+
+        /// Evaluates the (StepB + 1)³ deep samples of fine cell (fi, fj, fk).
+        public float[] SampleDeep(int fi, int fj, int fk)
+        {
+            int side = StepB + 1;
+            var block = new float[side * side * side];
+            int i0 = fi << E, j0 = fj << E, k0 = fk << E;
             for (int k = 0; k < side; k++)
                 for (int j = 0; j < side; j++)
                     for (int i = 0; i < side; i++)
@@ -227,6 +287,9 @@ public static class DualContour
             return block;
         }
     }
+
+    /// Thrown when a bounded allocation would exceed the budget mid-phase; the attempt is retried coarser.
+    sealed class BudgetExceeded : Exception { }
 
     /// Quadric error Σ (nᵢ·(x − pᵢ))² in accumulable form, plus the mass point of the pᵢ.
     struct Qef
@@ -310,17 +373,22 @@ public static class DualContour
         while (k > 0 && h / (1 << k) < minCell) k--;
         for (; ; k--)
         {
-            var result = MeshAt(field, bmin, size, h, simplify, k);
+            Result? result;
+            int e = k > 0 ? Math.Clamp(ExtraDepth, 0, 3) : 0;
+            while (e > 0 && h / (1 << (k + e)) < minCell) e--;
+            try { result = MeshAt(field, bmin, size, h, simplify, k, e); }
+            catch (BudgetExceeded) when (k > 0) { result = null; }
             if (result != null) return result;
         }
     }
 
     /// One attempt at <paramref name="k"/> extra levels; null if it went over budget (never at k = 0).
-    static Result? MeshAt(FrepField field, V3 bmin, V3 size, double h, double simplify, int k)
+    static Result? MeshAt(FrepField field, V3 bmin, V3 size, double h, double simplify, int k, int e)
     {
         // Two cells of padding: every sample on the grid boundary is strictly outside.
-        var g = new Grid(field, bmin - new V3(2 * h, 2 * h, 2 * h), h, k,
+        var g = new Grid(field, bmin - new V3(2 * h, 2 * h, 2 * h), h, k, e,
             (int)Math.Ceiling(size.X / h) + 4, (int)Math.Ceiling(size.Y / h) + 4, (int)Math.Ceiling(size.Z / h) + 4);
+        if (k > 0) g.CentreCap = MemoryBudget / Grid.CentreBytes / 4;
         int nbx = g.Nbx, nby = g.Nby, nbz = g.Nbz, sx = nbx + 1, sy = nby + 1, sz = nbz + 1;
         var f = g.F;
 
@@ -346,7 +414,7 @@ public static class DualContour
                         {
                             long row = ((long)kk * sy + j) * sx;
                             for (int i = i0; i < i1; i++)
-                                f[row + i] = skip ? (float)fc : (float)field.Value(g.P(i << k, j << k, kk << k));
+                                f[row + i] = skip ? (float)fc : (float)field.Value(g.P(i << (k + e), j << (k + e), kk << (k + e)));
                         }
                 }
             }
@@ -364,7 +432,7 @@ public static class DualContour
                 if (info.Unresolved) refined.Add(cell);
             // Accuracy: wherever the mesh stays coarse it must be within a quarter of the finest cell of the surface,
             // so probe the polygons the base cells will form and refine where they miss.
-            int seeded = SeedByAccuracy(g, bases, refined, 0.25 * g.H);
+            int seeded = SeedByAccuracy(g, bases, refined, 0.25 * g.HB);
             Mark($"accuracy seeds: {seeded} cells");
         }
 
@@ -527,7 +595,7 @@ public static class DualContour
     /// False if the samples or the refined set go over budget.
     static bool Close(Grid g, HashSet<int> refined, HashSet<int> near, Dictionary<int, BaseInfo> bases, ref int unsafeSamples)
     {
-        int side = g.Step + 1;
+        int side = g.PerBase + 1, per = g.PerBase;
         long blockBytes = (long)side * side * side * 4;
         var checkedOk = new HashSet<int>();
         while (true)
@@ -548,7 +616,7 @@ public static class DualContour
             }
             // Sample every block not yet sampled.
             var missing = refined.Concat(near).Where(c => !g.Blocks.ContainsKey(c)).ToList();
-            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 + g.CentreMemory > MemoryBudget)
+            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory > MemoryBudget)
                 return false;
             Parallel.ForEach(missing, cell =>
             {
@@ -565,7 +633,7 @@ public static class DualContour
                 for (int c = 0; c < 8; c++)
                 {
                     int ci = bi + (c & 1), cj = bj + ((c >> 1) & 1), ck = bk + (c >> 2);
-                    float truth = block[(((c >> 2) * g.Step) * side + ((c >> 1) & 1) * g.Step) * side + (c & 1) * g.Step];
+                    float truth = block[(((c >> 2) * per) * side + ((c >> 1) & 1) * per) * side + (c & 1) * per];
                     long at = g.BaseSample(ci, cj, ck);
                     if ((g.F[at] < 0) == (truth < 0)) { g.F[at] = truth; continue; }
                     g.F[at] = truth;
@@ -585,10 +653,10 @@ public static class DualContour
                     else { refined.Add(cell); grew = true; }
                 }
             // Interface checks above may have added face centres since the estimate: charge them before going on.
-            if (g.Blocks.Count * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 + g.CentreMemory > MemoryBudget)
+            if (g.Blocks.Count * blockBytes + (long)refined.Count * per * per * per * 64 + g.CentreMemory > MemoryBudget)
                 return false;
             if (!grew) return true;
-            if ((long)refined.Count * g.Step * g.Step * g.Step > 4 * FineCellBudget) return false;
+            if ((long)refined.Count * per * per * per > 4 * FineCellBudget) return false;
         }
     }
 
@@ -596,7 +664,8 @@ public static class DualContour
     static bool InterfaceOk(Grid g, int cell)
     {
         var (bi, bj, bk) = g.BaseCoords(cell);
-        int step = g.Step, side = step + 1, i0 = bi * step, j0 = bj * step, k0 = bk * step;
+        // Block-local indices are on the fine lattice (step = fine cells per base edge); positions passed on are finest.
+        int step = g.PerBase, side = step + 1, i0 = bi * g.Step, j0 = bj * g.Step, k0 = bk * g.Step;
         var block = g.Blocks[cell];
         bool At(int i, int j, int k) => block[(k * side + j) * side + i] < 0;
         Span<bool> corner = stackalloc bool[8];
@@ -628,8 +697,8 @@ public static class DualContour
             return true;
         }
         Span<int> sheet = stackalloc int[12];
-        if (Sheets(corner, sheet, g, i0, j0, k0, step) != 1) return false;
-        return Octree.BoundaryLoops(g, i0, j0, k0, step, 1) == 1;
+        if (Sheets(corner, sheet, g, i0, j0, k0, g.Step) != 1) return false;
+        return Octree.BoundaryLoops(g, i0, j0, k0, g.Step, g.StepB) == 1;
     }
 
     /// Steps 4 and on, for the base cells and refined set given: fine cells inside the refined set, coarse leaves
@@ -646,8 +715,9 @@ public static class DualContour
         missCells = [];
         missMerged = [];
         over = false;
-        int k = g.K, step = g.Step;
+        int k = g.K, step = g.Step, per = g.PerBase, sb = g.StepB;
         double h = g.Hb;
+        long fineBlockBytes = (long)(per + 1) * (per + 1) * (per + 1) * 4;
         var vertices = new List<V3>();
         var quadrics = new List<Qef>();
         var index = new Dictionary<long, (int Base, int Packed, int Count)>();
@@ -677,7 +747,7 @@ public static class DualContour
             foreach (var (cell, info) in bases.OrderBy(e => e.Key))
             {
                 var (bi, bj, bk) = g.BaseCoords(cell);
-                index[g.Cell(bi, bj, bk)] = (vertices.Count, info.Packed, info.Count);
+                index[new Octree.Node(0, bi, bj, bk).Key] = (vertices.Count, info.Packed, info.Count);
                 for (int c = 0; c < info.Count; c++) Add(info.Points[c], info.Qefs[c], info.Stable[c], g.P(bi, bj, bk), h);
             }
         }
@@ -688,7 +758,7 @@ public static class DualContour
             var list = refined.OrderBy(c => c).ToArray();
             // The budget is checked on the cells actually made, as they are made: an oscillating field can make far
             // more than an estimate from the refined set's size.
-            long blockBytes = g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4;
+            long blockBytes = g.Blocks.Count * fineBlockBytes;
             long made = 0;
             bool overBudget = false;
             Parallel.For(0, list.Length, (n, state) =>
@@ -699,27 +769,29 @@ public static class DualContour
                 int bad = 0;
                 Span<bool> s = stackalloc bool[8];
                 Span<int> sheet = stackalloc int[12];
-                for (int kk = bk * step; kk < (bk + 1) * step; kk++)
-                    for (int j = bj * step; j < (bj + 1) * step; j++)
-                        for (int i = bi * step; i < (bi + 1) * step; i++)
+                // Fine cells (fi, fj, fk) of this base cell, at finest position (fi, fj, fk) * sb, level E in the octree.
+                for (int fk = bk * per; fk < (bk + 1) * per; fk++)
+                    for (int fj = bj * per; fj < (bj + 1) * per; fj++)
+                        for (int fi = bi * per; fi < (bi + 1) * per; fi++)
                         {
+                            int i = fi * sb, j = fj * sb, kk = fk * sb;
                             int inside = 0;
                             for (int c = 0; c < 8; c++)
                             {
-                                s[c] = g.In(i + (c & 1), j + ((c >> 1) & 1), kk + (c >> 2));
+                                s[c] = g.In(i + (c & 1) * sb, j + ((c >> 1) & 1) * sb, kk + (c >> 2) * sb);
                                 if (s[c]) inside++;
                             }
                             if (inside == 0 || inside == 8) continue;
-                            int count = Sheets(s, sheet, g, i, j, kk, 1), packed = 0;
+                            int count = Sheets(s, sheet, g, i, j, kk, sb), packed = 0;
                             for (int e = 0; e < 12; e++)
                                 if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
                             for (int c = 0; c < count; c++)
                             {
-                                var x = CellVertex(g, i, j, kk, 1, g.H, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack);
+                                var x = CellVertex(g, i, j, kk, sb, g.HB, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack);
                                 if (fellBack) bad++;
                                 points.Add((x, q, stable, g.P(i, j, kk), fellBack));
                             }
-                            cells.Add((g.Cell(i, j, kk), packed, count));
+                            cells.Add((new Octree.Node(g.E, fi, fj, fk).Key, packed, count));
                         }
                 cellsOf[n] = (cells, points, bad);
                 long total = Interlocked.Add(ref made, cells.Count);
@@ -746,7 +818,7 @@ public static class DualContour
                 foreach (var (x, q, stable, min, fellBack) in points)
                 {
                     if (fellBack) atInCell.Add(vertices.Count);
-                    Add(x, q, stable, min, g.H);
+                    Add(x, q, stable, min, g.HB);
                 }
             }
             // Coarse leaves: unrefined base cells with a sign change (one sheet, or they would be refined).
@@ -754,7 +826,7 @@ public static class DualContour
             {
                 if (refined.Contains(cell)) continue;
                 var (bi, bj, bk) = g.BaseCoords(cell);
-                coarse[new Octree.Node(k, bi, bj, bk).Key] = vertices.Count;
+                coarse[new Octree.Node(k + g.E, bi, bj, bk).Key] = vertices.Count;
                 coarseCell[vertices.Count] = cell;
                 Add(info.Points[0], info.Qefs[0], info.Stable[0], g.P(bi * step, bj * step, bk * step), h);
             }
@@ -773,8 +845,8 @@ public static class DualContour
         foreach (int cell in refined.Concat(near))
         {
             var (bi, bj, bk) = g.BaseCoords(cell);
-            var node = new Octree.Node(k, bi, bj, bk);
-            for (int l = k + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
+            var node = new Octree.Node(k + g.E, bi, bj, bk);
+            for (int l = k + g.E + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
         }
         var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell)
         {
@@ -783,7 +855,7 @@ public static class DualContour
         };
         octree.Build(tolerance);
         // Merging adds face centres (its sheet and loop tests); this is the last place the cache grows.
-        if (k > 0 && g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4 + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
+        if (k > 0 && g.Blocks.Count * fineBlockBytes + (long)index.Count * 400 + g.CentreMemory > MemoryBudget)
         {
             over = true;
             return new Result([], [], 0, 0, 0, h);
@@ -896,7 +968,7 @@ public static class DualContour
                     owned |= coarseCell.ContainsKey(v) || octree.MergedOwner(v, out _);
                 if (!owned) return;
                 V3 pa = vertices[a], pb = vertices[b], pc = vertices[c];
-                double tol = 0.25 * g.H, step = 1e-5 * g.Hb;
+                double tol = 0.25 * g.HB, step = 1e-5 * g.Hb;
                 bool miss = Distance(g, (pa + pb + pc) * (1.0 / 3), step) > tol || Distance(g, (pa + pb) * 0.5, step) > tol ||
                             Distance(g, (pb + pc) * 0.5, step) > tol || Distance(g, (pc + pa) * 0.5, step) > tol;
                 if (!miss) return;
@@ -914,7 +986,7 @@ public static class DualContour
         }
 
         // Finest cells in the output that ended at their in-cell point.
-        int unresolved = k == 0 ? 0 : tris.Distinct().Count(v => atInCell.Contains(v) && v < cellSide.Count && cellSide[v] == g.H);
+        int unresolved = k == 0 ? 0 : tris.Distinct().Count(v => atInCell.Contains(v) && v < cellSide.Count && cellSide[v] <= g.HB);
 
         // Merging leaves the vertices of merged cells unused.
         var remap = new int[vertices.Count];
@@ -989,10 +1061,14 @@ public static class DualContour
 
         Kind KindOf(Node n)
         {
-            if (n.L == 0) return g.HasCell(n.I, n.J, n.K) && cells.ContainsKey(g.Cell(n.I, n.J, n.K)) ? Kind.Leaf : Kind.Empty;
+            // Cells (deep at level 0, fine at level E) are leaves at their own level.
+            if (cells.ContainsKey(n.Key)) return Kind.Leaf;
+            if (n.L == 0) return Kind.Empty;
             if (merged.ContainsKey(n.Key) || coarse.ContainsKey(n.Key)) return Kind.Leaf;
             return occupied.Contains(n.Key) ? Kind.Internal : Kind.Empty;
         }
+
+        static Node Decode(long key) => new((int)(key >> 60), (int)(key >> 40) & 0xFFFFF, (int)(key >> 20) & 0xFFFFF, (int)key & 0xFFFFF);
 
         /// A coarse cell's last step is to be refined (the caller builds again), not its in-cell point.
         public bool RefineCoarse;
@@ -1016,12 +1092,24 @@ public static class DualContour
         public void Build(double tolerance)
         {
             var level = new HashSet<Node>();
-            foreach (var cell in cells.Keys)
-                level.Add(new Node(1, (int)(cell % g.Nx) >> 1, (int)(cell / g.Nx % g.Ny) >> 1, (int)(cell / ((long)g.Nx * g.Ny)) >> 1));
-            var coarseNodes = coarse.Keys.Select(key => new Node((int)(key >> 60), (int)(key >> 40) & 0xFFFFF, (int)(key >> 20) & 0xFFFFF, (int)key & 0xFFFFF)).ToList();
+            // Leaves above level 0 (fine cells at level E when there is a deeper level, coarse cells at the base level)
+            // join the walk at their own level, in the order they were made.
+            var leavesAt = new Dictionary<int, List<Node>>();
+            foreach (var key in cells.Keys)
+            {
+                var n = Decode(key);
+                if (n.L == 0) level.Add(n.Parent);
+                else { if (!leavesAt.TryGetValue(n.L, out var at)) leavesAt[n.L] = at = []; at.Add(n); }
+            }
+            foreach (var key in coarse.Keys)
+            {
+                var n = Decode(key);
+                if (!leavesAt.TryGetValue(n.L, out var at)) leavesAt[n.L] = at = [];
+                at.Add(n);
+            }
             for (int l = 1; l <= levels; l++)
             {
-                if (l == g.K) level.UnionWith(coarseNodes);
+                if (leavesAt.TryGetValue(l, out var joining)) level.UnionWith(joining);
                 var parents = new HashSet<Node>();
                 var nodes = level.ToArray();
                 foreach (var n in nodes)
@@ -1035,7 +1123,7 @@ public static class DualContour
                 if (tolerance > 0)
                     Parallel.For(0, nodes.Length, i =>
                     {
-                        if (coarse.ContainsKey(nodes[i].Key)) return; // already a leaf
+                        if (coarse.ContainsKey(nodes[i].Key) || cells.ContainsKey(nodes[i].Key)) return; // already a leaf
                         Span<bool> corner = stackalloc bool[8];
                         Span<int> sheet = stackalloc int[12];
                         bool ok = TryMerge(nodes[i], tolerance, corner, sheet, out var x, out var q, out var stable);
@@ -1062,17 +1150,18 @@ public static class DualContour
             q = default;
             stable = null;
             // Above the base level, only cells away from refinement merge: their boundary is all on the base lattice.
-            if ((n.L > g.K && noMerge.Contains(n.Key)) || Forbidden.Contains(n.Key)) return false;
+            // (noMerge holds only nodes above the level they protect, so it applies at any level.)
+            if (noMerge.Contains(n.Key) || Forbidden.Contains(n.Key)) return false;
             // Every child must be empty or a single-vertex leaf.
             for (int c = 0; c < 8; c++)
             {
                 var child = n.Child(c & 1, (c >> 1) & 1, c >> 2);
-                if (child.L == 0)
+                if (cells.TryGetValue(child.Key, out var e))
                 {
-                    if (!g.HasCell(child.I, child.J, child.K) || !cells.TryGetValue(g.Cell(child.I, child.J, child.K), out var e)) continue;
                     if (e.Count != 1) return false;
                     q.Add(quadrics[e.Base]);
                 }
+                else if (child.L == 0) continue;
                 else if (merged.TryGetValue(child.Key, out int v)) q.Add(quadrics[v]);
                 else if (coarse.TryGetValue(child.Key, out int cv)) q.Add(quadrics[cv]);
                 else if (occupied.Contains(child.Key)) return false;
@@ -1101,11 +1190,13 @@ public static class DualContour
             // the surface must cross that boundary in a single closed loop. The sign test above does not
             // guarantee it (a crease can make the surface leave and re-enter through one face), and two
             // loops would pinch two fans of triangles together at the vertex.
-            bool above = n.L > g.K;
-            if (BoundaryLoops(g, i0, j0, k0, size, above ? g.Step : 1) != 1) return false;
+            // The lattice the cell's boundary is sampled on, and the cell size its thresholds are in: base above the
+            // base level, fine down to level E, deep below.
+            bool above = n.L > g.K + g.E, fine = n.L > g.E;
+            if (BoundaryLoops(g, i0, j0, k0, size, above ? g.Step : fine ? g.StepB : 1) != 1) return false;
 
             var lo = new V3(i0 * g.H, j0 * g.H, k0 * g.H);
-            x = Place(g, q, lo, size * g.H, above ? g.Hb : g.H, out stable, out _);
+            x = Place(g, q, lo, size * g.H, above ? g.Hb : fine ? g.HB : g.H, out stable, out _);
             if (q.Rms(x) > tolerance) return false;
             x += g.Origin;
             if (stable is { } s) stable = s + g.Origin;
@@ -1475,10 +1566,12 @@ public static class DualContour
             {
                 var n = around[quadrant];
                 int v;
-                if (n.L == 0)
+                if (cells.TryGetValue(n.Key, out var ce))
                 {
-                    var (at, packed, _) = cells[g.Cell(n.I, n.J, n.K)];
-                    v = at + ((packed >> (2 * EdgeInQuadrant[d][quadrant])) & 3);
+                    // A cell's sheet for this edge; a cell larger than the edge must have one sheet (closure ensures it).
+                    if (ce.Count > 1 && length != 1 << n.L)
+                        throw new InvalidOperationException("DualContour: a multi-sheet cell borders a finer edge.");
+                    v = ce.Base + ((ce.Packed >> (2 * EdgeInQuadrant[d][quadrant])) & 3);
                 }
                 else v = VertexOf(n);
                 if (count > 0 && (poly[count - 1] == v || poly[0] == v)) continue; // a larger cell spans two quadrants
@@ -1487,7 +1580,10 @@ public static class DualContour
             if (count < 3) return;
             // Wind so the normal points from inside to outside.
             if (!inside) poly[..count].Reverse();
-            long source = length == 1 ? (((long)k * g.Sy + j) * g.Sx + i) * 3 + d : -1;
+            // A leaf-level edge (deep or fine) is remembered for RepairTunnels, with its level in the low 3 bits.
+            long source = length == 1 || length == g.StepB
+                ? ((((long)k * g.Sy + j) * g.Sx + i) * 3 + d) * 8 + (length == 1 ? 0 : g.E)
+                : -1;
             output.Add((poly[0], poly[1], poly[2], count == 4 ? poly[3] : -1, source));
         }
     }
@@ -1534,13 +1630,16 @@ public static class DualContour
         foreach (var (_, u, w, around) in fours)
         {
             // The four source edges must be the sides of one grid square: two along each of two axes.
-            int axisA = -1, axisB = -1;
+            int axisA = -1, axisB = -1, lv = -1;
             bool ok = true;
             lo[0] = lo[1] = lo[2] = int.MaxValue;
             foreach (int t in around)
             {
                 long e = sources[t];
                 if (e < 0) { ok = false; break; }
+                int el = (int)(e & 7);
+                if (lv < 0) lv = el; else if (el != lv) ok = false;
+                e >>= 3;
                 int axis = (int)(e % 3);
                 if (axisA < 0 || axis == axisA) axisA = axis;
                 else if (axisB < 0 || axis == axisB) axisB = axis;
@@ -1549,6 +1648,7 @@ public static class DualContour
                 for (int n = 0; n < 3; n++) lo[n] = Math.Min(lo[n], at[n]);
             }
             if (!ok || axisB < 0) continue;
+            int len = 1 << lv; // the square's side, in finest cells
             int normal = 3 - axisA - axisB;
 
             // Triangle built around the side along `axis` at offset `far` (0 or 1) across the other axis.
@@ -1557,23 +1657,23 @@ public static class DualContour
                 int other = axis == axisA ? axisB : axisA;
                 foreach (int t in around)
                 {
-                    if (sources[t] < 0 || sources[t] % 3 != axis) continue;
-                    Decode(g, sources[t] / 3, at);
-                    if (at[other] == lo[other] + far && at[axis] == lo[axis] && at[normal] == lo[normal]) return t;
+                    if (sources[t] < 0 || (sources[t] >> 3) % 3 != axis) continue;
+                    Decode(g, (sources[t] >> 3) / 3, at);
+                    if (at[other] == lo[other] + far * len && at[axis] == lo[axis] && at[normal] == lo[normal]) return t;
                 }
                 return -1;
             }
             bool Inside(int da, int db)
             {
                 lo.CopyTo(at, 0);
-                at[axisA] += da; at[axisB] += db;
+                at[axisA] += da * len; at[axisB] += db * len;
                 return g.In(at[0], at[1], at[2]);
             }
             bool c00 = Inside(0, 0), c10 = Inside(1, 0), c11 = Inside(1, 1), c01 = Inside(0, 1);
             if (c00 == c10 || c10 == c11 || c11 == c01) continue; // not an alternating square
             // The strip at a pairing corner (cornerA, 0): the side along A at B-offset 0 and the side along B at
             // A-offset cornerA. The square pairs around its inside corners, or its outside ones if its centre is inside.
-            bool centreIn = FaceCentreInside(g, normal, lo[0], lo[1], lo[2], 1);
+            bool centreIn = FaceCentreInside(g, normal, lo[0], lo[1], lo[2], len);
             int cornerA = c00 != centreIn ? 0 : 1;
             int t1 = Side(axisA, 0), t2 = Side(axisB, cornerA);
             if (t1 < 0 || t2 < 0 || t1 == t2) continue;
@@ -1591,12 +1691,12 @@ public static class DualContour
             var start = m;
             for (int it = 0; it < 4 && !flat.Contains((u, w)); it++)
             {
-                var grad = g.Field.Gradient(m, 1e-5 * g.H);
+                var grad = g.Field.Gradient(m, 1e-5 * g.H * len);
                 double g2 = V3.Dot(grad, grad);
                 if (g2 < 1e-12) break;
                 m -= grad * (g.Field.Value(m) / g2);
             }
-            if ((m - start).Length > g.H) m = start;
+            if ((m - start).Length > g.H * len) m = start;
             int mi = vertices.Count;
             vertices.Add(m);
             added[mi] = (u, w);
