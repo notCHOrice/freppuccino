@@ -147,6 +147,9 @@ public class FrepMeshCommand : Command
                 (result.DeepCells > 0 ? $", {result.DeepCells} of those cells sampled {result.ExtraDepth} level(s) deeper" : "") +
                 $"; smallest cell sampled {result.MinCellSize:0.#####} {doc.ModelUnitSystem}" +
                 (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
+            if (result.DeepPassesRejected > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.DeepPassesRejected} deeper pass(es) were discarded because they left more self-intersections; " +
+                    "the mesh kept is the best earlier one, with the depth reported above.");
             if (result.Contradictory > 0)
                 RhinoApp.WriteLine($"FrepMesh: {result.Contradictory} finest vertices still hold opposing surface normals in one sheet.");
             if (result.ProbeFailures > 0)

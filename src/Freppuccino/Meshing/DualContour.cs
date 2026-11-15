@@ -49,12 +49,13 @@ public static class DualContour
     /// AccuracyCellSize: the cell of the achieved Refine level, which the accuracy probes use. MinCellSize: the smallest
     /// cell actually sampled (deeper where ExtraDepth was used). ExtraDepth: deep levels actually used (0 if none).
     /// DeepCells: fine cells given extra depth. Contradictory: finest vertices whose sheet still holds opposing surface
-    /// normals that its vertex does not fit.
+    /// normals that its vertex does not fit. DeepPassesRejected: deep passes built but not kept because they left more
+    /// crossing pairs than the mesh kept (whose own depth and counts are the ones reported).
     /// Fragments: small disconnected components, no more than 4 finest cells across. Often these are bits of a
     /// feature thinner than the finest cell whose links were too thin to sample, but not always. Kept, only counted.
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
         double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0, int ProbeFailures = 0,
-        double AccuracyCellSize = 0, int ExtraDepth = 0, int DeepCells = 0, int Contradictory = 0);
+        double AccuracyCellSize = 0, int ExtraDepth = 0, int DeepCells = 0, int Contradictory = 0, int DeepPassesRejected = 0);
 
     const int Block = 8;
 
@@ -103,6 +104,10 @@ public static class DualContour
     /// Resolve faces crossed four times by the field at the face centre (see FaceCentreInside), instead of always
     /// pairing the crossings around the inside corners.
     public static bool FaceCentres = true;
+
+    /// Test hooks: base cells (base coordinates) forced into the refined set, and fine cells (fine coordinates) forced
+    /// into the deep set, so fixtures can place junctions where they want them. Null in normal use.
+    public static Func<int, int, int, bool>? ForceRefine, ForceDeep;
 
     /// Optional progress and timing messages (for test harnesses).
     public static Action<string>? Trace;
@@ -387,6 +392,8 @@ public static class DualContour
             {
                 try { result = MeshAt(field, bmin, size, h, simplify, k, e); }
                 catch (BudgetExceeded) when (k > 0) { result = null; }
+                // Thrown inside a parallel loop it arrives wrapped; only a budget overrun is a retry, nothing else.
+                catch (AggregateException ae) when (k > 0 && ae.Flatten().InnerExceptions.All(x => x is BudgetExceeded)) { result = null; }
             }
             if (result != null) return result;
         }
@@ -440,6 +447,11 @@ public static class DualContour
         {
             foreach (var (cell, info) in bases)
                 if (info.Unresolved) refined.Add(cell);
+            if (ForceRefine != null)
+                for (int bk = 0; bk < g.Nbz; bk++)
+                    for (int bj = 0; bj < g.Nby; bj++)
+                        for (int bi = 0; bi < g.Nbx; bi++)
+                            if (ForceRefine(bi, bj, bk)) refined.Add(g.BaseCell(bi, bj, bk));
             // Accuracy: wherever the mesh stays coarse it must be within a quarter of the finest cell of the surface,
             // so probe the polygons the base cells will form and refine where they miss.
             int seeded = SeedByAccuracy(g, bases, refined, 0.25 * g.HB);
@@ -475,6 +487,11 @@ public static class DualContour
             if (!again)
             {
                 mesh = mesh with { UnsafeSamples = unsafeSamples };
+                if (e > 0 && ForceDeep != null)
+                    for (int fk = 0; fk < g.NBz; fk++)
+                        for (int fj = 0; fj < g.NBy; fj++)
+                            for (int fi = 0; fi < g.NBx; fi++)
+                                if (ForceDeep(fi, fj, fk)) deepCandidates.Add(g.FineCell(fi, fj, fk));
                 if (e == 0 || deepCandidates.Count == 0) return mesh;
                 return Deepen(g, bases, refined, near, forbidden, simplify * h, mesh, deepCandidates, ref unsafeSamples);
             }
@@ -487,6 +504,9 @@ public static class DualContour
     /// Passes of "collect contradictory fine cells, give them extra depth, build again".
     public static int DeepPasses = 2;
 
+    /// Diagnostic switch: false keeps every deep pass even if it leaves more crossings (to inspect them).
+    public static bool RejectWorseDeep = true;
+
     /// The deep tier: fine cells whose surface evidence the fine lattice cannot represent (one sheet holding opposing
     /// normals that its vertex does not fit, an all-fine triangle that misses the surface by more than 0.25 of the
     /// Refine level's cell, or a crossing the repair could not remove) are sampled 2^E times finer, with enough of
@@ -498,6 +518,7 @@ public static class DualContour
         var deep = new HashSet<long>(candidates);
         var deepNear = new HashSet<long>();
         var mesh = levelMesh;
+        int rejected = 0;
         // The level-K mesh is kept as the fallback while the deep tier is built: reserve its memory.
         long reserved = (long)levelMesh.Vertices.Count * 24 + (long)levelMesh.Triangles.Count * 4;
         for (int pass = 0; pass < DeepPasses; pass++)
@@ -508,13 +529,17 @@ public static class DualContour
             if (over) return null;
             // A deeper pass is kept only if it leaves no more crossing pairs than the best mesh so far (the level mesh
             // to begin with): extra depth must not trade validity for accuracy.
-            if (built.Crossings <= mesh.Crossings) mesh = built with { UnsafeSamples = unsafeSamples };
-            else Mark($"deep pass {pass}: {built.Crossings} crossing pairs, against {mesh.Crossings}; kept the previous mesh");
+            if (built.Crossings <= mesh.Crossings || !RejectWorseDeep) mesh = built with { UnsafeSamples = unsafeSamples };
+            else
+            {
+                rejected++;
+                Mark($"deep pass {pass}: {built.Crossings} crossing pairs, against {mesh.Crossings}; kept the previous mesh");
+            }
             more.ExceptWith(deep);
             if (more.Count == 0) break;
             deep.UnionWith(more);
         }
-        return mesh;
+        return mesh with { DeepPassesRejected = rejected };
     }
 
     /// Closes the deep set the way Close closes the refined set, one tier down:
