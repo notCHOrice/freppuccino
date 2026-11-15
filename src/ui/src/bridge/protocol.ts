@@ -38,6 +38,22 @@ export interface SceneNode {
   color?: string
   /** primitive: a gumball scale or shear the parameters cannot express (SDF.Linear.*). Sliders are hidden. */
   custom?: boolean
+  /** primitive sdUser (FFunction) only. Its `params` then holds just the box half-extents b.x/b.y/b.z. */
+  userFn?: UserFnInfo
+}
+
+/** FFunction: SDF.Code compiled by the host (UserFn/UserFnCompiler). */
+export interface UserFnInfo {
+  code: string
+  ok: boolean
+  /** program hash, when ok */
+  hash?: string
+  /** 1-based line / column */
+  diagnostics: { line: number; column: number; message: string }[]
+  /** declared params in order; value = SDF.u.<name> or the default. Empty when the code doesn't compile. */
+  params: { name: string; value: number; default: number }[]
+  /** SDF.L (field = f / L); 1 when missing */
+  lipschitz: number
 }
 
 export interface UiSettings {
@@ -60,7 +76,7 @@ export type HostMessage =
 export type SelectMode = 'replace' | 'add' | 'toggle'
 /** Must match UiController.AllowedCommands */
 export type AllowedCommand =
-  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FPyramid' | 'FEllipsoid' | 'FTorus'
+  | 'FBox' | 'FSphere' | 'FCylinder' | 'FCone' | 'FPyramid' | 'FEllipsoid' | 'FTorus' | 'FFunction'
   | 'FTwist' | 'FBend' | 'FRepeat'
   | 'Freppuccino'
 
@@ -71,7 +87,8 @@ export type UiMessage =
   /** primitive: Rhino show/hide; operation: hides the node's result (undoable) */
   | { type: 'setVisible'; id: Id; visible: boolean }
   | { type: 'runCommand'; command: AllowedCommand }
-  /** preview: live drag tick, no undo; the next non-preview setParam ends the gesture as one undo step. */
+  /** preview: live drag tick, no undo; the next non-preview setParam ends the gesture as one undo step.
+   *  sdUser also takes name "L" (> 0) and "u.<param>" (declared param, any finite value). */
   | { type: 'setParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Writes SDF.Color ("#RRGGBB") on a primitive; preview as setOperation (one undo step per gesture). */
   | { type: 'setColor'; id: Id; color: string; preview?: boolean }

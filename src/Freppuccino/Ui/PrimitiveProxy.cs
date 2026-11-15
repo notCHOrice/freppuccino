@@ -20,6 +20,8 @@ static class PrimitiveProxy
         [FPyramidCommand.SdfType] = ["h", "s"],
         [FEllipsoidCommand.SdfType] = ["r.x", "r.y", "r.z"],
         [FTorusCommand.SdfType] = ["t.x", "t.y"],
+        // FFunction: proxy is its bounding box. L and u.* are handled in TryEdit.
+        [SdfUserText.UserType] = ["b.x", "b.y", "b.z"],
     };
 
     /// <summary>
@@ -31,19 +33,47 @@ static class PrimitiveProxy
         edited = null;
         brep = null;
         reason = null;
-        if (!Parameters.TryGetValue(type, out var names) || !names.Contains(name))
+        double? missing = null; // value a missing key stands for
+        if (UserFnView.IsUser(type) && name == UserFnView.LipschitzName)
         {
-            reason = $"Unknown parameter \"{name}\".";
-            return false;
+            if (!double.IsFinite(value) || value <= RhinoMath.ZeroTolerance)
+            {
+                reason = "Lipschitz scale must be greater than zero.";
+                return false;
+            }
+            missing = 1;
         }
-        // Cone radii may be zero (a pointed cone). Every other size must be positive.
-        bool zeroOk = type == FConeCommand.SdfType && (name is "r1" or "r2");
-        if (!double.IsFinite(value) || value < 0 || (!zeroOk && value <= RhinoMath.ZeroTolerance))
+        else if (UserFnView.IsUser(type) && name.StartsWith(UserFnView.ParamPrefix, StringComparison.Ordinal))
         {
-            reason = zeroOk ? "Radius can't be negative." : "Size must be greater than zero.";
-            return false;
+            if (!UserFnView.TryDefault(source, name[UserFnView.ParamPrefix.Length..], out var declared))
+            {
+                reason = $"The code doesn't declare \"{name[UserFnView.ParamPrefix.Length..]}\" (or doesn't compile).";
+                return false;
+            }
+            if (!double.IsFinite(value))
+            {
+                reason = "Value must be a finite number.";
+                return false;
+            }
+            missing = declared;
         }
-        if (SdfUserText.TryReadFloat(source, name, out var current) && Math.Abs(current - value) < 1e-9)
+        else
+        {
+            if (!Parameters.TryGetValue(type, out var names) || !names.Contains(name))
+            {
+                reason = $"Unknown parameter \"{name}\".";
+                return false;
+            }
+            // Cone radii may be zero (a pointed cone). Every other size must be positive.
+            bool zeroOk = type == FConeCommand.SdfType && (name is "r1" or "r2");
+            if (!double.IsFinite(value) || value < 0 || (!zeroOk && value <= RhinoMath.ZeroTolerance))
+            {
+                reason = zeroOk ? "Radius can't be negative." : "Size must be greater than zero.";
+                return false;
+            }
+        }
+        double? current = SdfUserText.TryReadFloat(source, name, out var stored) ? stored : missing;
+        if (current is { } c && Math.Abs(c - value) < 1e-9)
             return false;
 
         edited = source.Duplicate();
@@ -76,6 +106,9 @@ static class PrimitiveProxy
                 FEllipsoidCommand.CreateBrep(frame, r),
             FTorusCommand.SdfType when FTorusCommand.TryRead(attributes, out var frame, out var t) && t.X > 0 && t.Y > 0 =>
                 Torus(frame, t.X, t.Y),
+            SdfUserText.UserType when SdfUserText.TryReadFrame(attributes, out var frame) &&
+                                     SdfUserText.TryReadVec3(attributes, "b", out var b) && b.X > 0 && b.Y > 0 && b.Z > 0 =>
+                Box(frame, b),
             _ => null,
         };
         if (brep is not { IsValid: true }) return false;

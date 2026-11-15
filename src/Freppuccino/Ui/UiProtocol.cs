@@ -61,7 +61,26 @@ public sealed record SceneNode(
     // Primitive: SDF.Color "#RRGGBB" (white if the object has none).
     string? Color = null,
     /// <summary>Primitive carries SDF.Linear.*: a scale or shear the parameters cannot express.</summary>
-    bool? Custom = null);
+    bool? Custom = null,
+    /// <summary>sdUser (FFunction) only: code, compile result, params. Params then holds just b.x/b.y/b.z.</summary>
+    UserFnInfo? UserFn = null);
+
+/// <summary>FFunction inspector data (SDF.Code / SDF.L / SDF.u.*), compiled with UserFnCompiler.</summary>
+/// <param name="Hash">Program hash when <paramref name="Ok"/>.</param>
+/// <param name="Params">Declared params in order; Value = SDF.u.&lt;name&gt; or the default. Empty when the code doesn't compile.</param>
+/// <param name="Lipschitz">SDF.L (field = f / L); 1 when missing or not &gt; 0.</param>
+public sealed record UserFnInfo(
+    string Code,
+    bool Ok,
+    string? Hash,
+    IReadOnlyList<UserFnDiagnosticInfo> Diagnostics,
+    IReadOnlyList<UserFnParamInfo> Params,
+    double Lipschitz);
+
+/// 1-based line / column.
+public sealed record UserFnDiagnosticInfo(int Line, int Column, string Message);
+
+public sealed record UserFnParamInfo(string Name, double Value, double Default);
 
 public sealed record UiSettings(string Units);
 
@@ -114,6 +133,7 @@ public sealed record SetVisibleRequest(string Id, bool Visible);
 public sealed record RunCommandRequest(string Command);
 
 /// Edit one SDF parameter of a primitive and rebuild its proxy, e.g. { id, name: "s", value: 2 }.
+/// sdUser also takes "L" (Lipschitz, &gt; 0) and "u.&lt;param&gt;" (a declared param, any finite value).
 /// Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
 public sealed record SetParamRequest(string Id, string Name, double Value, bool Preview = false);
 
