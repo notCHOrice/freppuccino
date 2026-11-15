@@ -6,7 +6,7 @@ using Rhino.FileIO;
 
 namespace Freppuccino.Csg;
 
-/// Union/Intersect/Difference: CSG over ≥ 2 operands, blend K. Twist/Bend/Repeat: domain warps of one operand,
+/// Union/Intersect/Difference: CSG over ≥ 1 operand (created with ≥ 2; operand edits may leave 1 = pass-through), blend K. Twist/Bend/Repeat: domain warps of one operand,
 /// shaped by a referenced Rhino object (<see cref="FrepNode.Ref"/>: line for Twist/Bend, box for Repeat) + <see cref="FrepNode.Params"/>.
 public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5 }
 
@@ -45,8 +45,9 @@ public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOp
     public double Param(int i) => !Params.IsDefault && i < Params.Length ? Params[i] : 0;
 }
 
-/// Immutable CSG DAG. Nodes in creation order, which is topological: operands always predate their node, and
-/// operands are never edited, so no cycles. Parentless prims/nodes are hard-min'd at the root.
+/// Immutable CSG DAG. Nodes kept in topological order (operands before their node): creation order, unless operand
+/// edits (<see cref="WithOperands"/>) re-sorted it. Consumers rely on it (FrepMeshCommand builds bottom-up in one pass).
+/// Ids never change. Parentless prims/nodes are hard-min'd at the root.
 public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
 {
     public static readonly FrepTree Empty = new(ImmutableList<FrepNode>.Empty, 1);
@@ -96,6 +97,136 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
     {
         var i = Nodes.FindIndex(n => n.Id == id);
         return i < 0 ? this : this with { Nodes = Nodes.SetItem(i, f(Nodes[i])) };
+    }
+
+    // ───── operand edits ─────
+    // Rules (ArgumentException otherwise): node ids exist; no duplicate operand in a node; no cycles; warps keep exactly
+    // 1 operand; CSG nodes keep ≥ 1. Shader + mesher treat a 1-operand CSG node as its operand (Difference: base minus
+    // nothing); a 0-operand one silently draws nothing, so emptying a node is rejected (delete it instead).
+    // Leaf object ids aren't checked (no doc here); callers resolve them.
+
+    /// Replaces a node's operands, then re-sorts nodes topologically (stable: unchanged if already ordered).
+    public FrepTree WithOperands(int nodeId, ImmutableArray<FrepOperand> operands)
+    {
+        var node = Get(nodeId);
+        Check(node, operands);
+        return Edit(nodeId, n => n with { Operands = operands }).Sorted();
+    }
+
+    /// Inserts at index (default: end).
+    public FrepTree AddOperand(int nodeId, FrepOperand operand, int? index = null)
+    {
+        var node = Get(nodeId);
+        return WithOperands(nodeId, Insert(node, node.Operands, operand, index));
+    }
+
+    public FrepTree RemoveOperand(int nodeId, FrepOperand operand)
+    {
+        var node = Get(nodeId);
+        if (!node.Operands.Contains(operand)) throw new ArgumentException($"{Describe(operand)} is not an operand of {node.Name}");
+        return WithOperands(nodeId, node.Operands.Remove(operand));
+    }
+
+    /// Detaches <paramref name="operand"/> from <paramref name="fromNodeId"/> (null: every parent) and inserts it into
+    /// <paramref name="toNodeId"/> at <paramref name="index"/> (into the list after detaching; default end).
+    /// toNodeId null = root (detach only). from == to reorders. Into a warp: replaces its child (index null or 0); the
+    /// old child is dropped from it. All-or-nothing: every touched node is validated before anything changes.
+    public FrepTree Move(FrepOperand operand, int? fromNodeId, int? toNodeId, int? index = null)
+    {
+        if (operand.IsNode) Get(operand.NodeId);
+        var target = toNodeId is { } tid ? Get(tid) : null;
+
+        List<FrepNode> parents;
+        if (fromNodeId is { } fid)
+        {
+            var from = Get(fid);
+            if (!from.Operands.Contains(operand)) throw new ArgumentException($"{Describe(operand)} is not an operand of {from.Name}");
+            parents = [from];
+        }
+        else parents = [.. Nodes.Where(n => n.Operands.Contains(operand))];
+        if (target == null && parents.Count == 0) throw new ArgumentException($"{Describe(operand)} is already a root");
+
+        var lists = parents.ToDictionary(p => p.Id, p => p.Operands.Remove(operand));
+        if (target != null)
+        {
+            if (target.Op.IsWarp())
+            {
+                if (index is not (null or 0)) throw new ArgumentException($"{target.Name} is a warp: its one operand is index 0");
+                lists[target.Id] = [operand];
+            }
+            else lists[target.Id] = Insert(target, lists.GetValueOrDefault(target.Id, target.Operands), operand, index);
+        }
+
+        foreach (var (id, ops) in lists) Check(Get(id), ops);
+        var t = this;
+        foreach (var (id, ops) in lists) t = t.Edit(id, n => n with { Operands = ops });
+        return t.Sorted();
+    }
+
+    /// True if node <paramref name="id"/> is (transitively) under node <paramref name="ancestorId"/>.
+    public bool IsDescendant(int id, int ancestorId)
+    {
+        var seen = new HashSet<int>();
+        bool Walk(int a) => Find(a) is { } n &&
+                            n.Operands.Any(o => o.IsNode && (o.NodeId == id || (seen.Add(o.NodeId) && Walk(o.NodeId))));
+        return Walk(ancestorId);
+    }
+
+    FrepNode Get(int id) => Find(id) ?? throw new ArgumentException($"no node {NodeName(id)}");
+
+    /// Per-node rules for a proposed operand list (see "operand edits").
+    void Check(FrepNode node, ImmutableArray<FrepOperand> operands)
+    {
+        if (operands.IsDefault) throw new ArgumentException("operands must not be default");
+        if (node.Op.IsWarp() && operands.Length != 1)
+            throw new ArgumentException(operands.Length == 0
+                ? $"{node.Name} is a {node.Op} warp and would lose its only operand; delete it, or move something into it to replace it"
+                : $"{node.Name} is a {node.Op} warp: it takes exactly 1 operand");
+        if (!node.Op.IsWarp() && operands.Length == 0)
+            throw new ArgumentException($"{node.Name} would have no operands; delete the node instead");
+        var seen = new HashSet<FrepOperand>();
+        foreach (var o in operands)
+        {
+            if (!seen.Add(o)) throw new ArgumentException($"{node.Name} already has operand {Describe(o)}");
+            if (!o.IsNode) continue;
+            Get(o.NodeId);
+            if (o.NodeId == node.Id || IsDescendant(node.Id, o.NodeId))
+                throw new ArgumentException($"{NodeName(o.NodeId)} can't go under {node.Name}: {node.Name} is inside it (cycle)");
+        }
+    }
+
+    static ImmutableArray<FrepOperand> Insert(FrepNode node, ImmutableArray<FrepOperand> operands, FrepOperand o, int? index)
+    {
+        if (operands.Contains(o)) throw new ArgumentException($"{node.Name} already has operand {Describe(o)}");
+        int i = index ?? operands.Length;
+        if (i < 0 || i > operands.Length) throw new ArgumentException($"index {i} out of range for {node.Name} (0..{operands.Length})");
+        return operands.Insert(i, o);
+    }
+
+    static string Describe(FrepOperand o) => o.IsNode ? NodeName(o.NodeId) : o.ObjectId.ToString("D");
+
+    /// Stable topological re-sort: DFS in current order, operands first, so an ordered list comes back as the same
+    /// instance. Throws on a cycle (Check catches single edits; this guards multi-node Move). Missing node operands skipped.
+    FrepTree Sorted()
+    {
+        var byId = Nodes.ToDictionary(n => n.Id);
+        var done = new Dictionary<int, bool>(); // false = on the DFS stack
+        var order = ImmutableList.CreateBuilder<FrepNode>();
+        void Visit(FrepNode n)
+        {
+            if (done.TryGetValue(n.Id, out var d))
+            {
+                if (!d) throw new ArgumentException($"edit would create a cycle through {n.Name}");
+                return;
+            }
+            done[n.Id] = false;
+            foreach (var o in n.Operands)
+                if (o.IsNode && byId.TryGetValue(o.NodeId, out var c)) Visit(c);
+            done[n.Id] = true;
+            order.Add(n);
+        }
+        foreach (var n in Nodes) Visit(n);
+        return order.SequenceEqual(Nodes, ReferenceEqualityComparer.Instance) ? this : this with { Nodes = order.ToImmutable() };
     }
 
     /// Caller ensures nothing references it.

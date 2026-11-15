@@ -136,6 +136,37 @@ export const TOOLS: ToolDef[] = [
     ['ref'],
   ),
   tool(
+    'add_operand',
+    'Adds a primitive or node to an existing CSG node (at index, default the end; for subtract, index 0 makes it the target). ' +
+      'Deforms take exactly one operand: use move to swap it. Cycles and duplicates are rejected.',
+    {
+      node: { type: 'string', description: 'CSG node ref, e.g. "N3"' },
+      operand: { type: 'string', description: 'primitive or node ref to add' },
+      index: { type: 'integer', description: 'position in the operand list (optional)' },
+    },
+    ['node', 'operand'],
+  ),
+  tool(
+    'remove_operand',
+    'Takes an operand out of a CSG node; if nothing else uses it, it becomes a root (drawn on its own). A node must keep ≥ 1 ' +
+      'operand (delete the node instead), a deform exactly 1.',
+    { node: { type: 'string', description: 'CSG node ref' }, operand: { type: 'string', description: 'operand ref to remove' } },
+    ['node', 'operand'],
+  ),
+  tool(
+    'move',
+    'Re-parents a primitive or node: detaches it from "from" (default: every operation using it) and inserts it into "to" at ' +
+      'index (default end). Omit "to" (or null) to make it a root. from = to reorders. Into a deform: replaces its target. ' +
+      'Restructure with this instead of deleting and rebuilding.',
+    {
+      item: { type: 'string', description: 'primitive or node ref to move' },
+      to: { type: 'string', description: 'destination node ref; omit to make it a root' },
+      from: { type: 'string', description: 'detach only from this node (optional)' },
+      index: { type: 'integer', description: 'position in the destination operand list (optional)' },
+    },
+    ['item'],
+  ),
+  tool(
     'delete',
     'Deletes primitives and/or operation nodes (a deform\'s axis line / box goes with it). Something still used by another ' +
       'operation is kept (delete the parent first). recursive=true also deletes everything under the given nodes that nothing else uses.',
@@ -233,6 +264,11 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return `${result.ref} = ${args.op}(${args.target})${result.warning ? ' ⚠' : ''}`
     case 'edit_operation':
       return result.k !== undefined ? `${result.ref}: ${result.op} k=${result.k}` : `${result.ref}: ${result.op}${result.warning ? ' ⚠' : ''}`
+    case 'add_operand':
+    case 'remove_operand':
+      return `${result.ref} = ${result.op}(${((result.operands as string[]) ?? []).join(', ')})`
+    case 'move':
+      return `${result.item} → ${((result.parents as string[]) ?? []).join(', ') || 'root'}`
     case 'delete':
       return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
     case 'transform':
