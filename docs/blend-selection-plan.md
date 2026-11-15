@@ -57,15 +57,17 @@ Everything else rests on this.
 
 ### 4. Root transform
 
-- New unary tree op `Transform` carrying a 3x4 matrix. Transforming a selected root wraps it in a `Transform` node, or composes into the one already there.
-- Field: `child(M⁻¹ p) × s(M)`, in the shader and in `FrepField`. Bounds: the node's sublevel `{field <= t}` is `M ×` the child's sublevel at `t / s(M)`.
-- Gumball carrier, pending opus's spike:
-  - Preferred if the spike supports it: a per-root proxy object that Rhino attaches the gumball to.
-  - Otherwise: when a root is selected, the real objects of its control instances are selected in Rhino with their highlight suppressed, so Rhino shows its normal gumball over them.
-- On commit, the transform X goes into the root's `Transform` node. As a derived display update, each real object that is an instance under that root has X applied to its geometry and composed into its `A`. `P` and the `SDF.*` values do not change. The tree edit and the object updates share one undo record.
+As built (replaces the unary `Transform` node of draft 2; agreed by fable and astra, room #142/#143):
+
+- Every node may carry an optional affine matrix `M` (`FrepNode.Matrix`, tree chunk 1.3). Transforming a selected root composes `X × M` into that root's own matrix. The root keeps its id, its tree row and its selection; a wrapper node would have replaced them. `M` stays with the node if it later becomes an operand. A control instance's `T` is the product of the matrices on its path.
+- Field: `node(M⁻¹ p) × s(M)` (a point context of its own, like a warp), in the shader (4 uniform rows per such node) and in `FrepField`. Bounds: the node's sublevel `{field <= t}` is `M ×` its body's sublevel at `t / s(M)`. With any matrix in the scene, the viewport's bounding sphere is taken from these CPU sublevel bounds.
+- Gumball carrier (spike result): one invisible `FrepCarrier` custom mesh per visible node root, geometry = the root's world box, kept on Idle outside undo, never drawn or picked by Rhino (the picker selects it), excluded from discovery and baking, removed before a save and rebuilt after (selection restored), plain tagged leftovers purged, `doc.Modified` untouched. Selecting a node root = selecting its carrier, so Rhino's Esc / SelNone / deselect apply natively; the panel row mirrors it both ways. Parentless primitives are their own carrier.
+- Selection rule, amended (#147/#148): a natively selected carrier (SelAll, window, SelLast) is a root selection; a natively selected control brep is a leaf at its primary instance; never a root inferred from selected descendants. When roots and leaves reachable from them are transformed together, the transform applies once, to the roots.
+- On commit (the transform's undo record), the transform X goes into the root's `M`. As a derived display update, each real object that is an instance under that root has X applied to its geometry and composed into its `A`. `P` and the `SDF.*` values do not change. The tree edit and the object updates share one undo record.
 - During a drag, `FrepScene.Get` previews the dynamic transform as a temporary root matrix. Nothing is written until commit, so a cancelled drag leaves no trace.
 - Editing one Shift-selected leaf by a world transform X: the leaf's own change is `T⁻¹ X T`, applied through the handlers with `P` as the fallback.
-- Shared objects: a root transform changes only that root's `Transform` node, so the other root does not move. The shared object's real geometry follows its first path; its instance under another path is drawn by us. Shift-editing a shared leaf changes the canonical leaf, so it moves in every root that uses it (today's linked behaviour), and all of its tree rows are selected.
+- Derived updates happen once per object, by primary ownership (leaves: primary instance's root; warp references: first root whose subtree uses them). No moving leaf reachable from a transformed root gets a canonical update.
+- Shared objects: a root transform changes only that root's `M`, so the other root does not move. The shared object's real geometry follows its first path; its instance under another path is drawn by us. Shift-editing a shared leaf changes the canonical leaf, so it moves in every root that uses it (today's linked behaviour), and all of its tree rows are selected.
 
 ### 5. Drawing
 
