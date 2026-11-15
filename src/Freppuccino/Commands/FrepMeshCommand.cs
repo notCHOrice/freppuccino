@@ -38,7 +38,8 @@ public class FrepMeshCommand : Command
             RhinoApp.WriteLine("FrepMesh: no F-rep objects in the document (create some with FSphere, FBox, ...).");
             return Result.Nothing;
         }
-        var field = BuildField(scene, scene.Tree);
+        // Empty root list: check HasRoots before using the field (FrepField unions every primitive when it has no roots).
+        var field = FrepFieldBuilder.Build(scene, null, out _);
         if (!field.HasRoots)
         {
             RhinoApp.WriteLine("FrepMesh: nothing to mesh (every F-rep is hidden or cancelled out by the CSG tree).");
@@ -135,75 +136,6 @@ public class FrepMeshCommand : Command
             triangles.Add(a); triangles.Add(c); triangles.Add(topology.TopologyVertexIndex(face.D));
         }
         return DualContour.Defects(new DualContour.Result(vertices, triangles, 0, 0, 0, 0));
-    }
-
-    /// The scene as a CPU field, following FrepShaderGen.Compile: nodes in creation order, missing
-    /// leaves (hidden or deleted primitives, hidden nodes) dropped the same way, parentless primitives
-    /// and nodes as roots. Warps: hidden = missing, missing child = empty, ref gone = child unwarped.
-    static FrepField BuildField(FrepSceneData scene, FrepTree tree)
-    {
-        var field = new FrepField();
-        var index = new Dictionary<Guid, int>();
-        for (int i = 0; i < scene.Primitives.Count; i++)
-        {
-            var prim = scene.Primitives[i];
-            var (kind, frame, p) = prim;
-            V4[]? place = null;
-            if (prim.Place is { } pl && Placement.TryRows(pl, out var rows)) place = rows;
-            var fieldKind = kind switch
-            {
-                SdKind.Sphere => FieldKind.Sphere,
-                SdKind.Box => FieldKind.Box,
-                SdKind.Torus => FieldKind.Torus,
-                SdKind.Cylinder => FieldKind.Cylinder,
-                SdKind.Cone => FieldKind.Cone,
-                SdKind.Ellipsoid => FieldKind.Ellipsoid,
-                SdKind.Pyramid => FieldKind.Pyramid,
-                _ => throw new NotSupportedException($"FrepMesh cannot mesh {kind} yet"),
-            };
-            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p), place);
-        }
-
-        var warps = new Dictionary<int, SdWarp>();
-        for (int i = 0; i < scene.Warps.Count; i++) warps[scene.WarpIds[i]] = scene.Warps[i];
-
-        var nodeRef = new Dictionary<int, FieldRef?>();
-        FieldRef? Ref(FrepOperand o) => o.IsNode
-            ? nodeRef.GetValueOrDefault(o.NodeId)
-            : index.TryGetValue(o.ObjectId, out var i) ? FieldRef.Primitive(i) : null;
-        foreach (var n in tree.Nodes)
-        {
-            nodeRef[n.Id] = null;
-            if (n.Hidden) continue;
-            if (n.Op.IsWarp())
-            {
-                if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;
-                nodeRef[n.Id] = warps.TryGetValue(n.Id, out var w)
-                    ? FieldRef.Node(field.AddWarp(n.Op switch { FrepOp.Twist => FieldOp.Twist, FrepOp.Bend => FieldOp.Bend, _ => FieldOp.Repeat },
-                        FrepWarpMath.Rows(w), child))
-                    : child;
-                continue;
-            }
-            var terms = n.Operands.Select(Ref).ToList();
-            // Union skips missing operands; intersect with one missing is empty; difference needs its base.
-            bool empty = n.Op switch
-            {
-                FrepOp.Union => false,
-                FrepOp.Intersect => terms.Contains(null),
-                _ => terms.Count == 0 || terms[0] == null,
-            };
-            var live = terms.OfType<FieldRef>().ToList();
-            if (empty || live.Count == 0) continue;
-            var op = n.Op switch { FrepOp.Union => FieldOp.Union, FrepOp.Intersect => FieldOp.Intersect, _ => FieldOp.Difference };
-            nodeRef[n.Id] = FieldRef.Node(field.AddNode(op, n.K, live));
-        }
-
-        var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
-        for (int i = 0; i < scene.Primitives.Count; i++)
-            if (!referenced.Contains(FrepOperand.Object(scene.Ids[i]))) field.AddRoot(FieldRef.Primitive(i));
-        foreach (var n in tree.Nodes)
-            if (nodeRef[n.Id] is { } r && !referenced.Contains(FrepOperand.Node(n.Id))) field.AddRoot(r);
-        return field;
     }
 
     static V3 V(Point3d p) => new(p.X, p.Y, p.Z);

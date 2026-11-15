@@ -34,6 +34,20 @@ public sealed class UiController : IDisposable
         return ids;
     }
 
+    /// Selected node ids (panel order), without consuming them.
+    public static IReadOnlyList<int> SelectedNodes(RhinoDoc doc) => selectedNodes.GetValueOrDefault(doc.RuntimeSerialNumber, []);
+
+    /// Writes the panel's node selection (FrepSelection is the caller for scene clicks).
+    public static void SetSelectedNodes(RhinoDoc doc, IEnumerable<int> ids)
+    {
+        var list = NodesOf(doc);
+        var next = ids.Distinct().ToList();
+        if (list.SequenceEqual(next)) return;
+        list.Clear();
+        list.AddRange(next);
+        NodeSelectionChanged?.Invoke();
+    }
+
     static event Action? NodeSelectionChanged;
 
     static List<int> NodesOf(RhinoDoc doc) =>
