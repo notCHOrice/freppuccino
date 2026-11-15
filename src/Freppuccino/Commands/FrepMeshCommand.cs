@@ -144,7 +144,10 @@ public class FrepMeshCommand : Command
             string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
             RhinoApp.WriteLine(
                 $"FrepMesh: refine {result.Refine}{lowered}: {result.RefinedCells} cells sampled at {result.MinCellSize:0.####} {doc.ModelUnitSystem}" +
-                (result.Unresolved > 0 ? $"; {result.Unresolved} vertices there ended at their fallback position (features thinner than that)" : "") + ".");
+                (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
+            if (result.ProbeFailures > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.ProbeFailures} triangle(s) at coarse cells are still more than {0.25 * result.MinCellSize:0.####} " +
+                    $"{doc.ModelUnitSystem} from the surface by the field's estimate (refinement passes ran out).");
         }
         if (result.Fragments > 0)
             RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small disconnected component(s), at most {4 * result.MinCellSize:0.####} {doc.ModelUnitSystem} " +

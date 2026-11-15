@@ -24,8 +24,10 @@ namespace Freppuccino.Meshing;
 /// to an in-cell point, and the vertices of triangles that actually cross (<see cref="Crossings"/>) are demoted
 /// step by step and the mesh contoured again until none cross; <see cref="Result.Crossings"/> reports any left.
 ///
-/// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed, and
-/// the repair makes such places valid, not accurate (a thin skin becomes blocky).
+/// Refinement (MeshAt): base cells that do not resolve the surface, or whose polygons miss it by more than a quarter
+/// of the finest cell, are sampled up to 2^K times finer, with enough of their neighbours to join them consistently.
+/// Features that leave no trace at base resolution, and features thinner than the finest cell, can still be missed;
+/// the repair then makes such places valid, not accurate.
 ///
 /// Tunnel faces: when both cells sharing a four-crossing face route all four crossings through one
 /// sheet, the surface passes through that face as two strips joining the same two cell vertices, so
@@ -39,12 +41,15 @@ public static class DualContour
     /// Demoted: vertex placements the repair stepped down.
     /// Refine: extra levels actually used (lowered from the request when over budget or below the minimum cell size).
     /// RefinedCells: base cells sampled finer. Unresolved: finest-level vertices in the output at their in-cell point,
-    /// placed there or demoted there by the crossing repair (features thinner than MinCellSize). UnsafeSamples: base samples whose sign changed when
+    /// placed there or demoted there by the crossing repair (a numerical fallback, not proof of a thin feature). UnsafeSamples: base samples whose sign changed when
     /// evaluated again (the field changed faster than its Lipschitz bound, so skipping samples was unsafe there).
+    /// ProbeFailures: output triangles with a coarse or merged vertex that a probe (centroid and edge midpoints,
+    /// distance estimated as |f| / |grad f|) still finds farther than 0.25 MinCellSize from the surface, after the
+    /// refinement passes for them ran out (see MeshAt); 0 without refinement, where it is not checked.
     /// Fragments: small disconnected components, no more than 4 finest cells across. Often these are bits of a
     /// feature thinner than the finest cell whose links were too thin to sample, but not always. Kept, only counted.
     public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
-        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0);
+        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0, int Fragments = 0, int ProbeFailures = 0);
 
     const int Block = 8;
 
@@ -78,6 +83,9 @@ public static class DualContour
     /// built again, instead of moving its vertex to the in-cell point (which can cut across a crease the cell held).
     /// More accurate, but the second build roughly doubles the time; off by default.
     public static bool RefineStuckCoarse = false;
+
+    /// Passes of refinement for output triangles that miss the surface by more than 0.25 finest cells (see MeshAt).
+    public static int AccuracyPasses = 2;
 
     /// Optional progress and timing messages (for test harnesses).
     public static Action<string>? Trace;
@@ -327,10 +335,18 @@ public static class DualContour
         Mark($"base cells: {bases.Count}");
         var refined = new HashSet<int>();
         if (k > 0)
+        {
             foreach (var (cell, info) in bases)
                 if (info.Unresolved) refined.Add(cell);
+            // Accuracy: wherever the mesh stays coarse it must be within a quarter of the finest cell of the surface,
+            // so probe the polygons the base cells will form and refine where they miss.
+            int seeded = SeedByAccuracy(g, bases, refined, 0.25 * g.H);
+            Mark($"accuracy seeds: {seeded} cells");
+        }
 
         int unsafeSamples = 0;
+        var forbidden = new HashSet<long>(); // merged cells that missed the surface: not merged again
+        int accuracyPass = 0;
         for (int restart = 0; ; restart++)
         {
             // 3. Close the refined set (k > 0 only): see Close.
@@ -339,13 +355,82 @@ public static class DualContour
             Mark($"closure: {refined.Count} refined, {near.Count} interface, {g.Blocks.Count} blocks");
 
             bool last = restart >= RefineRestarts;
-            var mesh = Build(g, bases, refined, near, simplify * h, last, out var stuck, out bool over);
+            var mesh = Build(g, bases, refined, near, forbidden, simplify * h, last, out var stuck, out var missCells, out var missMerged, out bool over);
             if (over) return null;
+            if (k == 0) return mesh;
             // A coarse cell still in a crossing at its last placement: refine it too and build again.
-            if (mesh.Crossings == 0 || stuck.Count == 0 || k == 0 || restart >= RefineRestarts)
-                return mesh with { UnsafeSamples = unsafeSamples };
+            bool again = mesh.Crossings > 0 && stuck.Count > 0 && restart < RefineRestarts;
+            // Output triangles off the surface at a coarse or merged vertex: refine those cells, stop those merges.
+            // A pass runs only if it changes something (a cell joins the refined set or a merge is forbidden).
+            if (mesh.ProbeFailures > 0 && accuracyPass < AccuracyPasses && restart < RefineRestarts)
+            {
+                int before = refined.Count + forbidden.Count;
+                refined.UnionWith(missCells);
+                forbidden.UnionWith(missMerged);
+                if (refined.Count + forbidden.Count > before) { again = true; accuracyPass++; }
+            }
+            if (!again) return mesh with { UnsafeSamples = unsafeSamples };
             refined.UnionWith(stuck);
         }
+    }
+
+    /// Distance estimate from point p to the surface, |f| / |grad f|; +infinity when the gradient is unusable.
+    static double Distance(Grid g, V3 p, double step)
+    {
+        double f = Math.Abs(g.Field.Value(p));
+        if (f == 0) return 0;
+        double len = g.Field.Gradient(p, step).Length;
+        double d = f / len;
+        return len > 0 && double.IsFinite(d) ? d : double.PositiveInfinity;
+    }
+
+    /// Adds to <paramref name="refined"/> the base cells around every base edge whose polygon (the four cells' vertices
+    /// for that edge) misses the surface by more than <paramref name="tolerance"/> at its centre or the middle of a
+    /// side: the polygons the coarse cells will be meshed with. Returns how many cells were added.
+    static int SeedByAccuracy(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, double tolerance)
+    {
+        int step = g.Step;
+        var found = new ConcurrentBag<int>();
+        Parallel.For(0, g.Nbz + 1, bk =>
+        {
+            Span<int> cell = stackalloc int[4];
+            Span<V3> corner = stackalloc V3[4];
+            Span<int> at = stackalloc int[3];
+            for (int bj = 0; bj <= g.Nby; bj++)
+                for (int bi = 0; bi <= g.Nbx; bi++)
+                    for (int d = 0; d < 3; d++)
+                    {
+                        at[0] = bi; at[1] = bj; at[2] = bk;
+                        bool inside = g.In(bi * step, bj * step, bk * step);
+                        at[d]++;
+                        if (at[d] > (d == 0 ? g.Nbx : d == 1 ? g.Nby : g.Nbz)) continue;
+                        if (inside == g.In(at[0] * step, at[1] * step, at[2] * step)) continue;
+                        int p = Octree.P(d), q = Octree.Q(d);
+                        bool ok = true, anyCoarse = false;
+                        for (int quadrant = 0; quadrant < 4 && ok; quadrant++)
+                        {
+                            at[0] = bi; at[1] = bj; at[2] = bk;
+                            at[p] += (quadrant is 1 or 2 ? 1 : 0) - 1;
+                            at[q] += (quadrant >= 2 ? 1 : 0) - 1;
+                            if (!g.HasBaseCell(at[0], at[1], at[2])) { ok = false; break; }
+                            int c = g.BaseCell(at[0], at[1], at[2]);
+                            if (!bases.TryGetValue(c, out var info)) { ok = false; break; }
+                            cell[quadrant] = c;
+                            corner[quadrant] = info.Points[(info.Packed >> (2 * Octree.EdgeInQuadrant[d][quadrant])) & 3];
+                            anyCoarse |= !refined.Contains(c);
+                        }
+                        if (!ok || !anyCoarse) continue;
+                        double unit = 1e-5 * g.Hb;
+                        bool miss = Distance(g, (corner[0] + corner[1] + corner[2] + corner[3]) * 0.25, unit) > tolerance;
+                        for (int s = 0; s < 4 && !miss; s++)
+                            miss = Distance(g, (corner[s] + corner[(s + 1) % 4]) * 0.5, unit) > tolerance;
+                        if (miss)
+                            for (int s = 0; s < 4; s++) found.Add(cell[s]);
+                    }
+        });
+        int before = refined.Count;
+        refined.UnionWith(found);
+        return refined.Count - before;
     }
 
     /// A base cell with a sign change: its vertices (one per sheet) and whether the base grid fails to resolve the
@@ -525,9 +610,14 @@ public static class DualContour
     /// coarse cells still in a crossing at their last placement; <paramref name="over"/> is set if over budget.
     /// <paramref name="last"/>: no restart follows, so coarse cells take their in-cell step too rather than wait to be
     /// refined.
-    static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, double tolerance, bool last, out HashSet<int> stuck, out bool over)
+    /// <paramref name="forbidden"/>: merged cells not to merge again. <paramref name="missCells"/> and
+    /// <paramref name="missMerged"/> return the owners of output triangles that miss the surface (Result.ProbeFailures).
+    static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, HashSet<long> forbidden, double tolerance, bool last,
+        out HashSet<int> stuck, out HashSet<int> missCells, out HashSet<long> missMerged, out bool over)
     {
         stuck = [];
+        missCells = [];
+        missMerged = [];
         over = false;
         int k = g.K, step = g.Step;
         double h = g.Hb;
@@ -661,6 +751,7 @@ public static class DualContour
         }
         var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources, atInCell)
         {
+            Forbidden = forbidden,
             RefineCoarse = RefineStuckCoarse && g.K > 0 && !last,
         };
         octree.Build(tolerance);
@@ -741,7 +832,40 @@ public static class DualContour
                     foreach (int v in new[] { tris[3 * ta + c], tris[3 * tb + c] })
                         if (coarseCell.TryGetValue(v, out int cell) && octree.AtBottom(v)) stuck.Add(cell);
 
-        // Finest cells in the output that ended at their in-cell point: features thinner than the finest cell.
+        // Probe output triangles that have a coarse or merged vertex (the refinement passes target these).
+        int probeFailures = 0;
+        if (k > 0)
+        {
+            var missC = new ConcurrentBag<int>();
+            var missM = new ConcurrentBag<long>();
+            int failures = 0;
+            octree.MergedOwner(-1, out _); // build the owner index before the parallel loop
+            Parallel.For(0, tris.Count / 3, t =>
+            {
+                int a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+                bool owned = false;
+                foreach (int v in new[] { a, b, c })
+                    owned |= coarseCell.ContainsKey(v) || octree.MergedOwner(v, out _);
+                if (!owned) return;
+                V3 pa = vertices[a], pb = vertices[b], pc = vertices[c];
+                double tol = 0.25 * g.H, step = 1e-5 * g.Hb;
+                bool miss = Distance(g, (pa + pb + pc) * (1.0 / 3), step) > tol || Distance(g, (pa + pb) * 0.5, step) > tol ||
+                            Distance(g, (pb + pc) * 0.5, step) > tol || Distance(g, (pc + pa) * 0.5, step) > tol;
+                if (!miss) return;
+                Interlocked.Increment(ref failures);
+                foreach (int v in new[] { a, b, c })
+                {
+                    if (coarseCell.TryGetValue(v, out int cell)) missC.Add(cell);
+                    if (octree.MergedOwner(v, out long key)) missM.Add(key);
+                }
+            });
+            probeFailures = failures;
+            missCells.UnionWith(missC);
+            missMerged.UnionWith(missM);
+            Mark($"probes: {probeFailures} triangles miss; owners {missCells.Count} coarse, {missMerged.Count} merged");
+        }
+
+        // Finest cells in the output that ended at their in-cell point.
         int unresolved = k == 0 ? 0 : tris.Distinct().Count(v => atInCell.Contains(v) && v < cellSide.Count && cellSide[v] == g.H);
 
         // Merging leaves the vertices of merged cells unused.
@@ -755,7 +879,7 @@ public static class DualContour
             tris[t] = remap[v];
         }
         return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, g.H, k, refined.Count, unresolved,
-            Fragments: CountFragments(used, tris, 4 * g.H));
+            Fragments: CountFragments(used, tris, 4 * g.H), ProbeFailures: probeFailures);
     }
 
     /// Connected pieces of the mesh whose bounding box diagonal is at most <paramref name="size"/>.
@@ -825,6 +949,17 @@ public static class DualContour
         /// A coarse cell's last step is to be refined (the caller builds again), not its in-cell point.
         public bool RefineCoarse;
 
+        /// Cells never merged (they missed the surface in an earlier build).
+        public HashSet<long> Forbidden = [];
+
+        /// The merged cell whose vertex is v, if any. Valid once merging and repair are done.
+        public bool MergedOwner(int v, out long key)
+        {
+            owners ??= merged.ToDictionary(e => e.Value, e => e.Key);
+            return owners.TryGetValue(v, out key);
+        }
+        Dictionary<int, long>? owners;
+
         /// The vertex of a leaf node above level 0: a merged cell or a coarse (unrefined base) cell.
         int VertexOf(Node n) => merged.TryGetValue(n.Key, out int v) ? v : coarse[n.Key];
 
@@ -879,7 +1014,7 @@ public static class DualContour
             q = default;
             stable = null;
             // Above the base level, only cells away from refinement merge: their boundary is all on the base lattice.
-            if (n.L > g.K && noMerge.Contains(n.Key)) return false;
+            if ((n.L > g.K && noMerge.Contains(n.Key)) || Forbidden.Contains(n.Key)) return false;
             // Every child must be empty or a single-vertex leaf.
             for (int c = 0; c < 8; c++)
             {
@@ -1231,7 +1366,7 @@ public static class DualContour
         }
 
         // Which of a finest cell's 12 edges is the shared one, per quadrant around an edge along d.
-        static readonly int[][] EdgeInQuadrant = [[3, 2, 0, 1], [7, 5, 4, 6], [11, 10, 8, 9]];
+        public static readonly int[][] EdgeInQuadrant = [[3, 2, 0, 1], [7, 5, 4, 6], [11, 10, 8, 9]];
 
         /// The four nodes around an edge segment along <paramref name="d"/>, counter-clockwise about +d.
         /// The segment starts at sample (i, j, k) and is <paramref name="length"/> cells long.
