@@ -17,25 +17,7 @@ public static class FrepFieldBuilder
         var tree = scene.Tree;
         var field = new FrepField();
         var index = new Dictionary<Guid, int>();
-        for (int i = 0; i < scene.Primitives.Count; i++)
-        {
-            var prim = scene.Primitives[i];
-            var (kind, frame, p) = prim;
-            V4[]? place = null;
-            if (prim.Place is { } pl && Placement.TryRows(pl, out var rows)) place = rows;
-            var fieldKind = kind switch
-            {
-                SdKind.Sphere => FieldKind.Sphere,
-                SdKind.Box => FieldKind.Box,
-                SdKind.Torus => FieldKind.Torus,
-                SdKind.Cylinder => FieldKind.Cylinder,
-                SdKind.Cone => FieldKind.Cone,
-                SdKind.Ellipsoid => FieldKind.Ellipsoid,
-                SdKind.Pyramid => FieldKind.Pyramid,
-                _ => throw new NotSupportedException($"no CPU field for {kind} yet"),
-            };
-            index[scene.Ids[i]] = field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p), place);
-        }
+        for (int i = 0; i < scene.Primitives.Count; i++) index[scene.Ids[i]] = Add(field, scene.Primitives[i]);
 
         var warps = new Dictionary<int, SdWarp>();
         for (int i = 0; i < scene.Warps.Count; i++) warps[scene.WarpIds[i]] = scene.Warps[i];
@@ -88,6 +70,33 @@ public static class FrepFieldBuilder
             roots.Add(o);
         }
         return field;
+    }
+
+    /// A field of one primitive (a control instance's shape, for picking).
+    public static FrepField Single(SdPrimitive prim)
+    {
+        var field = new FrepField();
+        field.AddRoot(FieldRef.Primitive(Add(field, prim)));
+        return field;
+    }
+
+    static int Add(FrepField field, SdPrimitive prim)
+    {
+        var (kind, frame, p) = prim;
+        V4[]? place = null;
+        if (prim.Place is { } pl && Placement.TryRows(pl, out var rows)) place = rows;
+        var fieldKind = kind switch
+        {
+            SdKind.Sphere => FieldKind.Sphere,
+            SdKind.Box => FieldKind.Box,
+            SdKind.Torus => FieldKind.Torus,
+            SdKind.Cylinder => FieldKind.Cylinder,
+            SdKind.Cone => FieldKind.Cone,
+            SdKind.Ellipsoid => FieldKind.Ellipsoid,
+            SdKind.Pyramid => FieldKind.Pyramid,
+            _ => throw new NotSupportedException($"no CPU field for {kind} yet"),
+        };
+        return field.AddPrimitive(fieldKind, V(frame.Origin), V(frame.XAxis), V(frame.YAxis), V(p), place);
     }
 
     static V3 V(Point3d p) => new(p.X, p.Y, p.Z);

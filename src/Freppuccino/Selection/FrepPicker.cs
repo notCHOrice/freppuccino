@@ -15,7 +15,11 @@ namespace Freppuccino.Selection;
 /// Acts only when the cursor is not on a gumball handle and no command is running (or the running command opened an
 /// explicit F-rep selection session, see <see cref="BeginSession"/>). Anything else, and every click that hits no
 /// F-rep, is left to Rhino.
-///   plain click: the nearest root whose final field the click ray hits; replaces the selection.
+///   plain click: the nearest root whose final field the click ray hits; replaces the selection. If it hits no root
+///                but does hit a control shape (an exposed cutter), that shape's root.
+///   Shift+click: the nearest control instance (the leaf's own pre-warp shape under T × P, i.e. what its outline shows),
+///                with the root and path it was reached through; replaces the selection. A Shift+click on nothing F-rep
+///                is left to Rhino (add to selection). Coincident shapes from different roots: no pick, a message.
 /// The hit is decided on mouse-down (which is when Rhino's own pick has to be cancelled), the selection is made on
 /// mouse-up, after Rhino has finished with the click.
 public sealed class FrepPicker : MouseCallback
@@ -46,8 +50,6 @@ public sealed class FrepPicker : MouseCallback
     /// Raised after the picker changed the selection.
     public static event Action<RhinoDoc>? Picked;
 
-    (RhinoDoc Doc, FrepOperand Root)? pending;
-
     protected override void OnMouseDown(MouseCallbackEventArgs e)
     {
         pending = null;
@@ -56,9 +58,33 @@ public sealed class FrepPicker : MouseCallback
         if (doc == null || !IsFrepView(view.ActiveViewport)) return;
         if (e.IsOverGumball() != Rhino.UI.Gumball.GumballMode.None) return;
         if (Command.InCommand() && sessions == 0) return;
-        if (e.ShiftKeyDown || e.CtrlKeyDown) return; // leaf picking: step 4
+        if (e.CtrlKeyDown) return;
 
-        var hit = PickRoot(doc, view.ActiveViewport, new Point2d(e.ViewportPoint.X, e.ViewportPoint.Y));
+        var vp = view.ActiveViewport;
+        var client = new Point2d(e.ViewportPoint.X, e.ViewportPoint.Y);
+        if (e.ShiftKeyDown)
+        {
+            // Leaf: the nearest control instance. A miss is left to Rhino (Shift+click = add to its selection).
+            var leaf = PickInstance(doc, vp, client, out var ambiguous);
+            if (leaf == null && !ambiguous) return;
+            e.Cancel = true;
+            pending = ambiguous ? new Pending(doc, null, null, true) : new Pending(doc, null, leaf, false);
+            return;
+        }
+
+        var hit = PickRoot(doc, vp, client);
+        if (hit == null)
+        {
+            // An exposed control (e.g. a cutter's face outside the result) selects the root it belongs to.
+            var inst = PickInstance(doc, vp, client, out var ambiguous);
+            if (inst != null) hit = inst.Root;
+            else if (ambiguous)
+            {
+                e.Cancel = true;
+                pending = new Pending(doc, null, null, true);
+                return;
+            }
+        }
         if (hit is not { } root)
         {
             // Rhino deselects its own objects on an empty click, but node roots aren't Rhino objects.
@@ -66,16 +92,84 @@ public sealed class FrepPicker : MouseCallback
             return;
         }
         e.Cancel = true;
-        pending = (doc, root);
+        pending = new Pending(doc, root, null, false);
     }
+
+    sealed record Pending(RhinoDoc Doc, FrepOperand? Root, FrepInstance? Leaf, bool Ambiguous);
+    Pending? pending;
 
     protected override void OnMouseUp(MouseCallbackEventArgs e)
     {
         if (pending is not { } p || e.MouseButton != MouseButton.Left) return;
         pending = null;
         e.Cancel = true;
-        FrepSelection.SelectRoot(p.Doc, p.Root, add: false);
+        if (p.Ambiguous)
+        {
+            RhinoApp.WriteLine("Freppuccino: several shapes coincide there (a shape shared by several blends); select it in the F-rep panel.");
+            return;
+        }
+        if (p.Leaf != null) FrepSelection.SelectLeaf(p.Doc, p.Leaf, add: false);
+        else if (p.Root is { } r) FrepSelection.SelectRoot(p.Doc, r, add: false);
         Picked?.Invoke(p.Doc);
+    }
+
+    // Per scene snapshot: one single-primitive field per control instance (its canonical leaf under T × P).
+    static readonly ConditionalWeakTable<FrepSceneData, List<(FrepInstance Instance, FrepField Field, (V3 Min, V3 Max) Box)>> instanceFields = new();
+
+    static List<(FrepInstance, FrepField, (V3, V3))> InstanceFields(FrepSceneData scene) =>
+        instanceFields.GetValue(scene, s =>
+        {
+            var result = new List<(FrepInstance, FrepField, (V3, V3))>();
+            var (_, instances) = FrepInstances.Compute(s.Tree, s.Ids);
+            var index = new Dictionary<Guid, int>();
+            for (int i = 0; i < s.Ids.Count; i++) index[s.Ids[i]] = i;
+            foreach (var inst in instances)
+            {
+                if (!index.TryGetValue(inst.Object, out var i)) continue;
+                var prim = s.Primitives[i];
+                // T × P as the leaf's placement (T = identity until root transforms).
+                Transform? place = inst.T.IsIdentity ? prim.Place : inst.T * (prim.Place ?? Transform.Identity);
+                var f = FrepFieldBuilder.Single(prim with { Place = place });
+                result.Add((inst, f, f.Bounds()));
+            }
+            return result;
+        });
+
+    /// Nearest control instance under the cursor. <paramref name="ambiguous"/>: the nearest hits tie between instances
+    /// that aren't the same shape at the same place (coincident shapes from different roots): no pick then.
+    public static FrepInstance? PickInstance(RhinoDoc doc, RhinoViewport vp, Point2d client, out bool ambiguous)
+    {
+        ambiguous = false;
+        var scene = FrepScene.Get(doc);
+        var ray = Ray(vp, client);
+        var hits = new List<(FrepInstance Inst, double T)>();
+        foreach (var (inst, field, box) in InstanceFields(scene))
+        {
+            if (doc.Objects.FindId(inst.Object) is not { IsLocked: false, IsHidden: false }) continue;
+            if (March(field, box, ray) is { } t) hits.Add((inst, t));
+        }
+        if (hits.Count == 0) return null;
+        hits.Sort((a, b) => a.T.CompareTo(b.T));
+        var best = hits[0];
+        double tieTol = 4 * (ray.EpsConst + ray.EpsSlope * best.T);
+        var tied = hits.Where(h => h.T - best.T <= tieTol).ToList();
+        // Ties between instances of one object at one place (a shared leaf with no transforms between) are the same
+        // shape: its primary instance. Anything else is a real ambiguity.
+        if (tied.Any(h => h.Inst.Object != best.Inst.Object || !SameTransform(h.Inst.T, best.Inst.T)))
+        {
+            ambiguous = true;
+            return null;
+        }
+        var (_, all) = FrepInstances.Compute(scene.Tree, scene.Ids);
+        return tied.Count > 1 ? all.First(i => i.Object == best.Inst.Object) : best.Inst;
+    }
+
+    static bool SameTransform(Transform a, Transform b)
+    {
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 4; c++)
+                if (Math.Abs(a[r, c] - b[r, c]) > 1e-9 * (1 + Math.Abs(a[r, c]))) return false;
+        return true;
     }
 
     static void UiController_ClearNodes(RhinoDoc doc) => Ui.UiController.SetSelectedNodes(doc, []);
