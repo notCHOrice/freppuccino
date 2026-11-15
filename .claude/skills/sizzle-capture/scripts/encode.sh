@@ -12,6 +12,7 @@
 #   SUPER_TEXT=""          super text; empty = no super. Shown SUPER_IN -> SUPER_OUT with 0.3 s fades.
 #   SUPER_IN=1.0  SUPER_OUT=(EDIT_LEN - 0.5)
 #   FPS=60
+#   BADGE_MASK=0           1 = clear the FREP MODE badge corner (only for captures from builds without CleanCapture)
 set -e
 CLIP="$1"
 [ -n "$CLIP" ] || { echo "usage: encode.sh <clip-id> [out-dir]"; exit 2; }
@@ -43,10 +44,13 @@ BGPNG="$WORK/bg-$THEME-1080.png"
 seq_inputs() { # $1 = first frame
   for j in 0 1 2 3; do printf -- '-framerate %s -start_number %s -i %s/f%%04d_%s.png ' "$FPS" "$1" "$FR" "$j"; done
 }
-# Average the 4 jittered captures with PREMULTIPLIED alpha (straight-alpha averaging leaves dark/light fringes),
-# make the FREP MODE badge corner transparent (drawbox replace=1), lay it over the gradient.
+# Average the 4 jittered captures with PREMULTIPLIED alpha (straight-alpha averaging leaves dark/light fringes) and
+# lay them over the gradient. Clean captures (AiCapture.CleanCapture) have no badge; BADGE_MASK=1 makes the top-left
+# corner transparent for older builds (gyroid / displacements branches). It's off by default because it punches a
+# hole in any subject that reaches that corner.
 # Never `split` a looped still in this graph: it buffers frames until ffmpeg runs out of memory. Bound loops with -t.
-AVG="[0:v]format=rgba,premultiply=inplace=1[a];[1:v]format=rgba,premultiply=inplace=1[b];[2:v]format=rgba,premultiply=inplace=1[c];[3:v]format=rgba,premultiply=inplace=1[d];[a][b][c][d]mix=inputs=4,unpremultiply=inplace=1,drawbox=x=0:y=0:w=160:h=80:color=black@0.0:t=fill:replace=1[fg];[4:v][fg]overlay=shortest=1:format=auto"
+MASK=""; [ "${BADGE_MASK:-0}" = "1" ] && MASK=",drawbox=x=0:y=0:w=160:h=80:color=black@0.0:t=fill:replace=1"
+AVG="[0:v]format=rgba,premultiply=inplace=1[a];[1:v]format=rgba,premultiply=inplace=1[b];[2:v]format=rgba,premultiply=inplace=1[c];[3:v]format=rgba,premultiply=inplace=1[d];[a][b][c][d]mix=inputs=4,unpremultiply=inplace=1${MASK}[fg];[4:v][fg]overlay=shortest=1:format=auto"
 BG="-loop 1 -framerate $FPS -t $SECS -i $BGPNG"
 X264="-c:v libx264 -preset slow -r $FPS -movflags +faststart"
 

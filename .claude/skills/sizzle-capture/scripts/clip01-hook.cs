@@ -16,6 +16,7 @@ const string ClipId = "c01_hook";
 const int Fps = 60, W = 1920, H = 1080;   // W x H must stay below the on-screen viewport size (see SKILL.md: tiling)
 const double Seconds = 7.0;               // the raw take, with handles; the edit is cut from it at encode time
 const double Lens = 50;
+const bool ClearsScene = true;            // false = the clip works on an opened file (open-3dm.cs) and must not clear it
 
 // ───────────── HARNESS (same in every clip script) ─────────────
 var work = Environment.GetEnvironmentVariable("SIZZLE_WORK")
@@ -31,8 +32,8 @@ try
     foreach (var f in Directory.GetFiles(framesDir, "*.png")) File.Delete(f);
 
     var doc = RhinoDoc.ActiveDoc;
-    // The SCENE block clears the document: never run it on a saved file (an example .3dm, someone's model).
-    if (!string.IsNullOrEmpty(doc.Path))
+    // A SCENE block that clears the document must never run on a saved file (an example .3dm, someone's model).
+    if (ClearsScene && !string.IsNullOrEmpty(doc.Path))
         throw new Exception($"the active document is {doc.Path}; this script clears the scene. Open an empty one first: echo NEW > $SIZZLE_WORK/open3dm/request.txt && run-clip.sh open-3dm.cs open3dm");
     var asm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "Freppuccino")
               ?? throw new Exception("Freppuccino plugin not loaded (launch Rhino with launch-rhino.ps1)");

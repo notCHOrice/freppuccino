@@ -14,7 +14,10 @@ case "$THEME" in espresso) TOP='#2a1e19'; BOT='#160f0d' ;; *) TOP='#fff8ef'; BOT
 BGPNG="$WORK/bg-$THEME-1080.png"
 [ -f "$BGPNG" ] || node "$HERE/bg.mjs" 1920 1080 "$TOP" "$BOT" "$BGPNG" > /dev/null
 mkdir -p "$OUT"
-AVG="[0:v]format=rgba,premultiply=inplace=1[a];[1:v]format=rgba,premultiply=inplace=1[b];[2:v]format=rgba,premultiply=inplace=1[c];[3:v]format=rgba,premultiply=inplace=1[d];[a][b][c][d]mix=inputs=4,unpremultiply=inplace=1,drawbox=x=0:y=0:w=160:h=80:color=black@0.0:t=fill:replace=1[fg];[4:v][fg]overlay=format=auto"
+# Clean captures (AiCapture.CleanCapture) have no badge. BADGE_MASK=1 clears the top-left corner for older builds
+# (gyroid / displacements branches); off by default because it punches a hole in a subject that reaches the corner.
+MASK=""; [ "${BADGE_MASK:-0}" = "1" ] && MASK=",drawbox=x=0:y=0:w=160:h=80:color=black@0.0:t=fill:replace=1"
+AVG="[0:v]format=rgba,premultiply=inplace=1[a];[1:v]format=rgba,premultiply=inplace=1[b];[2:v]format=rgba,premultiply=inplace=1[c];[3:v]format=rgba,premultiply=inplace=1[d];[a][b][c][d]mix=inputs=4,unpremultiply=inplace=1${MASK}[fg];[4:v][fg]overlay=format=auto"
 N=$(ls "$FR" | grep -cE '^f[0-9]{4}_0\.png$')
 LIST=""
 i=0
