@@ -1,4 +1,4 @@
-import { Sparkles, X } from 'lucide-react'
+import { Code2, Sparkles, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -6,6 +6,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { AiPanel } from '@/components/ai-panel'
 import { Inspector } from '@/components/inspector'
+import { ScriptPanel } from '@/components/script-panel'
 import { SceneTree } from '@/components/scene-tree'
 import { dismissNotice, send, useHost } from '@/bridge/host'
 import { indexNodes, labelNodes } from '@/lib/scene'
@@ -13,10 +14,11 @@ import { cn } from '@/lib/utils'
 import appIcon from '@/brand/app-icon.svg'
 import wordmark from '@/brand/wordmark.svg?raw'
 
-type Tab = 'scene' | 'ai'
+type Tab = 'scene' | 'script' | 'ai'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('scene')
+  const [editRequest, setEditRequest] = useState<{ id: string; seq: number }>()
   const host = useHost((s) => s.host)
   const synced = useHost((s) => s.synced)
   const scene = useHost((s) => s.scene)
@@ -67,6 +69,9 @@ export default function App() {
             aria-label="Panel"
           >
             <ToggleGroupItem value="scene" className="px-2">Scene</ToggleGroupItem>
+            <ToggleGroupItem value="script" className="px-2">
+              <Code2 /> Script
+            </ToggleGroupItem>
             <ToggleGroupItem value="ai" className="px-2">
               <Sparkles /> AI
             </ToggleGroupItem>
@@ -91,8 +96,19 @@ export default function App() {
         </ScrollArea>
 
         <div className="max-h-[65%] shrink-0 overflow-y-auto border-t bg-card">
-          <Inspector selected={selected} labels={labels} roots={roots} />
+          <Inspector
+            selected={selected}
+            labels={labels}
+            roots={roots}
+            onEditCode={(id) => {
+              setEditRequest((r) => ({ id, seq: (r?.seq ?? 0) + 1 }))
+              setTab('script')
+            }}
+          />
         </div>
+      </div>
+      <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'script' && 'hidden')}>
+        <ScriptPanel editRequest={editRequest} onOpenAi={() => setTab('ai')} />
       </div>
       <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'ai' && 'hidden')}>
         <AiPanel />

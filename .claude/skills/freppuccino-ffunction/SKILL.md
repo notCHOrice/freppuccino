@@ -56,12 +56,20 @@ to see F-reps.
   doc's current viewport shader, if it fails; it covers every function in the scene).
 - `set_function_params {target, params?: {name: value}, lipschitz?}`: changes values without touching the code (cheap:
   no shader recompile).
+- `check_function_code {code}`: compiles without writing anything; returns `ok`, `diagnostics`, `params`. Use it to get
+  code right before `create_function`.
+- `get_function_example {name?}` (panel agent only; external sessions read `examples/ffunction/*.glsl`): the bundled
+  examples (TPMS block / lattice-filled sphere / Voronoi foam / graded gyroid / Scherk tower / ...), each with its code
+  and ready `create_function` arguments. Examples are Y-up: their box uses `x_axis [1,0,0]`, `y_axis [0,0,1]`.
 - `update_primitive {ref, center?, size?, x_axis?, y_axis?}` moves / resizes the clip box (code untouched; `code` /
   `params` / `lipschitz` are an error here, use the tools above). On a stretched function (`stretched: true`) `size` is
   in the unstretched frame and the stretch stays; changing its axes is an error (use `transform {rotate}`).
 - `get_scene` lists functions as `type: "function"` with `ok`, `error` (first diagnostic), `params`, `lipschitz`.
 - Tree edits: `combine`, `add_operand {node, operand, index?}`, `remove_operand {node, operand}`,
-  `move {item, to?, from?, index?}` (no `to` = make it a root), `deform`, `transform`, `delete`.
+  `move {item, to?, from?, index?}` (no `to` = make it a root), `deform`, `wrap {op: offset|blend, target, k?}`,
+  `unwrap {refs}`, `transform`, `delete`.
+- Also: `select {refs?, mode?}`, `mesh {refs?, resolution?, simplify?, refine?, quads?, name?}` (FrepMesh without prompts),
+  `set_zebra {on, stripes?, vertical?}`.
 - `help {topic?}`: this guide + the tool list (`topic: "tools"`: only the list).
 
 ## The DSL
@@ -125,6 +133,9 @@ may run out of steps at grazing angles).
   stays inside its cell.
 - Non-uniform scaling in code (`p * vec3(1, 2, 1)`) needs L = the largest factor.
 - When in doubt, raise L until holes disappear (1.5, 2, 3), then capture_views to check.
+- Offline, without Rhino (external sessions): `dotnet run --project .claude/skills/freppuccino-ffunction/scripts/ffcheck --
+  file.glsl,bx,by,bz,L[,param=value...]` compiles the code, runs the emitted GLSL through shaderc / SPIRV-Cross, and samples
+  the clipped field in the box (b = half extents): `grad max` must stay ≤ 1 (else raise L); `fill` = solid fraction.
 
 ## Workflows
 

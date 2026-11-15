@@ -1,8 +1,9 @@
 import type { ToolDef } from './openrouter'
 import { callTool, ToolError } from '@/bridge/host'
 import { findSkill, SKILLS } from './skills'
+import { EXAMPLES, exampleCreateArgs, findExample } from '@/lib/examples'
 
-// Tools the model can call. Everything but load_skill runs in Rhino: src/Freppuccino/Ai/AiTools.cs (same names and
+// Tools the model can call. Everything but load_skill and get_function_example runs in Rhino: src/Freppuccino/Ai/AiTools.cs (same names and
 // argument shapes; shape fields are documented in Ai/AiShapes.cs). Keep the three in sync.
 
 const vec3 = (description: string) => ({
@@ -67,7 +68,8 @@ export const TOOLS: ToolDef[] = [
   tool(
     'get_scene',
     'Lists every F-rep primitive (ref, type, shape fields, color, used_by) and operation node (ref N#; CSG: op, k, operands; ' +
-      'deforms: op, target and the deform fields), the roots (what is drawn), the bounding box and the model units. ' +
+      'deforms: op, target and the deform fields; offset / blend: op, k), the roots (what is drawn), the bounding box, the model units, ' +
+      'and "selection": what the user has selected (when they say "this" / "the selected part", it means these). ' +
       'Call it first, and whenever you are unsure of refs or positions.',
   ),
   tool(
@@ -135,8 +137,8 @@ export const TOOLS: ToolDef[] = [
   ),
   tool(
     'edit_operation',
-    "Changes an operation node: a CSG node's op and/or blend k, or a deform node's fields (omitted fields keep their value; " +
-      "a deform can't change its op).",
+    "Changes an operation node: a CSG node's op and/or blend k, a deform node's fields (omitted fields keep their value; " +
+      "a deform can't change its op), or an offset / blend node's k (offset k may be negative: shrinks).",
     {
       ref: { type: 'string', description: 'node ref, e.g. "N3"' },
       op: { type: 'string', enum: ['union', 'subtract', 'intersect'] },
@@ -268,6 +270,69 @@ export const TOOLS: ToolDef[] = [
     ['target'],
   ),
   tool(
+    'check_function_code',
+    'Compiles FFunction code without writing anything: ok, diagnostics [{line, column, message}], params. Cheap; use it to fix code before create_function.',
+    { code: { type: 'string' } },
+    ['code'],
+  ),
+  tool(
+    'get_function_example',
+    'The bundled FFunction examples (TPMS lattices: gyroid / Schwarz P / diamond / Neovius, lattice-filled sphere, Voronoi foam, ' +
+      'graded gyroid, Scherk tower, nautilus, Turing vase, Michell bracket, tet goo, helicatenoid, starters). No name: the list ' +
+      '(name, description, box, lipschitz). With name: its code plus ready create_function arguments (Y-up box standing on the ' +
+      'ground at the origin; change center / params to place and tune it). Prefer adapting an example over writing from scratch.',
+    { name: { type: 'string', enum: EXAMPLES.map((e) => e.name) } },
+  ),
+  tool(
+    'wrap',
+    'Inserts a node directly above an existing one (parents now use the new node). offset: target is a union / subtract / ' +
+      'intersect node; k = surface shift in model units (positive grows, negative shrinks: wall thickening, clearances). ' +
+      'blend: target is a repeat node; k fillets the copies into each other. Returns the node ref (N#); change k with edit_operation.',
+    {
+      op: { type: 'string', enum: ['offset', 'blend'] },
+      target: { type: 'string', description: 'node ref (N#)' },
+      k: { type: 'number', description: 'offset distance (signed) or blend radius (≥ 0); default 0' },
+    },
+    ['op', 'target'],
+  ),
+  tool(
+    'unwrap',
+    "Removes operation nodes but keeps what's under them: the children take the node's place (the panel's Unwrap). " +
+      'Use it to drop a deform / offset / blend, or to ungroup a union.',
+    { refs: refs('node refs (N#)') },
+    ['refs'],
+  ),
+  tool(
+    'select',
+    'Selects primitives / nodes in Rhino and the panel (mode replace = default, add, toggle); no refs clears the selection. ' +
+      'Select your finished part at the end so the user can tweak it in the inspector.',
+    { refs: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'toggle'] } },
+  ),
+  tool(
+    'mesh',
+    'Bakes F-rep roots into a Rhino mesh (the FrepMesh command): the F-reps stay. Only when the user asks for a mesh / export. ' +
+      'Returns the mesh id, face count, closed / manifold flags and self_intersections (not manifold: raise resolution; self-intersections: raise refine).',
+    {
+      refs: refs('root refs to bake (default: every visible root)'),
+      resolution: { type: 'integer', description: 'cells along the longest side, 16–384 (default 128; 256 for fine lattices)' },
+      simplify: { type: 'number', description: 'simplification tolerance in cells, 0–1 (default 0.03; 0 = uniform)' },
+      refine: { type: 'integer', description: 'extra levels for thin features and sharp creases, 0–3 (default 0; raise it when self_intersections > 0 or thin walls break)' },
+      quads: { type: 'boolean', description: "remesh to quads with Rhino's QuadRemesh (slower)" },
+      name: { type: 'string', description: 'Rhino object name (default "FrepMesh")' },
+    },
+  ),
+  tool(
+    'set_zebra',
+    'Zebra analysis (FZebra): reflection stripes on union surfaces, so blend continuity shows in capture_views (smooth stripes = ' +
+      'smooth blend, kinks = a crease). Opens the Zebra Options window; turn it off when done.',
+    {
+      on: { type: 'boolean' },
+      stripes: { type: 'number', description: 'stripe count, 2–60 (default 12)' },
+      vertical: { type: 'boolean', description: 'stripe direction (default true)' },
+    },
+    ['on'],
+  ),
+  tool(
     'load_skill',
     'Reads a skill: guidance and proven recipes for a kind of object or task. Load the matching ones before building.',
     { name: { type: 'string', enum: SKILLS.filter((s) => !s.always).map((s) => s.name) } },
@@ -299,8 +364,28 @@ export async function runTool(name: string, rawArgs: string): Promise<ToolOutcom
     return { ok: true, content: skill.body, summary: skill.name }
   }
 
+  if (name === 'get_function_example') {
+    if (!args.name) {
+      const list = EXAMPLES.map((e) => ({
+        name: e.name,
+        description: e.description,
+        box_size: e.half.map((h) => 2 * h),
+        lipschitz: e.lipschitz,
+      }))
+      return { ok: true, content: JSON.stringify({ examples: list }), summary: `${list.length} examples` }
+    }
+    const ex = findExample(String(args.name))
+    if (!ex) return fail(`no example '${args.name}'. Available: ${EXAMPLES.map((e) => e.name).join(', ')}`)
+    return {
+      ok: true,
+      content: JSON.stringify({ name: ex.name, description: ex.description, note: ex.note, create_function: exampleCreateArgs(ex) }),
+      summary: ex.name,
+    }
+  }
+
   try {
-    const result = (await callTool(name, args, name === 'capture_views' ? 120_000 : 60_000)) as Record<string, unknown>
+    const timeout = name === 'mesh' ? 300_000 : name === 'capture_views' ? 120_000 : 60_000
+    const result = (await callTool(name, args, timeout)) as Record<string, unknown>
     if (name === 'capture_views') {
       const views = (result.views as string[]) ?? []
       const images = ((result.images as string[]) ?? []).map((dataUrl, i) => ({ view: views[i] ?? `view ${i + 1}`, dataUrl }))
@@ -352,6 +437,18 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return `${result.ref}${result.ok === false ? ' (errors)' : ''}`
     case 'get_function':
       return `${args.target}${result.ok === false ? ' (errors)' : ''}${result.shader_error ? ' (shader error)' : ''}`
+    case 'check_function_code':
+      return result.ok ? 'compiles' : `${((result.diagnostics as unknown[]) ?? []).length} errors`
+    case 'wrap':
+      return `${result.ref} = ${args.op}(${result.target}) k=${result.k}`
+    case 'unwrap':
+      return ((result.unwrapped as string[]) ?? []).join(', ')
+    case 'select':
+      return ((result.selection as string[]) ?? []).join(', ') || 'nothing'
+    case 'mesh':
+      return `${result.name}: ${result.faces} faces${result.manifold === false ? ' (not manifold)' : ''}`
+    case 'set_zebra':
+      return result.zebra ? 'zebra on' : 'zebra off'
     case 'transform':
       return ((result.transformed as string[]) ?? []).join(', ')
     case 'set_color': {

@@ -20,6 +20,8 @@ namespace Freppuccino.Ai;
 /// </summary>
 public static partial class AiTools
 {
+    public static string UndoPrefix = "AI: ";
+
     public static JsonNode Run(RhinoDoc doc, string tool, JsonObject args) => tool switch
     {
         "get_scene" => GetScene(doc),
@@ -41,6 +43,12 @@ public static partial class AiTools
         "set_function_code" => SetFunctionCode(doc, args),
         "get_function" => GetFunction(doc, args),
         "set_function_params" => SetFunctionParams(doc, args),
+        "check_function_code" => CheckFunctionCode(args),
+        "wrap" => Wrap(doc, args),
+        "unwrap" => Unwrap(doc, args),
+        "select" => SelectRefs(doc, args),
+        "mesh" => MeshRoots(doc, args),
+        "set_zebra" => SetZebra(doc, args),
         "help" => Help(args),
         _ => throw new AiToolException($"unknown tool '{tool}'"),
     };
@@ -104,6 +112,9 @@ public static partial class AiTools
             ["roots"] = new JsonArray([.. roots]),
         };
         if (bbox.IsValid) result["bounding_box"] = new JsonObject { ["min"] = AiShapes.Json(bbox.Min), ["max"] = AiShapes.Json(bbox.Max) };
+        var selection = SelectionRefs(doc, refs);
+        if (selection.Count > 0) result["selection"] = selection;
+        if (Display.FrepSettings.Zebra) result["zebra"] = true;
         var drawn = FrepScene.Get(doc);
         var warnings = new List<string>();
         if (drawn.Dropped is > 0 and var dropped)
@@ -276,6 +287,7 @@ public static partial class AiTools
         if (!operand.IsNode) throw new AiToolException("edit_operation takes an operation node (N…); use update_primitive for primitives");
         var node = tree.Find(operand.NodeId)!;
         if (node.Op.IsWarp()) return EditWarp(doc, tree, node, args);
+        if (node.Op is FrepOp.Blend or FrepOp.Offset) return EditWrap(doc, tree, node, args);
         if (args.Select(kv => kv.Key).Where(key => key is not ("ref" or "op" or "k")).ToList() is { Count: > 0 } extra)
             throw new AiToolException($"{node.Name} is a {OpName(node.Op)}: it only takes op and k (got {string.Join(", ", extra)}); " +
                                       "deform fields apply to twist / bend / repeat nodes");
@@ -441,7 +453,7 @@ public static partial class AiTools
     /// One undo record per tool call.
     static void Mutate(RhinoDoc doc, string description, Action action)
     {
-        var record = doc.BeginUndoRecord("AI: " + description);
+        var record = doc.BeginUndoRecord(UndoPrefix + description);
         try { action(); }
         finally
         {

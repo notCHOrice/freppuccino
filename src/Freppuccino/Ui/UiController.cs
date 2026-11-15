@@ -365,7 +365,7 @@ public sealed class UiController : IDisposable
         return result;
     }
 
-    static List<string> SelectedIds(RhinoDoc doc)
+    internal static List<string> SelectedIds(RhinoDoc doc)
     {
         // Leaves selected only so the gumball can sit on a node's geometry stay out of the panel selection.
         var gumball = NodeLeaves(doc);
@@ -471,7 +471,7 @@ public sealed class UiController : IDisposable
     static T Parse<T>(JsonElement message) =>
         message.Deserialize<T>(UiProtocol.Json) ?? throw new JsonException("empty payload");
 
-    static void Select(RhinoDoc doc, SelectRequest request)
+    internal static void Select(RhinoDoc doc, SelectRequest request)
     {
         var tree = FrepTrees.Get(doc);
         var nodeIds = Nodes(tree, request.Ids).ToList();
@@ -924,6 +924,7 @@ public sealed class UiController : IDisposable
     void RunAiTool(RhinoDoc doc, AiToolRequest request)
     {
         AiToolResultMessage reply;
+        AiTools.UndoPrefix = request.Source == "script" ? "Script: " : "AI: ";
         try
         {
             reply = new(request.CallId, true, AiTools.Run(doc, request.Tool, AiTools.ParseArgs(request.Args)));
@@ -937,6 +938,10 @@ public sealed class UiController : IDisposable
             // Wrong argument types (a number where a string goes, ...) land here too; the model can fix those.
             RhinoApp.WriteLine($"Freppuccino AI: {request.Tool} failed: {ex}");
             reply = new(request.CallId, false, Error: $"{ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            AiTools.UndoPrefix = "AI: ";
         }
         web.Send(reply);
     }

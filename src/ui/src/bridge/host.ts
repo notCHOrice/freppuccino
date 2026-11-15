@@ -132,7 +132,7 @@ const toolCalls = new Map<string, { resolve: (r: unknown) => void; reject: (e: E
 let toolCallId = 0
 
 /** Runs an AI tool on the host (Ai/AiTools.cs). Rejects with ToolError on failure, or after timeoutMs. */
-export function callTool(tool: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<unknown> {
+export function callTool(tool: string, args: Record<string, unknown>, timeoutMs = 60_000, source: 'ai' | 'script' = 'ai'): Promise<unknown> {
   const callId = `c${++toolCallId}`
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -143,7 +143,7 @@ export function callTool(tool: string, args: Record<string, unknown>, timeoutMs 
       resolve: (r) => (clearTimeout(timer), resolve(r)),
       reject: (e) => (clearTimeout(timer), reject(e)),
     })
-    transport.post({ type: 'aiTool', callId, tool, args })
+    transport.post({ type: 'aiTool', callId, tool, args, source })
   })
 }
 
