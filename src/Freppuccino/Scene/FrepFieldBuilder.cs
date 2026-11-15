@@ -15,7 +15,7 @@ public static class FrepFieldBuilder
     public static FrepField Build(FrepSceneData scene, IReadOnlyCollection<FrepOperand>? only, out List<FrepOperand> roots)
     {
         var tree = scene.Tree;
-        var field = new FrepField();
+        var field = new FrepField { ImplicitUnion = false };
         var index = new Dictionary<Guid, int>();
         for (int i = 0; i < scene.Primitives.Count; i++) index[scene.Ids[i]] = Add(field, scene.Primitives[i]);
 
@@ -75,7 +75,7 @@ public static class FrepFieldBuilder
     /// A field of one primitive (a control instance's shape, for picking).
     public static FrepField Single(SdPrimitive prim)
     {
-        var field = new FrepField();
+        var field = new FrepField { ImplicitUnion = false };
         field.AddRoot(FieldRef.Primitive(Add(field, prim)));
         return field;
     }

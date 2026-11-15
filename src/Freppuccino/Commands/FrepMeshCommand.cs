@@ -38,7 +38,6 @@ public class FrepMeshCommand : Command
             RhinoApp.WriteLine("FrepMesh: no F-rep objects in the document (create some with FSphere, FBox, ...).");
             return Result.Nothing;
         }
-        // Empty root list: check HasRoots before using the field (FrepField unions every primitive when it has no roots).
         var field = FrepFieldBuilder.Build(scene, null, out _);
         if (!field.HasRoots)
         {

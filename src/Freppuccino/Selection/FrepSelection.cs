@@ -27,7 +27,18 @@ public static class FrepSelection
     /// deselect) doesn't reach them; this does, panel open or not. Also drops state of closed documents.
     public static void Install()
     {
-        RhinoDoc.DeselectAllObjects += (_, e) => ClearNodes(e.Document);
+        RhinoDoc.DeselectAllObjects += (_, e) =>
+        {
+            ClearNodes(e.Document);
+            picked.Remove(e.Document.RuntimeSerialNumber);
+        };
+        // A picked path lasts only while its object stays selected: reselecting it natively (window, panel, SelLast)
+        // means its primary instance. SelectLeaf records the path after selecting, so it isn't undone by this.
+        RhinoDoc.DeselectObjects += (_, e) =>
+        {
+            if (!picked.TryGetValue(e.Document.RuntimeSerialNumber, out var map)) return;
+            foreach (var o in e.RhinoObjects) map.Remove(o.Id);
+        };
         // Esc at the idle prompt (EscapeKeyPressed only fires during long operations).
         RhinoApp.KeyboardEvent += key =>
         {

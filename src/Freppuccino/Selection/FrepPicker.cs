@@ -155,7 +155,7 @@ public sealed class FrepPicker : MouseCallback
         var tied = hits.Where(h => h.T - best.T <= tieTol).ToList();
         // Ties between instances of one object at one place (a shared leaf with no transforms between) are the same
         // shape: its primary instance. Anything else is a real ambiguity.
-        if (tied.Any(h => h.Inst.Object != best.Inst.Object || !SameTransform(h.Inst.T, best.Inst.T)))
+        if (tied.Any(h => h.Inst.Object != best.Inst.Object || !FrepInstances.Same(h.Inst.T, best.Inst.T)))
         {
             ambiguous = true;
             return null;
@@ -164,13 +164,6 @@ public sealed class FrepPicker : MouseCallback
         return tied.Count > 1 ? all.First(i => i.Object == best.Inst.Object) : best.Inst;
     }
 
-    static bool SameTransform(Transform a, Transform b)
-    {
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 4; c++)
-                if (Math.Abs(a[r, c] - b[r, c]) > 1e-9 * (1 + Math.Abs(a[r, c]))) return false;
-        return true;
-    }
 
     static void UiController_ClearNodes(RhinoDoc doc) => Ui.UiController.SetSelectedNodes(doc, []);
 
@@ -251,6 +244,10 @@ public sealed class FrepPicker : MouseCallback
     {
         t0 = double.NegativeInfinity;
         t1 = double.PositiveInfinity;
+        // Empty bounds (Min > Max somewhere, e.g. a disjoint intersection) or non-finite: nothing to hit.
+        if (!(b.Min.X <= b.Max.X && b.Min.Y <= b.Max.Y && b.Min.Z <= b.Max.Z) ||
+            !double.IsFinite(b.Min.X + b.Min.Y + b.Min.Z + b.Max.X + b.Max.Y + b.Max.Z))
+            return false;
         // Pad the box slightly: it bounds the surface, and the hit tolerance can reach just outside it.
         double pad = 1e-9 + 1e-6 * Math.Max(b.Max.X - b.Min.X, Math.Max(b.Max.Y - b.Min.Y, b.Max.Z - b.Min.Z));
         for (int a = 0; a < 3; a++)

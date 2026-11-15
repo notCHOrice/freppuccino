@@ -60,6 +60,10 @@ public sealed class FrepField
     /// Blend distance of the implicit union used when no roots are declared; 0 = hard union.
     public double Blend { get; init; }
 
+    /// False: no declared roots means an empty field (+infinity everywhere), not the implicit union of every primitive.
+    /// Builders that declare roots explicitly (Scene.FrepFieldBuilder) set this, so a filter matching nothing stays empty.
+    public bool ImplicitUnion { get; init; } = true;
+
     public int Count => prims.Count;
 
     /// <paramref name="x"/> and <paramref name="y"/> are unit and perpendicular; Z = X × Y.
@@ -125,7 +129,7 @@ public sealed class FrepField
         lock (sealing)
         {
             if (isSealed) return;
-            if (roots.Count == 0 && prims.Count > 0)
+            if (ImplicitUnion && roots.Count == 0 && prims.Count > 0)
                 roots.Add(FieldRef.Node(AddNode(FieldOp.Union, Blend, Enumerable.Range(0, prims.Count).Select(FieldRef.Primitive))));
             isSealed = true;
         }
