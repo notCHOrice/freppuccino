@@ -41,6 +41,9 @@ always: true
   then combine those nodes. Don't put the same operand into two operations.
 - subtract: operands[0] is the target; every other operand is cut away from it.
 - Editing a primitive (update_primitive / transform) updates every operation above it. Prefer editing over deleting.
+- Restructure in place: add_operand / remove_operand change an existing node's operands; move re-parents a primitive
+  or node (to another node, or to the root with no "to"). A node keeps ≥ 1 operand; a deform exactly 1 (move into it
+  to swap its target). Node refs (N#) never change.
 - Order matters for cavities: union the outside parts first, THEN subtract the cavity, so the cut also clears any part
   that pokes into it (e.g. the inner half of a handle torus).
 

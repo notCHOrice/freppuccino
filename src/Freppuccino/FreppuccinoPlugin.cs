@@ -14,6 +14,8 @@ namespace Freppuccino;
 
 public class FreppuccinoPlugin : PlugIn
 {
+    public const string IconResource = "Freppuccino.EmbeddedResources.plugin-freppuccino.ico";
+
     public FreppuccinoPlugin() => Instance = this;
 
     public static FreppuccinoPlugin? Instance { get; private set; }
@@ -34,7 +36,7 @@ public class FreppuccinoPlugin : PlugIn
         Selection.FrepPicker.Install();
         Conduit = new ShaderConduit { Enabled = true };
         Panels.RegisterPanel(this, typeof(FrepPanel), FrepPanel.Caption, GetType().Assembly,
-            "Freppuccino.EmbeddedResources.plugin-utility.ico", PanelType.PerDoc);
+            IconResource, PanelType.PerDoc);
         return LoadReturnCode.Success;
     }
 

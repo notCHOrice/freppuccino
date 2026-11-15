@@ -9,7 +9,7 @@ using Rhino.Geometry;
 namespace Freppuccino.Scene;
 
 /// Primitive kinds the viewport shader can draw.
-public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
+public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid, User }
 
 /// One F-rep primitive: local frame (as written in SDF.Frame.*) + up to three IQ parameters packed in P.
 ///   Sphere    P.X = s (radius)
@@ -19,16 +19,23 @@ public enum SdKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid }
 ///   Cone      P.X = h (half height), P.Y = r1 (at y = -h), P.Z = r2 (at y = +h); axis = frame Y
 ///   Ellipsoid P = r (semi-axes along frame X/Y/Z)
 ///   Pyramid   P.X = h (height), P.Y = s (base side); base center at the origin, apex at +Y
+///   User      P = b (half-extents of the clip box, like Box); code/params/L in Fn. Field = max(f(q)/L, sdBox(q, b)).
 /// Basis, when set, is the canonical-to-world map (SDF.Linear.*). The frame axes stay the parameter frame;
 /// the parameters are not pre-scaled by that map.
 public readonly record struct SdPrimitive(SdKind Kind, Plane Frame, Vector3d P)
 {
     public SdfBasis? Basis { get; init; }
+    /// Kind == User only.
+    public Freppuccino.UserFn.UserFnInstance? Fn { get; init; }
 }
 
 /// One live warp node: its reference geometry (Axis for Twist/Bend, Region for Repeat) + params (FrepNode.Params, padded to 3).
 /// Extent: child's max distance from the axis (Lipschitz bound clamp). Anchor: child bbox center (Repeat lattice origin).
-public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P);
+/// Half: child bbox half-extents along the Region axes (Repeat neighbor search).
+public readonly record struct SdWarp(FrepOp Op, Line Axis, Box Region, Point3d Anchor, double Extent, Vector3d P)
+{
+    public Vector3d Half { get; init; }
+}
 
 /// Program == null: nothing to draw. Primitives/Colors/Warps/Ks feed <see cref="FrepShaderGen.SceneUniforms"/>.
 /// Colors parallel to Primitives: each owner's SDF.Color (white if missing).
@@ -36,6 +43,8 @@ public sealed record FrepSceneData(ShaderSource? Program, IReadOnlyList<SdPrimit
     IReadOnlyList<SdWarp> Warps, IReadOnlyList<double> Ks, int Dropped)
 {
     public static readonly FrepSceneData Empty = new(null, [], [], [], [], 0);
+    /// Visible FFunctions left out because their code doesn't compile (missing leaves, like Dropped).
+    public int FailedFunctions { get; init; }
     /// Rhino object ids, parallel to Primitives (what the CSG tree's leaves refer to).
     public IReadOnlyList<Guid> Ids { get; init; } = [];
     /// Tree node ids, parallel to Warps.
@@ -170,7 +179,7 @@ public static class FrepScene
 
         // A sphere stretched into an ellipsoid changes the shader's structure, so recompile (cached by source, so once
         // per gesture). If the extra rows don't fit, preview those prims unchanged; the commit still converts them.
-        if (prims.Sum(p => FrepShaderGen.Rows(p.Kind)) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
+        if (prims.Sum(FrepShaderGen.Rows) + FrepShaderGen.ColorRows(prims.Count) > FrepShaderGen.PrimRowBudget(tree))
         {
             for (int i = 0; i < prims.Count; i++)
                 if (prims[i].Kind != scene.Primitives[i].Kind) prims[i] = scene.Primitives[i];
@@ -204,6 +213,7 @@ public static class FrepScene
             case SdKind.Cylinder:
             case SdKind.Cone:
             case SdKind.Pyramid:
+            case SdKind.User:
                 return TryTransformAffine(p, xf, out result);
             case SdKind.Ellipsoid:
                 ok = FEllipsoidCommand.TryTransform(p.Frame, v, xf, out f, out v, out _);
@@ -223,13 +233,14 @@ public static class FrepScene
         var current = p.Basis ?? SdfBasis.FromPlane(p.Frame);
         if (!SdfTransforms.TryAdvance(p.Frame, current, xf, out var origin, out var factored, out var next, out var scale, out var rigid, out _))
             return false;
+        // `with` keeps Fn (User).
         if (rigid && TryAbsorb(p.Kind, p.P, scale, out var np))
         {
-            result = new SdPrimitive(p.Kind, factored, np);
+            result = p with { Frame = factored, P = np, Basis = null };
             return true;
         }
         var frozen = new Plane(origin, p.Frame.XAxis, p.Frame.YAxis);
-        result = new SdPrimitive(p.Kind, frozen, p.P) { Basis = next.Matches(frozen) ? null : next };
+        result = p with { Frame = frozen, Basis = next.Matches(frozen) ? null : next };
         return true;
     }
 
@@ -253,6 +264,8 @@ public static class FrepScene
             case SdKind.Pyramid when FPyramidCommand.TryAbsorbScale(p.X, p.Y, scale, out var ph, out var ps):
                 np = new Vector3d(ph, ps, 0);
                 return true;
+            case SdKind.User when FFunctionCommand.IsUnitScale(scale): // rigid only; scale stretches the function (Basis)
+                return true;
             default:
                 return false;
         }
@@ -265,7 +278,7 @@ public static class FrepScene
         tree = FrepTrees.Get(doc);
 
         // Prims first, so uniform rows for blends/warps are reserved up front; prims past the budget are dropped (= missing leaves).
-        int budget = FrepShaderGen.PrimRowBudget(tree), rows = 0, dropped = 0;
+        int budget = FrepShaderGen.PrimRowBudget(tree), rows = 0, dropped = 0, failed = 0;
         var prims = new List<SdPrimitive>();
         var colors = new List<System.Drawing.Color>();
         var newOwners = new List<RhinoObject>();
@@ -274,7 +287,9 @@ public static class FrepScene
         foreach (var obj in doc.Objects.GetObjectList(settings))
         {
             if (!TryRead(obj.Attributes, out var prim)) continue;
-            int r = FrepShaderGen.Rows(prim.Kind);
+            // FFunction whose code doesn't compile: dropped (missing leaf); diagnostics come from compiling SDF.Code again (cached).
+            if (prim.Kind == SdKind.User && prim.Fn?.Program == null) { failed++; continue; }
+            int r = FrepShaderGen.Rows(prim);
             // Each prim also takes a color slot (4 per row).
             if (rows + r + FrepShaderGen.ColorRows(prims.Count + 1) > budget) { dropped++; continue; }
             rows += r;
@@ -309,7 +324,7 @@ public static class FrepScene
             newWarpApplied.Add(applied[id]);
         }
 
-        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree, Roots = rootOps };
+        scene = new FrepSceneData(program, prims, colors, warps, ks, dropped) { Ids = newIds, WarpIds = warpIds, Tree = tree, Roots = rootOps, FailedFunctions = failed };
         owners = newOwners;
         warpOwners = newWarpOwners;
         warpApplied = newWarpApplied;
@@ -373,6 +388,7 @@ public static class FrepScene
     }
 
     /// Reads one object's SDF.* values; false if it isn't a drawable F-rep primitive (or its values are degenerate).
+    /// An FFunction reads even if its code doesn't compile (check Fn.Program).
     public static bool TryRead(ObjectAttributes a, out SdPrimitive prim)
     {
         // An unreadable or degenerate SDF.Linear makes the primitive degenerate (like a zero radius), never unsheared.
@@ -410,6 +426,10 @@ public static class FrepScene
                 return true;
             case FPyramidCommand.SdfType when FPyramidCommand.TryRead(a, out var f, out var h, out var s) && h > 0 && s > 0:
                 prim = Mapped(a, SdKind.Pyramid, f, new Vector3d(h, s, 0));
+                return true;
+            // True even when the code doesn't compile (Fn.Program null), so tools can still read / fix / move it.
+            case FFunctionCommand.SdfType when FFunctionCommand.TryRead(a, out var f, out var b, out var fn):
+                prim = Mapped(a, SdKind.User, f, b) with { Fn = fn };
                 return true;
             default:
                 return false;

@@ -22,6 +22,7 @@ public static class FrepPrimitives
         SdKind.Cone => FConeCommand.SdfType,
         SdKind.Ellipsoid => FEllipsoidCommand.SdfType,
         SdKind.Pyramid => FPyramidCommand.SdfType,
+        SdKind.User => FFunctionCommand.SdfType,
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 
@@ -30,10 +31,12 @@ public static class FrepPrimitives
 
     /// <summary>
     /// Replaces every SDF.* shape key with the values of <paramref name="p"/> (P packing as documented on <see cref="SdPrimitive"/>).
-    /// SDF.Color is not shape data and is kept, so moving / resizing a primitive keeps its color.
+    /// SDF.Color is not shape data and is kept. An FFunction writes every declared param; if its code doesn't compile, SDF.u.*
+    /// come from <paramref name="rawParams"/> (default: the ones already on <paramref name="attributes"/>), since names are unknown.
     /// </summary>
-    public static void WriteSdf(ObjectAttributes attributes, SdPrimitive p, UnitSystem units)
+    public static void WriteSdf(ObjectAttributes attributes, SdPrimitive p, UnitSystem units, IReadOnlyDictionary<string, string>? rawParams = null)
     {
+        if (p.Kind == SdKind.User) rawParams ??= FFunctionCommand.RawParams(attributes);
         var old = attributes.GetUserStrings();
         foreach (string? key in old.AllKeys)
             if (key != null && key.StartsWith(SdfUserText.Prefix, StringComparison.Ordinal) && key != SdfUserText.ColorKey)
@@ -50,15 +53,39 @@ public static class FrepPrimitives
             case SdKind.Cone: FConeCommand.WriteSdf(attributes, f, v.X, v.Y, v.Z, units); break;
             case SdKind.Ellipsoid: FEllipsoidCommand.WriteSdf(attributes, f, v, units); break;
             case SdKind.Pyramid: FPyramidCommand.WriteSdf(attributes, f, v.X, v.Y, units); break;
+            case SdKind.User:
+                FFunctionCommand.WriteSdf(attributes, f, v, p.Fn ?? throw new ArgumentException("FFunction without Fn", nameof(p)), units, rawParams);
+                break;
             default: throw new ArgumentOutOfRangeException(nameof(p));
         }
+        // The kind writers only know frame + P; keep a shear / off-axis (or, for functions, any) scale.
+        if (p.Basis is { } basis && !basis.Matches(f)) SdfUserText.WriteLinear(attributes, basis.X, basis.Y, basis.Z);
     }
 
     static Box BoxOf(Plane frame, Vector3d b) =>
         new(frame, new Interval(-b.X, b.X), new Interval(-b.Y, b.Y), new Interval(-b.Z, b.Z));
 
-    /// <summary>The Rhino proxy geometry for a primitive, or null if it can't be built.</summary>
+    /// <summary>The Rhino proxy geometry for a primitive, or null if it can't be built. <see cref="SdPrimitive.Basis"/> applied.</summary>
     public static Brep? CreateBrep(SdPrimitive p, double tolerance)
+    {
+        var brep = CreateCanonicalBrep(p, tolerance);
+        if (brep != null && p.Basis is { } basis && !basis.Matches(p.Frame)) brep.Transform(FrameToBasis(p.Frame, basis));
+        return brep;
+    }
+
+    /// world = o + B · Rᵀ (x − o): frame coordinates re-mapped through the canonical-to-world columns.
+    static Transform FrameToBasis(Plane f, Sdf.SdfBasis b)
+    {
+        Vector3d[] B = [b.X, b.Y, b.Z], R = [f.XAxis, f.YAxis, f.ZAxis];
+        var a = Transform.Identity;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                a[i, j] = B[0][i] * R[0][j] + B[1][i] * R[1][j] + B[2][i] * R[2][j];
+        var o = f.Origin - Point3d.Origin;
+        return Transform.Translation(o) * a * Transform.Translation(-o);
+    }
+
+    static Brep? CreateCanonicalBrep(SdPrimitive p, double tolerance)
     {
         var f = p.Frame;
         var v = p.P;
@@ -84,6 +111,8 @@ public static class FrepPrimitives
                 return FEllipsoidCommand.CreateBrep(f, v);
             case SdKind.Pyramid:
                 return FPyramidCommand.CreateBrep(f, v.Y, v.X, tolerance);
+            case SdKind.User:
+                return BoxOf(f, v).ToBrep(); // the clip box
             default:
                 return null;
         }
@@ -102,12 +131,13 @@ public static class FrepPrimitives
     }
 
     /// <summary>Adds a primitive (proxy Brep + SDF.* user text). Caller handles the undo record and redraw.</summary>
-    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name, System.Drawing.Color? color = null)
+    public static Guid Add(RhinoDoc doc, SdPrimitive p, string? name, System.Drawing.Color? color = null,
+        IReadOnlyDictionary<string, string>? rawParams = null)
     {
         var brep = CreateBrep(p, doc.ModelAbsoluteTolerance) ?? throw new InvalidOperationException($"couldn't build {p.Kind} geometry");
         var attributes = doc.CreateDefaultAttributes();
         if (!string.IsNullOrEmpty(name)) attributes.Name = name;
-        WriteSdf(attributes, p, doc.ModelUnitSystem);
+        WriteSdf(attributes, p, doc.ModelUnitSystem, rawParams);
         // Like the F* commands: every new primitive carries an SDF.Color (default white).
         SetColor(attributes, color ?? SdfUserText.DefaultColor);
         var id = doc.Objects.AddBrep(brep, attributes);
@@ -124,8 +154,10 @@ public static class FrepPrimitives
         WriteSdf(attributes, p, doc.ModelUnitSystem);
         if (color is { } c) SetColor(attributes, c);
         var id = obj.Id;
-        if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
+        // Attributes before geometry: ModifyAttributes after Replace, with attributes duplicated from the pre-Replace
+        // object, silently drops some user-string edits (e.g. newly added SDF.Linear.*).
         if (!doc.Objects.ModifyAttributes(id, attributes, true)) throw new InvalidOperationException("couldn't update the object's SDF values");
+        if (!doc.Objects.Replace(id, brep)) throw new InvalidOperationException("couldn't replace the object's geometry");
     }
 
     /// <summary>

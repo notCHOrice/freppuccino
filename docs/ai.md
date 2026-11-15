@@ -49,6 +49,12 @@ color). `create_primitive` / `update_primitive` take a `color`; `set_color` reco
 `refs` + `color` or `colors: [{ref, color}, …]` for many parts in one undo step, and a node ref colors every primitive under it.
 `get_scene` reports each primitive's color. Colors are `"#RRGGBB"` or a CSS / .NET name.
 
+FFunctions (user SDF code in a clip box): `create_function`, `set_function_code`, `get_function`, `set_function_params`
+(`Ai/AiFunctions.cs`); `help` returns the FFunction guide + tool list. The guide is one file,
+`.claude/skills/freppuccino-ffunction/SKILL.md`: a Claude Code skill for external sessions (which call
+`Freppuccino.Ai.AiTools.RunJson(tool, json)` through Rhino MCP `run_csharp`), a panel skill (skills.ts also globs
+`.claude/skills/freppuccino-*/SKILL.md`), and the embedded resource `help` returns.
+
 Deforms: `deform` takes LLM-friendly fields (twist: axis + angle; bend: axis + angle + `toward`; repeat: `count` + `spacing` +
 `centered`) and creates the Rhino line / box that drives the warp, tagged with the user string `Freppuccino.AiRef` and named
 `<target>_<op>_axis|box`. The user can move those to adjust the deform; `delete` / `clear_scene` remove them with their node, and

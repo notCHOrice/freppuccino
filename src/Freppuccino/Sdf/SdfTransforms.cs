@@ -27,6 +27,7 @@ public static class SdfTransforms
         [FConeCommand.SdfType] = FConeCommand.TransformSdf,
         [FEllipsoidCommand.SdfType] = FEllipsoidCommand.TransformSdf,
         [FPyramidCommand.SdfType] = FPyramidCommand.TransformSdf,
+        [FFunctionCommand.SdfType] = FFunctionCommand.TransformSdf,
     };
 
     public static void Register(string sdfType, SdfTransformHandler handler) => Handlers[sdfType] = handler;

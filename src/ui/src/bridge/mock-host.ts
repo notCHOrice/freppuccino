@@ -1,5 +1,5 @@
 import type { Transport } from './host'
-import type { AllowedCommand, HostMessage, SceneNode, UiMessage } from './protocol'
+import type { AllowedCommand, HostMessage, SceneNode, UiMessage, UserFnInfo } from './protocol'
 
 /**
  * Stand-in for Rhino when the page runs in a normal browser (`npm run dev`).
@@ -19,7 +19,13 @@ export function createMockHost(): Transport {
   const prim = (sdfType: string, params: Record<string, number>, name?: string): SceneNode => ({
     id: id(), kind: 'primitive', sdfType, name, visible: true, locked: false, params, color: '#FCFCFC',
   })
+  /** sdUser node; userFn from mockCompile, with stored u.* values (missing = default). */
+  const userFn = (code: string, b: number, values: Record<string, number> = {}, lipschitz = 1, name?: string): SceneNode => ({
+    ...prim('sdUser', { 'b.x': b, 'b.y': b, 'b.z': b }, name),
+    userFn: mockCompile(code, values, lipschitz),
+  })
   const make: Partial<Record<AllowedCommand, () => SceneNode>> = {
+    FFunction: () => userFn(SAMPLE_OK, 2),
     FBox: () => prim('sdBox', { 'b.x': 1, 'b.y': 1, 'b.z': 1 }),
     FSphere: () => prim('sdSphere', { s: 1 }),
     FCylinder: () => prim('sdCappedCylinder', { h: 1, r: 0.5 }),
@@ -40,6 +46,9 @@ export function createMockHost(): Transport {
     opNode('subtract', 0.25, [prim('sdBox', { 'b.x': 3, 'b.y': 3, 'b.z': 1 }), holes]),
     prim('sdPyramid', { h: 2, s: 2.5 }),
     { ...prim('sdCappedCylinder', { h: 1, r: 0.5 }), custom: true },
+    { ...opNode('repeat', 0, [prim('sdSphere', { s: 1 })]), params: { x: 3, y: 3, z: 0 } },
+    userFn(SAMPLE_OK, 2, { twist: 1.5 }, 1.2, 'Gyroid'),
+    userFn(SAMPLE_BAD, 1),
   ]
   let selection: string[] = []
 
@@ -49,6 +58,43 @@ export function createMockHost(): Transport {
   const map = (nodes: SceneNode[], fn: (n: SceneNode) => SceneNode): SceneNode[] =>
     nodes.map((x) => fn({ ...x, children: x.children && map(x.children, fn) }))
   const flat = (nodes: SceneNode[]): SceneNode[] => nodes.flatMap((x) => [x, ...flat(x.children ?? [])])
+
+  // A deleted node's children take its place. A combine op left with one child becomes that child;
+  // a node left with none is removed. Twist, bend, repeat, and blend keep their single child.
+  const expand = (n: SceneNode, ids: Set<string>): SceneNode[] => {
+    if (ids.has(n.id)) return (n.children ?? []).flatMap((c) => expand(c, ids))
+    if (!n.children) return [n]
+    return [{ ...n, children: n.children.flatMap((c) => expand(c, ids)) }]
+  }
+  const collapse = (list: SceneNode[]): SceneNode[] => {
+    const out: SceneNode[] = []
+    for (const n of list) {
+      if (n.kind !== 'operation' || !n.children) {
+        out.push(n)
+        continue
+      }
+      const children = collapse(n.children)
+      if (children.length === 0) continue
+      const combine = n.op === 'union' || n.op === 'subtract' || n.op === 'intersect'
+      if (combine && children.length === 1) {
+        out.push(children[0])
+        continue
+      }
+      out.push({ ...n, children })
+    }
+    return out
+  }
+  const subtree = (nodes: SceneNode[], roots: Set<string>): Set<string> => {
+    const drop = new Set<string>()
+    const visit = (n: SceneNode, inside: boolean) => {
+      const hit = inside || roots.has(n.id)
+      if (hit) drop.add(n.id)
+      for (const c of n.children ?? []) visit(c, hit)
+    }
+    for (const n of nodes) visit(n, false)
+    return drop
+  }
+  const excise = (nodes: SceneNode[], ids: Set<string>) => collapse(nodes.flatMap((n) => expand(n, ids)))
 
   function handle(m: UiMessage) {
     switch (m.type) {
@@ -75,13 +121,33 @@ export function createMockHost(): Transport {
         break
       }
       case 'setParam':
-        scene = map(scene, (x) => (x.id === m.id ? { ...x, params: { ...x.params, [m.name]: m.value } } : x))
+        scene = map(scene, (x) => {
+          if (x.id !== m.id) return x
+          const fn = x.userFn
+          if (fn && m.name === 'L') return { ...x, userFn: { ...fn, lipschitz: m.value } }
+          if (fn && m.name.startsWith('u.'))
+            return { ...x, userFn: { ...fn, params: fn.params.map((p) => (`u.${p.name}` === m.name ? { ...p, value: m.value } : p)) } }
+          return { ...x, params: { ...x.params, [m.name]: m.value } }
+        })
         emit({ type: 'scene', scene })
         break
       case 'setColor':
         scene = map(scene, (x) => (x.id === m.id ? { ...x, color: m.color.toUpperCase() } : x))
         emit({ type: 'scene', scene })
         break
+      case 'blendRepeat': {
+        let created: string | null = null
+        scene = map(scene, (x) => {
+          if (x.id !== m.id || x.op !== 'repeat') return x
+          const blend = opNode('blend', 0, [x])
+          created = blend.id
+          return blend
+        })
+        if (created) selection = [created]
+        emit({ type: 'scene', scene })
+        emit({ type: 'selection', ids: selection })
+        break
+      }
       case 'applyOperation': {
         const all = flat(scene)
         const operands = m.operands.map((x) => all.find((y) => y.id === x)).filter((x) => !!x)
@@ -101,11 +167,10 @@ export function createMockHost(): Transport {
         emit({ type: 'scene', scene })
         break
       case 'deleteNodes': {
-        // Only roots can go (nothing references them); their operands become roots again.
-        const roots = scene.filter((x) => m.ids.includes(x.id) && x.kind === 'operation')
-        if (roots.length < m.ids.length) emit({ type: 'notice', level: 'warning', text: 'Not deleted: still used by other nodes (mock).' })
-        scene = [...scene.filter((x) => !roots.includes(x)), ...roots.flatMap((x) => x.children ?? [])]
-        selection = selection.filter((x) => !roots.some((r) => r.id === x))
+        const ids = m.deep ? subtree(scene, new Set(m.ids)) : new Set(m.ids)
+        scene = excise(scene, ids)
+        const live = new Set(flat(scene).map((x) => x.id))
+        selection = selection.filter((x) => live.has(x))
         emit({ type: 'scene', scene })
         emit({ type: 'selection', ids: selection })
         break
@@ -241,4 +306,44 @@ export function createMockHost(): Transport {
     post: (m) => setTimeout(() => handle(m), 0),
     listen: (cb) => (listener = cb),
   }
+}
+
+// ── FFunction stand-ins (the real compiler is UserFn/UserFnCompiler.cs) ──
+
+const SAMPLE_OK = `// Twisted gyroid shell, clipped to the box.
+param float scale = 0.8;
+param float thickness = 0.15;
+param float twist = 0.0;
+
+float sdf(vec3 p) {
+  float a = twist * p.z;
+  p.xy = mat2(cos(a), -sin(a), sin(a), cos(a)) * p.xy;
+  vec3 q = p * scale;
+  float g = dot(sin(q), cos(q.yzx));
+  return abs(g) / scale - thickness;
+}`
+
+const SAMPLE_BAD = `param float r = 1.0;
+
+float sdf(vec3 p) {
+  return length(p) - radius;
+}
+@`
+
+/** Just enough to exercise the panel: `param float x = d;` declarations; `radius` / `@` are errors. */
+function mockCompile(code: string, values: Record<string, number>, lipschitz: number): UserFnInfo {
+  const diagnostics: UserFnInfo['diagnostics'] = []
+  code.split('\n').forEach((line, i) => {
+    const at = line.indexOf('@')
+    if (at >= 0) diagnostics.push({ line: i + 1, column: at + 1, message: "unexpected character '@'" })
+    const r = line.search(/\bradius\b/)
+    if (r >= 0) diagnostics.push({ line: i + 1, column: r + 1, message: "undeclared identifier 'radius'" })
+  })
+  const ok = diagnostics.length === 0
+  const params = ok
+    ? [...code.matchAll(/param\s+float\s+(\w+)\s*=\s*([-+.\deE]+)\s*;/g)].map(([, name, d]) => ({
+        name, default: Number(d), value: values[name] ?? Number(d),
+      }))
+    : []
+  return { code, ok, hash: ok ? '9f3c2a7be1d04c55' : undefined, diagnostics, params, lipschitz }
 }
