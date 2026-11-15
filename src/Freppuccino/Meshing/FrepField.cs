@@ -48,7 +48,8 @@ public sealed class FrepField
     // Place: leaf placement rows (P⁻¹ as three rows, then (s(P), 0, 0, 0)), as in the shader; Fwd: P itself (for bounds).
     readonly record struct Prim(FieldKind Kind, V3 O, V3 X, V3 Y, V3 Z, V3 P, V4[]? Place = null, V4[]? Fwd = null);
     // Rows: warp params (null for CSG).
-    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null);
+    // Place/Fwd: optional transform M of the node's result, rows as for a placed primitive (M⁻¹ rows + (s(M),0,0,0)).
+    readonly record struct Node(FieldOp Op, double K, FieldRef[] Operands, V4[]? Rows = null, V4[]? Place = null, V4[]? Fwd = null);
 
     readonly List<Prim> prims = [];
     readonly List<Node> nodes = [];
@@ -103,18 +104,24 @@ public sealed class FrepField
     public int AddBox(V3 center, V3 x, V3 y, V3 half) => AddPrimitive(FieldKind.Box, center, x, y, half);
 
     /// Difference is operands[0] minus the rest. Operands must already exist. At least one operand.
-    public int AddNode(FieldOp op, double k, IEnumerable<FieldRef> operands)
+    /// <paramref name="place"/>: optional transform M of the node's result, as rows like a placed primitive's
+    /// (field = result(M⁻¹ p) · s(M)).
+    public int AddNode(FieldOp op, double k, IEnumerable<FieldRef> operands, V4[]? place = null)
     {
-        nodes.Add(new Node(op, k, [.. operands]));
+        nodes.Add(new Node(op, k, [.. operands], null, Check(place), place == null ? null : Invert(place)));
+        hasWarps |= place != null; // a new point context: needs the context-aware evaluator
         return nodes.Count - 1;
     }
 
+    static V4[]? Check(V4[]? place) =>
+        place == null || place.Length == 4 ? place : throw new ArgumentException("placement needs 4 rows", nameof(place));
+
     /// Domain warp of <paramref name="child"/>; <paramref name="rows"/> as packed by Csg.FrepWarpMath.Rows (shader uniform layout).
-    public int AddWarp(FieldOp op, V4[] rows, FieldRef child)
+    public int AddWarp(FieldOp op, V4[] rows, FieldRef child, V4[]? place = null)
     {
         int want = op switch { FieldOp.Twist => 2, FieldOp.Bend => 3, FieldOp.Repeat => 5, _ => throw new ArgumentOutOfRangeException(nameof(op)) };
         if (rows.Length != want) throw new ArgumentException($"{op} needs {want} rows", nameof(rows));
-        nodes.Add(new Node(op, 0, [child], rows));
+        nodes.Add(new Node(op, 0, [child], rows, Check(place), place == null ? null : Invert(place)));
         hasWarps = true;
         return nodes.Count - 1;
     }
@@ -196,6 +203,13 @@ public sealed class FrepField
         else
         {
             var n = nodes[r.Index];
+            int outer = top;
+            // Node transform M: the body is evaluated at M⁻¹ p in a context of its own, the result scaled by s(M).
+            if (n.Place is { } pl)
+            {
+                p = Apply(pl, p);
+                ctx = Push(ref memo, ref top, stride);
+            }
             if (n.Rows is { } w)
             {
                 var q = Warp(n.Op, w, p, out double lip);
@@ -208,6 +222,8 @@ public sealed class FrepField
                 d = Eval(n.Operands[0], p, ctx, ref memo, ref top, stride);
                 for (int o = 1; o < n.Operands.Length; o++) d = Combine(n, d, Eval(n.Operands[o], p, ctx, ref memo, ref top, stride));
             }
+            if (n.Place is { } pl2) d *= pl2[3].X;
+            top = outer;
         }
         return memo[slot] = d;
     }
@@ -407,6 +423,7 @@ public sealed class FrepField
             double t = nodeLevel[i];
             if (t == none) continue;
             var n = nodes[i];
+            if (n.Place is { } pl) t /= pl[3].X; // {body(M⁻¹p)·s <= t} = M × {body <= t/s}
             if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
             if (n.Rows is { } w) { Ask(n.Operands[0], t * MaxLip(n.Op, w)); continue; }
             double d = n.Op == FieldOp.Union && n.Operands.Length > 1 ? Math.Max(n.K, 0) * (n.Operands.Length > 2 ? 1.0 : 0.25) : 0;
@@ -435,6 +452,7 @@ public sealed class FrepField
                         new V3(Math.Max(box.Min.X, other.Min.X), Math.Max(box.Min.Y, other.Min.Y), Math.Max(box.Min.Z, other.Min.Z)),
                         new V3(Math.Min(box.Max.X, other.Max.X), Math.Min(box.Max.Y, other.Max.Y), Math.Min(box.Max.Z, other.Max.Z)));
                 }
+            if (n.Fwd is { } fwd && !IsEmpty(box)) box = MapBox(fwd, box);
             nodeBox[i] = IsEmpty(box) ? Empty : box;
         }
 
@@ -550,11 +568,16 @@ public sealed class FrepField
     {
         // Placed: {sd(P⁻¹ p) · s <= t} = P × {sd <= t / s}; map the canonical box's corners by P.
         if (s.Place is not { } w) return CanonicalBounds(s, t);
-        var c = CanonicalBounds(s, t / w[3].X);
+        return MapBox(s.Fwd!, CanonicalBounds(s, t / w[3].X));
+    }
+
+    /// World box of an affine map of a box (its 8 corners mapped).
+    static (V3 Min, V3 Max) MapBox(V4[] fwd, (V3 Min, V3 Max) c)
+    {
         var box = Empty;
         for (int i = 0; i < 8; i++)
         {
-            var p = Apply(s.Fwd!, new V3((i & 1) == 0 ? c.Min.X : c.Max.X, (i & 2) == 0 ? c.Min.Y : c.Max.Y, (i & 4) == 0 ? c.Min.Z : c.Max.Z));
+            var p = Apply(fwd, new V3((i & 1) == 0 ? c.Min.X : c.Max.X, (i & 2) == 0 ? c.Min.Y : c.Max.Y, (i & 4) == 0 ? c.Min.Z : c.Max.Z));
             box = Join(box, (p, p));
         }
         return box;

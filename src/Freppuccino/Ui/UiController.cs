@@ -374,6 +374,16 @@ public sealed class UiController : IDisposable
             bool select = request.Mode != "toggle" || obj.IsSelected(false) == 0;
             obj.Select(select);
         }
+        // A root row selects that blend in the scene too: its carrier, which carries the gumball.
+        var roots = Selection.FrepSelection.Structure(doc).Roots.ToHashSet();
+        bool any = false;
+        foreach (var n in nodeIds.ToList())
+        {
+            if (!roots.Contains(FrepOperand.Node(n)) || Selection.FrepCarriers.Ensure(doc, n) is not { } carrier) continue;
+            carrier.Select(NodesOf(doc).Contains(n), true);
+            any = true;
+        }
+        if (any || request.Ids.Any(k => Guid.TryParse(k, out _))) Selection.FrepSelection.RefreshGumball();
         NodeSelectionChanged?.Invoke();
         doc.Views.Redraw();
     }

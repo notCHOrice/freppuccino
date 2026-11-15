@@ -87,6 +87,9 @@ public static class FrepScene
         for (int i = 0; i < owners.Count; i++)
         {
             if (!owners[i].GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            // Under transformed roots the leaf sits at T × canonical: the drag is T⁻¹ X T on its values.
+            if (Selection.FrepSelection.InstanceOf(doc, owners[i].Id, tree, scene.Ids) is { } inst && !inst.T.IsIdentity && inst.T.TryGetInverse(out var ti))
+                xf = ti * xf * inst.T;
             // A transform the SDF type can't represent (e.g. shearing a box) previews at the original position.
             if (!TryTransform(scene.Primitives[i], xf, out var moved)) continue;
             prims ??= [.. scene.Primitives];
@@ -107,6 +110,20 @@ public static class FrepScene
             warps ??= [.. scene.Warps];
             warps[i] = w with { Axis = axis, Region = region };
         }
+        // Blend carriers under a drag: preview their roots' matrices as drag × M (the tree is only written on commit).
+        var previewTree = tree;
+        foreach (var o in doc.Objects.GetSelectedObjects(false, false))
+        {
+            if (Selection.FrepCarriers.NodeOf(o) is not { } id || !o.GetDynamicTransform(out var xf) || xf.IsIdentity) continue;
+            if (previewTree.Find(id) is { } n && Placement.IsUsable(xf * n.M)) previewTree = previewTree.WithM(id, xf * n.M);
+        }
+        if (!ReferenceEquals(previewTree, tree))
+        {
+            var p2 = prims ?? scene.Primitives;
+            var (program2, ks2, _, roots2) = FrepShaderGen.Compile(p2, scene.Ids, previewTree, scene.WarpIds.ToHashSet());
+            return scene with { Primitives = p2, Warps = warps ?? scene.Warps, Tree = previewTree, Program = program2, Ks = ks2, Roots = roots2 };
+        }
+
         if (prims == null && warps == null) return scene;
         var next = scene with { Primitives = prims ?? scene.Primitives, Warps = warps ?? scene.Warps };
         if (!reshaped || prims == null) return next;
@@ -247,10 +264,25 @@ public static class FrepScene
     /// <see cref="Bounds"/> ignoring warps (no resolved refs); for command defaults.
     public static BoundingBox BoundsOf(RhinoDoc doc, FrepOperand o) => new Bounds(doc, FrepTrees.Get(doc), []).Of(o);
 
-    /// World bounding box of an operand's result, from leaf objects' Rhino geometry; live warps grown like the shader bound.
+    /// Bounding box of an operand's result in its parent's space: leaves from their Rhino geometry mapped back by their
+    /// primary instance's root transforms T (the real object sits at T × canonical), live warps grown like the shader
+    /// bound, node transforms applied.
     sealed class Bounds(RhinoDoc doc, FrepTree tree, Dictionary<int, (RhinoObject Obj, Line Axis, Box Region)> refs)
     {
         readonly Dictionary<FrepOperand, BoundingBox> memo = [];
+        Dictionary<Guid, Transform>? primaryT;
+
+        Transform PrimaryT(Guid id)
+        {
+            if (primaryT == null)
+            {
+                primaryT = [];
+                var leaves = tree.Nodes.SelectMany(n => n.Operands).Where(x => !x.IsNode).Select(x => x.ObjectId).Distinct().ToList();
+                foreach (var inst in Selection.FrepInstances.Compute(tree, leaves).Instances)
+                    primaryT.TryAdd(inst.Object, inst.T);
+            }
+            return primaryT.GetValueOrDefault(id, Transform.Identity);
+        }
 
         public BoundingBox Of(FrepOperand o)
         {
@@ -258,13 +290,19 @@ public static class FrepScene
             b = BoundingBox.Empty;
             if (!o.IsNode)
             {
-                if (doc.Objects.FindId(o.ObjectId) is { IsDeleted: false } obj) b = obj.Geometry.GetBoundingBox(true);
+                if (doc.Objects.FindId(o.ObjectId) is { IsDeleted: false } obj)
+                {
+                    b = obj.Geometry.GetBoundingBox(true);
+                    var t = PrimaryT(o.ObjectId);
+                    if (!t.IsIdentity && t.TryGetInverse(out var ti)) b.Transform(ti);
+                }
             }
             else if (tree.Find(o.NodeId) is { } n)
             {
                 if (n.Op == FrepOp.Difference && n.Operands.Length > 0) b = Of(n.Operands[0]);
                 else foreach (var c in n.Operands) b.Union(Of(c));
                 if (b.IsValid && refs.TryGetValue(n.Id, out var r)) b = FrepShaderGen.Warped(b, FrepWarpMath.Make(n, r.Axis, r.Region, b));
+                if (b.IsValid && n.HasMatrix) b.Transform(n.M);
             }
             return memo[o] = b;
         }

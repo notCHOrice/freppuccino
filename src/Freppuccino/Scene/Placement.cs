@@ -61,6 +61,7 @@ public static class Placement
 
     /// Smallest singular value of the linear part (sqrt of AᵀA's smallest eigenvalue).
     public static double MinScale(Transform t) => Singular(t).Min;
+    public static double MaxScale(Transform t) => Singular(t).Max;
 
     /// Largest / smallest singular value of the linear part (1 for a similarity); infinity if singular.
     public static double Condition(Transform t)

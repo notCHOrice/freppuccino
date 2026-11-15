@@ -30,13 +30,15 @@ public static class FrepFieldBuilder
         {
             nodeRef[n.Id] = null;
             if (n.Hidden) continue;
+            var m = MatrixRows(n);
             if (n.Op.IsWarp())
             {
                 if (n.Operands.Length == 0 || Ref(n.Operands[0]) is not { } child) continue;
                 nodeRef[n.Id] = warps.TryGetValue(n.Id, out var w)
                     ? FieldRef.Node(field.AddWarp(n.Op switch { FrepOp.Twist => FieldOp.Twist, FrepOp.Bend => FieldOp.Bend, _ => FieldOp.Repeat },
-                        FrepWarpMath.Rows(w), child))
-                    : child;
+                        FrepWarpMath.Rows(w), child, m))
+                    // Reference gone: the child passes through unwarped, but the node's own transform still applies.
+                    : m == null ? child : FieldRef.Node(field.AddNode(FieldOp.Union, 0, [child], m));
                 continue;
             }
             var terms = n.Operands.Select(Ref).ToList();
@@ -50,7 +52,7 @@ public static class FrepFieldBuilder
             var live = terms.OfType<FieldRef>().ToList();
             if (empty || live.Count == 0) continue;
             var op = n.Op switch { FrepOp.Union => FieldOp.Union, FrepOp.Intersect => FieldOp.Intersect, _ => FieldOp.Difference };
-            nodeRef[n.Id] = FieldRef.Node(field.AddNode(op, n.K, live));
+            nodeRef[n.Id] = FieldRef.Node(field.AddNode(op, n.K, live, m));
         }
 
         roots = [];
@@ -71,6 +73,9 @@ public static class FrepFieldBuilder
         }
         return field;
     }
+
+    /// A node's transform M as field rows, or null (none, or unusable).
+    public static V4[]? MatrixRows(FrepNode n) => n.HasMatrix && Placement.TryRows(n.M, out var rows) ? rows : null;
 
     /// A field of one primitive (a control instance's shape, for picking).
     public static FrepField Single(SdPrimitive prim)

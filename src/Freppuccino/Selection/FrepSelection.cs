@@ -36,8 +36,17 @@ public static class FrepSelection
         // means its primary instance. SelectLeaf records the path after selecting, so it isn't undone by this.
         RhinoDoc.DeselectObjects += (_, e) =>
         {
+            // A node root's carrier deselected (natively or by us): its tree row follows.
+            var gone = e.RhinoObjects.Select(FrepCarriers.NodeOf).OfType<int>().ToHashSet();
+            if (gone.Count > 0) UiController.SetSelectedNodes(e.Document, UiController.SelectedNodes(e.Document).Where(n => !gone.Contains(n)));
             if (!picked.TryGetValue(e.Document.RuntimeSerialNumber, out var map)) return;
             foreach (var o in e.RhinoObjects) map.Remove(o.Id);
+        };
+        // A carrier selected natively (SelAll, window, SelLast): its root's tree row follows.
+        RhinoDoc.SelectObjects += (_, e) =>
+        {
+            var added = e.RhinoObjects.Select(FrepCarriers.NodeOf).OfType<int>().ToList();
+            if (added.Count > 0) UiController.SetSelectedNodes(e.Document, UiController.SelectedNodes(e.Document).Concat(added));
         };
         // Esc at the idle prompt (EscapeKeyPressed only fires during long operations).
         RhinoApp.KeyboardEvent += key =>
@@ -65,14 +74,17 @@ public static class FrepSelection
         return FrepInstances.Compute(scene.Tree, scene.Ids);
     }
 
-    /// Selected roots: node roots selected in the panel, then selected parentless primitives.
+    /// Selected roots: node roots (selected carrier, or root row selected in the panel), then selected parentless primitives.
     public static List<FrepOperand> Roots(RhinoDoc doc)
     {
         var (roots, _) = Structure(doc);
         var set = roots.ToHashSet();
         var result = UiController.SelectedNodes(doc).Select(FrepOperand.Node).Where(set.Contains).ToList();
         foreach (var o in doc.Objects.GetSelectedObjects(false, false))
-            if (set.Contains(FrepOperand.Object(o.Id))) result.Add(FrepOperand.Object(o.Id));
+        {
+            var r = FrepCarriers.NodeOf(o) is { } n ? FrepOperand.Node(n) : FrepOperand.Object(o.Id);
+            if (set.Contains(r) && !result.Contains(r)) result.Add(r);
+        }
         return result;
     }
 
@@ -92,16 +104,35 @@ public static class FrepSelection
         return result;
     }
 
+    /// The instance a leaf object is being edited through: the one it was picked through if still valid, else its
+    /// primary instance. Null if it isn't a leaf of any root.
+    public static FrepInstance? InstanceOf(RhinoDoc doc, Guid obj)
+    {
+        var scene = FrepScene.Get(doc);
+        return InstanceOf(doc, obj, scene.Tree, scene.Ids);
+    }
+
+    /// Same, from a given tree and leaf list (for FrepScene itself, which mustn't call back into FrepScene.Get).
+    public static FrepInstance? InstanceOf(RhinoDoc doc, Guid obj, FrepTree tree, IReadOnlyList<Guid> leaves)
+    {
+        var (_, instances) = FrepInstances.Compute(tree, leaves);
+        if (picked.GetValueOrDefault(doc.RuntimeSerialNumber)?.TryGetValue(obj, out var p) == true && instances.Any(i => i.SamePath(p)))
+            return instances.First(i => i.SamePath(p));
+        return instances.FirstOrDefault(i => i.Object == obj);
+    }
+
     /// <paramref name="add"/>: keep the current F-rep and Rhino selection; otherwise replace it.
     public static void SelectRoot(RhinoDoc doc, FrepOperand root, bool add)
     {
         if (!add) ClearAll(doc);
-        if (root.IsNode) UiController.SetSelectedNodes(doc, UiController.SelectedNodes(doc).Append(root.NodeId));
-        else
+        if (root.IsNode)
         {
-            doc.Objects.Select(root.ObjectId, true, true);
-            RefreshGumball();
+            UiController.SetSelectedNodes(doc, UiController.SelectedNodes(doc).Append(root.NodeId));
+            // Its carrier carries the gumball (created now if the Idle sync hasn't yet).
+            if (FrepCarriers.Ensure(doc, root.NodeId) is { } carrier) doc.Objects.Select(carrier.Id, true, true);
         }
+        else doc.Objects.Select(root.ObjectId, true, true);
+        RefreshGumball();
         doc.Views.Redraw();
     }
 
@@ -130,7 +161,7 @@ public static class FrepSelection
     {
         UiController.SetSelectedNodes(doc, []);
         foreach (var o in doc.Objects.GetSelectedObjects(false, false))
-            if (SdfUserText.ReadType(o.Attributes) != null) o.Select(false);
+            if (SdfUserText.ReadType(o.Attributes) != null || FrepCarriers.IsCarrier(o)) o.Select(false);
         picked.Remove(doc.RuntimeSerialNumber);
         doc.Views.Redraw();
     }

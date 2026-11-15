@@ -73,8 +73,8 @@ public static class FrepInstances
         return (roots, instances);
     }
 
-    /// The transform a node applies to everything below it (identity until root Transform nodes exist).
-    static Transform NodeTransform(FrepNode n) => Transform.Identity;
+    /// The transform a node applies to everything below it (its M).
+    static Transform NodeTransform(FrepNode n) => n.M;
 
     public static bool Same(Transform a, Transform b)
     {

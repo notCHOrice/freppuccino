@@ -41,7 +41,12 @@ public static class FrepShaderGen
     public static int ColorRows(int prims) => (prims + 3) / 4;
     /// Rows left for prims (geometry + color rows) once every node's k / warp rows have a slot.
     public static int PrimRowBudget(FrepTree tree) =>
-        MaxDataRows - KRows(tree.Nodes.Count(n => !n.Op.IsWarp())) - tree.Nodes.Sum(n => n.Hidden ? 0 : WarpRows(n.Op));
+        MaxDataRows - KRows(tree.Nodes.Count(n => !n.Op.IsWarp())) - tree.Nodes.Sum(n => n.Hidden ? 0 : WarpRows(n.Op))
+        - MatrixNodes(tree).Count() * Placement.ShaderRows;
+
+    /// Nodes whose transform M gets uniform rows (P⁻¹-style, 4 rows each), in row order: visible, usable matrix.
+    static IEnumerable<FrepNode> MatrixNodes(FrepTree tree) =>
+        tree.Nodes.Where(n => !n.Hidden && n.HasMatrix && Placement.TryRows(n.M, out _));
 
     /// 0xRRGGBB as a float: exact, since float32 holds every integer below 2^24. Unpacked by unpackColor() in the shader.
     static double PackColor(Color c) => (c.R << 16) | (c.G << 8) | c.B;
@@ -111,6 +116,13 @@ public static class FrepShaderGen
                 row += WarpRows(n.Op);
                 warps.Add(n.Id);
             }
+        // Node transforms after the warps.
+        var mRow = new Dictionary<int, int>();
+        foreach (var n in MatrixNodes(tree))
+        {
+            mRow[n.Id] = row;
+            row += Placement.ShaderRows;
+        }
         int kBase = row;
         var kSlot = new Dictionary<int, int>();
         var ks = new List<double>();
@@ -158,7 +170,20 @@ public static class FrepShaderGen
         string? EvalNode(int id, int c)
         {
             if (tree.Find(id) is not { Hidden: false } n) return null;
-            var v = $"n{id}{Suffix(c)}";
+            if (!mRow.TryGetValue(id, out var mr)) return EvalBody(n, c, $"n{id}{Suffix(c)}");
+            // Node transform M: the body in a context of its own at M⁻¹ p, its value scaled by s(M). Color = body's.
+            int cm = contexts++;
+            Both($"    vec3 {Point(cm)} = place({Point(c)}, {Row(mr)}, {Row(mr + 1)}, {Row(mr + 2)});\n");
+            if (EvalBody(n, cm, $"b{id}{Suffix(cm)}") is not { } body) return null;
+            var vm = $"n{id}{Suffix(c)}";
+            map.Append($"    float {vm} = {body} * {Row(mr + 3)}.x;\n");
+            color.Append($"    vec4 {vm} = vec4({body}.rgb, {body}.w * {Row(mr + 3)}.x);\n");
+            return vm;
+        }
+
+        string? EvalBody(FrepNode n, int c, string v)
+        {
+            int id = n.Id;
             if (n.Op.IsWarp())
             {
                 if (n.Operands.Length == 0) return null;
@@ -529,6 +554,11 @@ public static class FrepShaderGen
         for (int i = 0; i < scene.Primitives.Count; i += 4)
             u.Vec4(C(i), C(i + 1), C(i + 2), C(i + 3));
         foreach (var w in scene.Warps) WarpUniforms(u, w);
+        foreach (var n in MatrixNodes(scene.Tree))
+        {
+            Placement.TryRows(n.M, out var mr);
+            foreach (var row in mr) u.Vec4(row.X, row.Y, row.Z, row.W);
+        }
         var ks = scene.Ks;
         for (int i = 0; i < ks.Count; i += 4)
             u.Vec4(ks[i], i + 1 < ks.Count ? ks[i + 1] : 0, i + 2 < ks.Count ? ks[i + 2] : 0, i + 3 < ks.Count ? ks[i + 3] : 0);
@@ -538,6 +568,15 @@ public static class FrepShaderGen
     static void WarpUniforms(Uniforms u, SdWarp w)
     {
         foreach (var r in FrepWarpMath.Rows(w)) u.Vec4(r.X, r.Y, r.Z, r.W);
+    }
+
+    /// Conservative box of one primitive (its bounding sphere's box, through its placement).
+    internal static BoundingBox PrimBox(SdPrimitive p)
+    {
+        var r = new Vector3d(1, 1, 1) * PrimRadius(p);
+        var b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
+        if (p.Place is { } place) b.Transform(place); // box of the transformed corners
+        return b;
     }
 
     static double PrimRadius(SdPrimitive p)
@@ -573,19 +612,14 @@ public static class FrepShaderGen
             b = BoundingBox.Empty;
             if (!o.IsNode)
             {
-                if (prim.TryGetValue(o.ObjectId, out var i))
-                {
-                    var p = scene.Primitives[i];
-                    var r = new Vector3d(1, 1, 1) * PrimRadius(p);
-                    b = new BoundingBox(p.Frame.Origin - r, p.Frame.Origin + r);
-                    if (p.Place is { } place) b.Transform(place); // box of the transformed corners
-                }
+                if (prim.TryGetValue(o.ObjectId, out var i)) b = PrimBox(scene.Primitives[i]);
             }
             else if (tree.Find(o.NodeId) is { Hidden: false } n)
             {
                 if (n.Op == FrepOp.Difference) { if (n.Operands.Length > 0) b = Of(n.Operands[0]); }
                 else foreach (var c in n.Operands) b.Union(Of(c));
                 if (b.IsValid && warp.TryGetValue(n.Id, out var w)) b = Warped(b, w);
+                if (b.IsValid && n.HasMatrix) b.Transform(n.M); // node transform: box of the mapped corners
             }
             return memo[o] = b;
         }
@@ -616,6 +650,11 @@ public static class FrepShaderGen
             if (p.Place is { } place) s *= Placement.Condition(place);
             stretch = Math.Max(stretch, s);
         }
+        // A node transform maps a blend's bulge (in its own space) out by up to its largest stretch.
+        double grow = 1;
+        foreach (var n in tree.Nodes)
+            if (!n.Hidden && n.HasMatrix) grow *= Math.Max(1, Placement.MaxScale(n.M));
+        stretch *= grow;
         double radius = 0.5 * box.Diagonal.Length + pad * stretch;
         return (box.Center, radius * 1.01 + 1e-6); // margin for float32 rounding
     }
