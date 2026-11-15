@@ -24,7 +24,7 @@ public sealed class UiController : IDisposable
     static readonly HashSet<string> AllowedCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "FBox", "FSphere", "FCylinder", "FCone", "FPyramid", "FEllipsoid", "FTorus",
-        "FTwist", "FBend", "FRepeat", "Freppuccino",
+        "FFunction", "FTwist", "FBend", "FRepeat", "Freppuccino",
     };
 
     /// Selected operation nodes per doc (runtime serial), in pick order.
@@ -249,16 +249,28 @@ public sealed class UiController : IDisposable
     static SceneNode Primitive(RhinoDoc doc, RhinoObject obj)
     {
         var attributes = obj.Attributes;
+        var type = SdfUserText.ReadType(attributes);
+        var parameters = ReadParams(attributes);
+        UserFnInfo? userFn = null;
+        if (UserFnView.IsUser(type))
+        {
+            // L and u.* travel in UserFn (with defaults filled in); Params keeps the box half-extents.
+            parameters.Remove(UserFnView.LipschitzName);
+            foreach (var key in parameters.Keys.Where(k => k.StartsWith(UserFnView.ParamPrefix, StringComparison.Ordinal)).ToList())
+                parameters.Remove(key);
+            userFn = UserFnView.Read(attributes);
+        }
         return new SceneNode(
             Id: ObjectKey(obj.Id),
             Kind: SceneNodeKind.Primitive,
             Name: string.IsNullOrEmpty(attributes.Name) ? null : attributes.Name,
             Visible: !obj.IsHidden,
             Locked: obj.IsLocked,
-            SdfType: SdfUserText.ReadType(attributes),
-            Params: ReadParams(attributes),
+            SdfType: type,
+            Params: parameters,
             Color: SdfUserText.FormatColor(SdfUserText.ReadColorOrDefault(attributes)),
-            Custom: SdfUserText.TryReadLinear(attributes, out _, out _, out _) ? true : null);
+            Custom: SdfUserText.TryReadLinear(attributes, out _, out _, out _) ? true : null,
+            UserFn: userFn);
     }
 
     static readonly HashSet<string> HeaderKeys = new(StringComparer.Ordinal)
@@ -490,7 +502,8 @@ public sealed class UiController : IDisposable
                     brep.Dispose();
                     return;
                 }
-                SdfUserText.TryReadFloat(obj.Attributes, request.Name, out var original);
+                // Missing key (FFunction param at its default): NaN, so release always records the step.
+                var original = SdfUserText.TryReadFloat(obj.Attributes, request.Name, out var v) ? v : double.NaN;
                 paramEdit = new ParamEdit(id, request.Name, original, geometry.DuplicateBrep(), obj.Attributes.Duplicate());
             }
             // Live ticks stay out of the undo stack; release records the whole drag.

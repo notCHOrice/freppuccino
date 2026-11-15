@@ -29,11 +29,19 @@ public static partial class AiTools
         "combine" => Combine(doc, args),
         "deform" => Deform(doc, args),
         "edit_operation" => EditOperation(doc, args),
+        "add_operand" => AddOperand(doc, args),
+        "remove_operand" => RemoveOperand(doc, args),
+        "move" => Move(doc, args),
         "delete" => Delete(doc, args),
         "set_visible" => SetVisible(doc, args),
         "set_color" => SetColors(doc, args),
         "clear_scene" => ClearScene(doc),
         "capture_views" => CaptureViews(doc, args),
+        "create_function" => CreateFunction(doc, args),
+        "set_function_code" => SetFunctionCode(doc, args),
+        "get_function" => GetFunction(doc, args),
+        "set_function_params" => SetFunctionParams(doc, args),
+        "help" => Help(args),
         _ => throw new AiToolException($"unknown tool '{tool}'"),
     };
 
@@ -96,8 +104,15 @@ public static partial class AiTools
             ["roots"] = new JsonArray([.. roots]),
         };
         if (bbox.IsValid) result["bounding_box"] = new JsonObject { ["min"] = AiShapes.Json(bbox.Min), ["max"] = AiShapes.Json(bbox.Max) };
-        if (FrepScene.Get(doc).Dropped is > 0 and var dropped)
-            result["warning"] = $"{dropped} primitives are not drawn: the viewport shader is full. Use fewer primitives.";
+        var drawn = FrepScene.Get(doc);
+        var warnings = new List<string>();
+        if (drawn.Dropped is > 0 and var dropped)
+            warnings.Add($"{dropped} primitives are not drawn: the viewport shader is full. Use fewer primitives.");
+        if (drawn.FailedFunctions > 0)
+            warnings.Add($"{drawn.FailedFunctions} functions are not drawn: their code has errors (ok: false; see get_function).");
+        if (Display.ShaderConduit.ShaderError(doc) != null)
+            warnings.Add("the viewport shader failed to compile (get_function shows shader_error); the last working version is shown, if any.");
+        if (warnings.Count > 0) result["warning"] = string.Join(" ", warnings);
         return result;
     }
 
@@ -106,6 +121,7 @@ public static partial class AiTools
     static JsonNode Create(RhinoDoc doc, JsonObject args)
     {
         var type = Str(args, "type").ToLowerInvariant();
+        if (type == "function") return CreateFunction(doc, args);
         var prim = AiShapes.FromSpec(type, args);
         var name = UniqueName(doc, args["name"]?.GetValue<string>() ?? type);
         var color = AiShapes.Color(args);
@@ -119,12 +135,28 @@ public static partial class AiTools
         var obj = ResolveObject(doc, Str(args, "ref"));
         if (!FrepPrimitives.TryRead(obj.Attributes, out var current)) throw new AiToolException("object has unreadable SDF values");
 
+        if (current.Kind == SdKind.User && args.Select(kv => kv.Key).Where(k => k is "code" or "params" or "lipschitz" or "allow_errors").ToList() is { Count: > 0 } fnKeys)
+            throw new AiToolException($"update_primitive only edits a function's clip box (center / size / axes); for {string.Join(", ", fnKeys)} " +
+                                      "use set_function_code {target, code} or set_function_params {target, params?, lipschitz?}");
+
         // Overlay the given fields on the current description, so partial updates keep everything else.
         var spec = AiShapes.ToSpec(current);
         var type = spec["type"]!.GetValue<string>();
         foreach (var (key, value) in args)
             if (key is not ("ref" or "name" or "type" or "color")) spec[key] = value?.DeepClone();
         var prim = AiShapes.FromSpec(type, spec);
+        if (current.Kind == SdKind.User) prim = prim with { Fn = current.Fn }; // code / params / L: set_function_code / _params
+        if (current.Basis is { } basis)
+        {
+            // Stretched (SDF.Linear): the basis, not the frame axes, maps the shape to world, so a re-orientation can't
+            // apply. Move / resize compose: sizes stay in the unstretched frame (as reported), the stretch stays on top.
+            if (AxesChanged(current, prim))
+                throw new AiToolException($"{RefOf(doc, obj)} is stretched (scaled / sheared after creation), so update_primitive can't " +
+                                          "change its orientation; use transform {rotate} instead");
+            var frame = current.Frame;
+            frame.Origin = prim.Frame.Origin;
+            prim = prim with { Frame = frame, Basis = basis };
+        }
 
         string? newName = null;
         if (args["name"]?.GetValue<string>() is { } requested && requested != obj.Attributes.Name)
@@ -137,6 +169,18 @@ public static partial class AiTools
         after.Insert(0, "ref", newName ?? RefOf(doc, obj));
         if (color is { } c) after["color"] = Hex(c);
         return after;
+    }
+
+    /// Orientation changed, comparing only the axes the kind's spec carries (round-trips may re-pick the others).
+    static bool AxesChanged(SdPrimitive a, SdPrimitive b)
+    {
+        static bool Same(Vector3d u, Vector3d v) => (u - v).Length <= 1e-3; // specs round to 4 decimals
+        return a.Kind switch
+        {
+            SdKind.Sphere => false,
+            SdKind.Cylinder or SdKind.Cone or SdKind.Torus => !Same(a.Frame.YAxis, b.Frame.YAxis),
+            _ => !Same(a.Frame.XAxis, b.Frame.XAxis) || !Same(a.Frame.YAxis, b.Frame.YAxis),
+        };
     }
 
     /// Moves / rotates / scales primitives, or every primitive under a node, with the same rules as the gumball.

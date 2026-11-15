@@ -6,6 +6,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { BrandIcon, NodeIcon, type BrandIconName } from '@/components/brand-icon'
 import { ParamSlider } from '@/components/param-slider'
 import { ColorField } from '@/components/color-field'
+import { CodeView } from '@/components/code-view'
 import { send, useHost } from '@/bridge/host'
 import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
@@ -81,13 +82,18 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
   const units = useHost((s) => s.settings.units)
   const notice = useHost((s) => s.notice)
   const params = displayParams(node)
+  const fn = node.userFn
+  // FFunction: SDF.L and SDF.u.<name> go through setParam too.
+  const fnValues = fn ? [{ key: 'L', value: fn.lipschitz }, ...fn.params.map((p) => ({ key: `u.${p.name}`, value: p.value }))] : []
+  const values = [...params, ...fnValues]
   // Slider range is fixed per object (the section is keyed by id) so it doesn't move while dragging.
   const [max] = useState(() => Math.max(1, ...params.map((p) => p.value * 3)))
+  const [maxL] = useState(() => Math.max(4, 2 * (fn?.lipschitz ?? 1)))
   // Host echoes are ignored until they catch up, so a stale scene snapshot can't yank the slider.
   const [drag, setDrag] = useState<{ key: string; value: number } | null>(null)
   const [pending, setPending] = useState<{ key: string; value: number } | null>(null)
   const live = useRef({ timer: 0, key: '', value: 0, previewed: false })
-  const hostValue = params.find((p) => p.key === pending?.key)?.value
+  const hostValue = values.find((p) => p.key === pending?.key)?.value
   const caughtUp = pending == null || (hostValue !== undefined && Math.abs(hostValue - pending.value) < 1e-6)
   if (!drag && pending && caughtUp) setPending(null)
   const [seenNotice, setSeenNotice] = useState(notice?.id)
@@ -118,7 +124,7 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
     clearTimeout(l.timer)
     l.timer = 0
     setDrag(null)
-    const current = params.find((p) => p.key === key)?.value
+    const current = values.find((p) => p.key === key)?.value
     if (l.previewed || current === undefined || Math.abs(current - value) >= 1e-6) sendParam(key, value, false)
     l.previewed = false
   }
@@ -163,7 +169,37 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
   return (
     <Section title={props.labels.get(node.id) ?? ''} badge={typeLabel(node)} icon={<NodeIcon node={node} className="size-6" />}>
       <ColorField label="Color" value={node.color ?? '#FCFCFC'} onChange={previewColor} onCommit={commitColor} />
-      {params.length === 0 && !node.custom && <p className="text-muted-foreground">No parameters.</p>}
+      {fn && (
+        <>
+          <CodeView fn={fn} />
+          {fn.params.map((p) => {
+            const r = userParamRange(p.default)
+            return (
+              <ParamSlider
+                key={p.name}
+                label={p.name}
+                value={shown(`u.${p.name}`, p.value)}
+                min={r.min}
+                max={r.max}
+                step={r.step}
+                belowMin
+                onChange={(v) => preview(`u.${p.name}`, v)}
+                onCommit={(v) => commit(`u.${p.name}`, v)}
+              />
+            )
+          })}
+          <ParamSlider
+            label="Lipschitz L"
+            value={shown('L', fn.lipschitz)}
+            min={0.01}
+            max={maxL}
+            onChange={(v) => preview('L', v)}
+            onCommit={(v) => commit('L', v)}
+          />
+          {params.length > 0 && <SubHeading>Bounding box</SubHeading>}
+        </>
+      )}
+      {params.length === 0 && !node.custom && !fn && <p className="text-muted-foreground">No parameters.</p>}
       {params.map((p) => (
         <ParamSlider
           key={p.key}
@@ -405,6 +441,21 @@ function CommandTile(props: { label: string; icon: BrandIconName; command: Allow
       <span className="type-small">{props.label}</span>
     </button>
   )
+}
+
+function SubHeading(props: { children: React.ReactNode }) {
+  return <h3 className="type-label -mb-1 text-muted-foreground">{props.children}</h3>
+}
+
+/**
+ * FFunction param slider range from its declared default d (no units / sign info in the code):
+ * d > 0 → [0, 4d], d < 0 → [4d, 0], d = 0 → [-1, 1]. Step ≈ span / 100, a power of ten.
+ * Typed values may go past either end (the slider then stretches to include them).
+ */
+function userParamRange(d: number): { min: number; max: number; step: number } {
+  const [min, max] = d > 0 ? [0, 4 * d] : d < 0 ? [4 * d, 0] : [-1, 1]
+  const step = 10 ** Math.floor(Math.log10((max - min) / 100))
+  return { min, max, step }
 }
 
 /** Live blend previews: at most one per this many ms (~30 Hz); the final value always follows on release. */

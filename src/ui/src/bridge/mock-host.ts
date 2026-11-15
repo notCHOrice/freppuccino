@@ -1,5 +1,5 @@
 import type { Transport } from './host'
-import type { AllowedCommand, HostMessage, SceneNode, UiMessage } from './protocol'
+import type { AllowedCommand, HostMessage, SceneNode, UiMessage, UserFnInfo } from './protocol'
 
 /**
  * Stand-in for Rhino when the page runs in a normal browser (`npm run dev`).
@@ -19,7 +19,13 @@ export function createMockHost(): Transport {
   const prim = (sdfType: string, params: Record<string, number>, name?: string): SceneNode => ({
     id: id(), kind: 'primitive', sdfType, name, visible: true, locked: false, params, color: '#FCFCFC',
   })
+  /** sdUser node; userFn from mockCompile, with stored u.* values (missing = default). */
+  const userFn = (code: string, b: number, values: Record<string, number> = {}, lipschitz = 1, name?: string): SceneNode => ({
+    ...prim('sdUser', { 'b.x': b, 'b.y': b, 'b.z': b }, name),
+    userFn: mockCompile(code, values, lipschitz),
+  })
   const make: Partial<Record<AllowedCommand, () => SceneNode>> = {
+    FFunction: () => userFn(SAMPLE_OK, 2),
     FBox: () => prim('sdBox', { 'b.x': 1, 'b.y': 1, 'b.z': 1 }),
     FSphere: () => prim('sdSphere', { s: 1 }),
     FCylinder: () => prim('sdCappedCylinder', { h: 1, r: 0.5 }),
@@ -40,6 +46,8 @@ export function createMockHost(): Transport {
     opNode('subtract', 0.25, [prim('sdBox', { 'b.x': 3, 'b.y': 3, 'b.z': 1 }), holes]),
     prim('sdPyramid', { h: 2, s: 2.5 }),
     { ...prim('sdCappedCylinder', { h: 1, r: 0.5 }), custom: true },
+    userFn(SAMPLE_OK, 2, { twist: 1.5 }, 1.2, 'Gyroid'),
+    userFn(SAMPLE_BAD, 1),
   ]
   let selection: string[] = []
 
@@ -75,7 +83,14 @@ export function createMockHost(): Transport {
         break
       }
       case 'setParam':
-        scene = map(scene, (x) => (x.id === m.id ? { ...x, params: { ...x.params, [m.name]: m.value } } : x))
+        scene = map(scene, (x) => {
+          if (x.id !== m.id) return x
+          const fn = x.userFn
+          if (fn && m.name === 'L') return { ...x, userFn: { ...fn, lipschitz: m.value } }
+          if (fn && m.name.startsWith('u.'))
+            return { ...x, userFn: { ...fn, params: fn.params.map((p) => (`u.${p.name}` === m.name ? { ...p, value: m.value } : p)) } }
+          return { ...x, params: { ...x.params, [m.name]: m.value } }
+        })
         emit({ type: 'scene', scene })
         break
       case 'setColor':
@@ -241,4 +256,44 @@ export function createMockHost(): Transport {
     post: (m) => setTimeout(() => handle(m), 0),
     listen: (cb) => (listener = cb),
   }
+}
+
+// ── FFunction stand-ins (the real compiler is UserFn/UserFnCompiler.cs) ──
+
+const SAMPLE_OK = `// Twisted gyroid shell, clipped to the box.
+param float scale = 0.8;
+param float thickness = 0.15;
+param float twist = 0.0;
+
+float sdf(vec3 p) {
+  float a = twist * p.z;
+  p.xy = mat2(cos(a), -sin(a), sin(a), cos(a)) * p.xy;
+  vec3 q = p * scale;
+  float g = dot(sin(q), cos(q.yzx));
+  return abs(g) / scale - thickness;
+}`
+
+const SAMPLE_BAD = `param float r = 1.0;
+
+float sdf(vec3 p) {
+  return length(p) - radius;
+}
+@`
+
+/** Just enough to exercise the panel: `param float x = d;` declarations; `radius` / `@` are errors. */
+function mockCompile(code: string, values: Record<string, number>, lipschitz: number): UserFnInfo {
+  const diagnostics: UserFnInfo['diagnostics'] = []
+  code.split('\n').forEach((line, i) => {
+    const at = line.indexOf('@')
+    if (at >= 0) diagnostics.push({ line: i + 1, column: at + 1, message: "unexpected character '@'" })
+    const r = line.search(/\bradius\b/)
+    if (r >= 0) diagnostics.push({ line: i + 1, column: r + 1, message: "undeclared identifier 'radius'" })
+  })
+  const ok = diagnostics.length === 0
+  const params = ok
+    ? [...code.matchAll(/param\s+float\s+(\w+)\s*=\s*([-+.\deE]+)\s*;/g)].map(([, name, d]) => ({
+        name, default: Number(d), value: values[name] ?? Number(d),
+      }))
+    : []
+  return { code, ok, hash: ok ? '9f3c2a7be1d04c55' : undefined, diagnostics, params, lipschitz }
 }

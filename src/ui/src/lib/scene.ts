@@ -22,6 +22,8 @@ export const PRIMITIVES: Record<string, PrimitiveInfo> = {
   sdPyramid: { label: 'Pyramid', icon: 'pyramid', command: 'FPyramid', params: { s: 'Base side', h: 'Height' } },
   sdEllipsoid: { label: 'Ellipsoid', icon: 'ellipsoid', command: 'FEllipsoid', params: { 'r.x': 'Semi-axis X', 'r.y': 'Semi-axis Y', 'r.z': 'Semi-axis Z' } },
   sdTorus: { label: 'Torus', icon: 'torus', command: 'FTorus', params: { 't.x': 'Major radius', 't.y': 'Tube radius' } },
+  // FFunction: user SDF code inside a box; L and the code's params come in node.userFn.
+  sdUser: { label: 'Function', icon: 'function', command: 'FFunction', params: { 'b.x': 'Half X', 'b.y': 'Half Y', 'b.z': 'Half Z' } },
 }
 
 export const OPERATIONS: Record<OperationKind, { label: string; icon: BrandIconName }> = {

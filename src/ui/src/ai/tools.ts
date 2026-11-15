@@ -47,6 +47,16 @@ const DEFORM_FIELDS = {
   y_axis: vec3('repeat: optional lattice Y direction (default [0,1,0])'),
 }
 
+const FN_PARAMS = {
+  type: 'object',
+  additionalProperties: { type: 'number' },
+  description: 'param values by name, e.g. {"cell": 8}; omitted params keep their value (or declared default)',
+}
+const FN_LIPSCHITZ = {
+  type: 'number',
+  description: 'Lipschitz scale L > 0 (default 1): sdf / L must change by ≤ 1 per unit or the render gets holes; raise it if so',
+}
+
 const TYPES = ['sphere', 'box', 'ellipsoid', 'cylinder', 'cone', 'torus', 'pyramid']
 
 function tool(name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ToolDef {
@@ -136,6 +146,37 @@ export const TOOLS: ToolDef[] = [
     ['ref'],
   ),
   tool(
+    'add_operand',
+    'Adds a primitive or node to an existing CSG node (at index, default the end; for subtract, index 0 makes it the target). ' +
+      'Deforms take exactly one operand: use move to swap it. Cycles and duplicates are rejected.',
+    {
+      node: { type: 'string', description: 'CSG node ref, e.g. "N3"' },
+      operand: { type: 'string', description: 'primitive or node ref to add' },
+      index: { type: 'integer', description: 'position in the operand list (optional)' },
+    },
+    ['node', 'operand'],
+  ),
+  tool(
+    'remove_operand',
+    'Takes an operand out of a CSG node; if nothing else uses it, it becomes a root (drawn on its own). A node must keep ≥ 1 ' +
+      'operand (delete the node instead), a deform exactly 1.',
+    { node: { type: 'string', description: 'CSG node ref' }, operand: { type: 'string', description: 'operand ref to remove' } },
+    ['node', 'operand'],
+  ),
+  tool(
+    'move',
+    'Re-parents a primitive or node: detaches it from "from" (default: every operation using it) and inserts it into "to" at ' +
+      'index (default end). Omit "to" (or null) to make it a root. from = to reorders. Into a deform: replaces its target. ' +
+      'Restructure with this instead of deleting and rebuilding.',
+    {
+      item: { type: 'string', description: 'primitive or node ref to move' },
+      to: { type: 'string', description: 'destination node ref; omit to make it a root' },
+      from: { type: 'string', description: 'detach only from this node (optional)' },
+      index: { type: 'integer', description: 'position in the destination operand list (optional)' },
+    },
+    ['item'],
+  ),
+  tool(
     'delete',
     'Deletes primitives and/or operation nodes (a deform\'s axis line / box goes with it). Something still used by another ' +
       'operation is kept (delete the parent first). recursive=true also deletes everything under the given nodes that nothing else uses.',
@@ -181,6 +222,50 @@ export const TOOLS: ToolDef[] = [
       focus: refs('optional refs to frame instead of everything'),
       size: { type: 'number', description: 'image size in px (default 512, max 1024)' },
     },
+  ),
+  // FFunction: user SDF code clipped by a box (Ai/AiFunctions.cs; guide: skill freppuccino-ffunction).
+  tool(
+    'create_function',
+    'Adds a function primitive: your SDF code (GLSL subset, entry float sdf(vec3 p), p in the box frame in model units) clipped by ' +
+      'a box (center, size = full lengths, x_axis?, y_axis?). Field = max(sdf(p) / lipschitz, box). Rejected with diagnostics if the ' +
+      'code has errors (unless allow_errors). Load the freppuccino-ffunction skill first. Returns ref, ok, diagnostics, params.',
+    {
+      name: { type: 'string', description: 'short snake_case name' },
+      center: SHAPE_FIELDS.center,
+      size: vec3('clip box full lengths [x,y,z]; nothing outside it is drawn'),
+      x_axis: SHAPE_FIELDS.x_axis,
+      y_axis: SHAPE_FIELDS.y_axis,
+      code: { type: 'string', description: 'DSL source: param float name = default; ... float sdf(vec3 p) { ... }' },
+      params: FN_PARAMS,
+      lipschitz: FN_LIPSCHITZ,
+      color: SHAPE_FIELDS.color,
+      allow_errors: { type: 'boolean', description: 'create even if the code has errors (it is not drawn until fixed)' },
+    },
+    ['center', 'size', 'code'],
+  ),
+  tool(
+    'set_function_code',
+    "Replaces a function's code. Param values carry over by name. With errors nothing changes (diagnostics in the error) " +
+      'unless allow_errors. Returns ok, diagnostics, params, hash.',
+    {
+      target: { type: 'string', description: 'function ref' },
+      code: { type: 'string' },
+      allow_errors: { type: 'boolean' },
+    },
+    ['target', 'code'],
+  ),
+  tool(
+    'get_function',
+    "Reads a function: code, params (name, default, value), lipschitz, clip box, ok, diagnostics, hash, and shader_error if the " +
+      'viewport shader failed to compile.',
+    { target: { type: 'string', description: 'function ref' } },
+    ['target'],
+  ),
+  tool(
+    'set_function_params',
+    "Sets a function's param values and/or lipschitz without changing its code (no recompile).",
+    { target: { type: 'string', description: 'function ref' }, params: FN_PARAMS, lipschitz: FN_LIPSCHITZ },
+    ['target'],
   ),
   tool(
     'load_skill',
@@ -253,8 +338,20 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return `${result.ref} = ${args.op}(${args.target})${result.warning ? ' ⚠' : ''}`
     case 'edit_operation':
       return result.k !== undefined ? `${result.ref}: ${result.op} k=${result.k}` : `${result.ref}: ${result.op}${result.warning ? ' ⚠' : ''}`
+    case 'add_operand':
+    case 'remove_operand':
+      return `${result.ref} = ${result.op}(${((result.operands as string[]) ?? []).join(', ')})`
+    case 'move':
+      return `${result.item} → ${((result.parents as string[]) ?? []).join(', ') || 'root'}`
     case 'delete':
       return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
+    case 'create_function':
+      return `function ${result.ref}${result.ok === false ? ' (errors)' : ''}`
+    case 'set_function_code':
+    case 'set_function_params':
+      return `${result.ref}${result.ok === false ? ' (errors)' : ''}`
+    case 'get_function':
+      return `${args.target}${result.ok === false ? ' (errors)' : ''}${result.shader_error ? ' (shader error)' : ''}`
     case 'transform':
       return ((result.transformed as string[]) ?? []).join(', ')
     case 'set_color': {
