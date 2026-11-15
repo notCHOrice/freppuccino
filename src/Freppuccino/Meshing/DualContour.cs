@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Freppuccino.Meshing;
 
 /// Dual Contouring (Ju et al. 2002): each surface cell gets a vertex placed by minimising a quadric
@@ -35,7 +37,12 @@ public static class DualContour
     /// Crossings: triangle pairs that still pass through each other (see <see cref="Meshing.Crossings"/>), from a check
     /// of the whole output; 0 unless the repair in Mesh ran out of vertices to demote or of rounds.
     /// Demoted: vertex placements the repair stepped down.
-    public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0);
+    /// Refine: extra levels actually used (lowered from the request when over budget or below the minimum cell size).
+    /// RefinedCells: base cells sampled finer. Unresolved: finest-level vertices whose placement fell back to
+    /// their in-cell point (features thinner than MinCellSize). UnsafeSamples: base samples whose sign changed when
+    /// evaluated again (the field changed faster than its Lipschitz bound, so skipping samples was unsafe there).
+    public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0,
+        double MinCellSize = 0, int Refine = 0, int RefinedCells = 0, int Unresolved = 0, int UnsafeSamples = 0);
 
     const int Block = 8;
 
@@ -55,6 +62,20 @@ public static class DualContour
     /// Most rounds of the crossing repair (see Mesh). Each round demotes at least one vertex one step, and every
     /// vertex has a few steps at most, so the repair ends anyway; this bounds the time.
     public static int RepairRounds = 16;
+
+    /// Budget for refinement: estimated working memory (samples plus about 400 bytes per finest surface cell) and
+    /// finest surface cells. Over either, the attempt is dropped and repeated one level coarser.
+    public static long MemoryBudget = 1_500_000_000;
+    public static long FineCellBudget = 4_000_000;
+
+    /// Restarts after a coarse cell is still in a crossing at its last placement: it is refined and the mesh built
+    /// again, at most this many times.
+    public static int RefineRestarts = 3;
+
+    /// Optional progress and timing messages (for test harnesses).
+    public static Action<string>? Trace;
+    static readonly System.Diagnostics.Stopwatch clock = new();
+    static void Mark(string what) => Trace?.Invoke($"  [{clock.ElapsedMilliseconds,6} ms] {what}");
 
     /// Counts topology defects in a result: edges not shared by exactly two triangles, and vertices whose
     /// surrounding triangles do not form a single closed fan (a pinched vertex passes the edge count).
@@ -91,23 +112,81 @@ public static class DualContour
         return (edges.Values.Count(n => n != 2), badVertices);
     }
 
-    /// Sampled field on the uniform grid. Coordinates handed to <see cref="Qef"/> are relative to Origin.
-    sealed class Grid(FrepField field, V3 origin, double h, int nx, int ny, int nz)
+    /// Field samples. Indices are on the finest lattice (spacing H). The base lattice is every Step-th point
+    /// (spacing Hb = H·Step, Step = 2^K); its samples are a dense array. Finer samples exist only in blocks, one per
+    /// refined or interface base cell (see Mesh); reading one that no block holds is a bug. Every position comes from
+    /// one formula on its global index (P), so a point that two blocks share has one value.
+    /// Coordinates handed to <see cref="Qef"/> are relative to Origin.
+    sealed class Grid
     {
-        public readonly FrepField Field = field;
-        public readonly V3 Origin = origin;
-        public readonly double H = h;
-        public readonly int Nx = nx, Ny = ny, Nz = nz, Sx = nx + 1, Sy = ny + 1, Sz = nz + 1;
-        public readonly float[] F = new float[(long)(nx + 1) * (ny + 1) * (nz + 1)];
+        public readonly FrepField Field;
+        public readonly V3 Origin;
+        public readonly double H, Hb;
+        public readonly int K, Step;
+        public readonly int Nbx, Nby, Nbz;                // base cells
+        public readonly int Nx, Ny, Nz, Sx, Sy, Sz;       // finest cells and samples
+        public readonly float[] F;                        // base samples
+        public readonly ConcurrentDictionary<int, float[]> Blocks = new();
+
+        public Grid(FrepField field, V3 origin, double hb, int k, int nbx, int nby, int nbz)
+        {
+            Field = field;
+            Origin = origin;
+            K = k;
+            Step = 1 << k;
+            Hb = hb;
+            H = hb / Step;
+            Nbx = nbx; Nby = nby; Nbz = nbz;
+            Nx = nbx << k; Ny = nby << k; Nz = nbz << k;
+            Sx = Nx + 1; Sy = Ny + 1; Sz = Nz + 1;
+            F = new float[(long)(nbx + 1) * (nby + 1) * (nbz + 1)];
+        }
 
         public V3 P(int i, int j, int k) => new(Origin.X + i * H, Origin.Y + j * H, Origin.Z + k * H);
 
+        public long BaseSample(int bi, int bj, int bk) => ((long)bk * (Nby + 1) + bj) * (Nbx + 1) + bi;
+
+        /// The sample at a finest-lattice index on the grid.
+        public float Value(int i, int j, int k)
+        {
+            int m = Step - 1;
+            if (((i | j | k) & m) == 0) return F[BaseSample(i >> K, j >> K, k >> K)];
+            int bi = i >> K, bj = j >> K, bk = k >> K, side = Step + 1;
+            // A point on a base cell's face belongs to the blocks on both sides; either holds it.
+            for (int c = 0; c < 8; c++)
+            {
+                if (((c & 1) != 0 && (i & m) != 0) || ((c & 2) != 0 && (j & m) != 0) || ((c & 4) != 0 && (k & m) != 0)) continue;
+                int ci = bi - (c & 1), cj = bj - ((c >> 1) & 1), ck = bk - (c >> 2);
+                if ((uint)ci >= (uint)Nbx || (uint)cj >= (uint)Nby || (uint)ck >= (uint)Nbz) continue;
+                if (Blocks.TryGetValue(BaseCell(ci, cj, ck), out var block))
+                    return block[((k - (ck << K)) * side + (j - (cj << K))) * side + (i - (ci << K))];
+            }
+            throw new InvalidOperationException($"DualContour: no sample at ({i}, {j}, {k}).");
+        }
+
         /// Inside test at a sample; anything off the grid is outside.
         public bool In(int i, int j, int k) =>
-            (uint)i < (uint)Sx && (uint)j < (uint)Sy && (uint)k < (uint)Sz && F[((long)k * Sy + j) * Sx + i] < 0;
+            (uint)i < (uint)Sx && (uint)j < (uint)Sy && (uint)k < (uint)Sz && Value(i, j, k) < 0;
 
-        public int Cell(int i, int j, int k) => (k * Ny + j) * Nx + i;
+        public long Cell(int i, int j, int k) => ((long)k * Ny + j) * Nx + i;
         public bool HasCell(int i, int j, int k) => (uint)i < (uint)Nx && (uint)j < (uint)Ny && (uint)k < (uint)Nz;
+
+        public int BaseCell(int bi, int bj, int bk) => (bk * Nby + bj) * Nbx + bi;
+        public bool HasBaseCell(int bi, int bj, int bk) => (uint)bi < (uint)Nbx && (uint)bj < (uint)Nby && (uint)bk < (uint)Nbz;
+        public (int, int, int) BaseCoords(int cell) => (cell % Nbx, cell / Nbx % Nby, cell / (Nbx * Nby));
+
+        /// Evaluates the (Step + 1)³ samples of base cell (bi, bj, bk).
+        public float[] Sample(int bi, int bj, int bk)
+        {
+            int side = Step + 1;
+            var block = new float[side * side * side];
+            int i0 = bi << K, j0 = bj << K, k0 = bk << K;
+            for (int k = 0; k < side; k++)
+                for (int j = 0; j < side; j++)
+                    for (int i = 0; i < side; i++)
+                        block[(k * side + j) * side + i] = (float)Field.Value(P(i0 + i, j0 + j, k0 + k));
+            return block;
+        }
     }
 
     /// Quadric error Σ (nᵢ·(x − pᵢ))² in accumulable form, plus the mass point of the pᵢ.
@@ -159,23 +238,39 @@ public static class DualContour
             Math.Sqrt(Math.Max(V3.Dot(x, Times(x)) - 2 * V3.Dot(x, new V3(bx, by, bz)) + c, 0) / N);
     }
 
-    /// <paramref name="resolution"/> = finest cells along the longest side of the field's bounds.
-    /// <paramref name="simplify"/> = how far, in finest cells (RMS), a merged cell's vertex may be from the
+    /// <paramref name="resolution"/> = base cells along the longest side of the field's bounds.
+    /// <paramref name="simplify"/> = how far, in base cells (RMS), a merged cell's vertex may be from the
     /// surface planes it replaces; 0 keeps the uniform grid.
-    public static Result Mesh(FrepField field, int resolution, double simplify = 0)
+    /// <paramref name="refine"/> = extra levels (0 to 3) where the base grid under-resolves the field: such cells, and
+    /// enough of their neighbours to join them consistently, are sampled at cells of 1 / 2^refine (see MeshAt).
+    /// <paramref name="minCell"/> = the finest cell may not be smaller than this (model units); refine is lowered to fit.
+    public static Result Mesh(FrepField field, int resolution, double simplify = 0, int refine = 0, double minCell = 0)
     {
         var (bmin, bmax) = field.Bounds();
         var size = bmax - bmin;
         if (!(size.X > 0 && size.Y > 0 && size.Z > 0) || double.IsInfinity(size.X + size.Y + size.Z))
             return new Result([], [], 0, 0, 0, 0); // no surface
         double h = Math.Max(size.X, Math.Max(size.Y, size.Z)) / resolution;
+        clock.Restart();
+        int k = Math.Clamp(refine, 0, 3);
+        while (k > 0 && h / (1 << k) < minCell) k--;
+        for (; ; k--)
+        {
+            var result = MeshAt(field, bmin, size, h, simplify, k);
+            if (result != null) return result;
+        }
+    }
+
+    /// One attempt at <paramref name="k"/> extra levels; null if it went over budget (never at k = 0).
+    static Result? MeshAt(FrepField field, V3 bmin, V3 size, double h, double simplify, int k)
+    {
         // Two cells of padding: every sample on the grid boundary is strictly outside.
-        var g = new Grid(field, bmin - new V3(2 * h, 2 * h, 2 * h), h,
+        var g = new Grid(field, bmin - new V3(2 * h, 2 * h, 2 * h), h, k,
             (int)Math.Ceiling(size.X / h) + 4, (int)Math.Ceiling(size.Y / h) + 4, (int)Math.Ceiling(size.Z / h) + 4);
-        int nx = g.Nx, ny = g.Ny, nz = g.Nz, sx = g.Sx, sy = g.Sy, sz = g.Sz;
+        int nbx = g.Nbx, nby = g.Nby, nbz = g.Nbz, sx = nbx + 1, sy = nby + 1, sz = nbz + 1;
         var f = g.F;
 
-        // 1. Samples. |field| never exceeds the distance to the surface (see FrepField), so a block of
+        // 1. Base samples. |field| never exceeds the distance to the surface (see FrepField), so a block of
         //    samples whose centre is farther from the surface than the block's radius has no sign change:
         //    fill it without evaluating.
         int bx = (sx + Block - 1) / Block, by = (sy + Block - 1) / Block, bz = (sz + Block - 1) / Block;
@@ -192,81 +287,336 @@ public static class DualContour
                     var c = new V3(g.Origin.X + i0 * h + ex, g.Origin.Y + j0 * h + ey, g.Origin.Z + k0 * h + ez);
                     double fc = field.Value(c);
                     bool skip = Math.Abs(fc) > Math.Sqrt(ex * ex + ey * ey + ez * ez) * 1.001 + 1e-9 * h;
-                    for (int k = k0; k < k1; k++)
+                    for (int kk = k0; kk < k1; kk++)
                         for (int j = j0; j < j1; j++)
                         {
-                            long row = ((long)k * sy + j) * sx;
+                            long row = ((long)kk * sy + j) * sx;
                             for (int i = i0; i < i1; i++)
-                                f[row + i] = skip ? (float)fc : (float)field.Value(g.P(i, j, k));
+                                f[row + i] = skip ? (float)fc : (float)field.Value(g.P(i << k, j << k, kk << k));
                         }
                 }
             }
         });
 
-        // 2. One vertex per surface sheet in each cell that has a sign change.
-        //    Packed = 2 bits per cell edge: which of the cell's vertices that edge's polygon uses.
-        var slabs = new (List<(int Cell, int Packed, int Count)> Cells, List<V3> Points, List<Qef> Qefs, List<V3?> Stable, List<V3> Mins)[nz];
-        Parallel.For(0, nz, k =>
+        // 2. Base cells: one vertex per surface sheet in each base cell with a sign change, and whether the base
+        //    grid resolves the surface there.
+        Mark("base samples");
+        var bases = BaseCells(g);
+        Mark($"base cells: {bases.Count}");
+        var refined = new HashSet<int>();
+        if (k > 0)
+            foreach (var (cell, info) in bases)
+                if (info.Unresolved) refined.Add(cell);
+
+        int unsafeSamples = 0;
+        for (int restart = 0; ; restart++)
         {
-            var cells = new List<(int, int, int)>();
-            var points = new List<V3>();
-            var qefs = new List<Qef>();
-            var stables = new List<V3?>();
-            var mins = new List<V3>();
+            // 3. Close the refined set (k > 0 only): see Close.
+            var near = new HashSet<int>();
+            if (k > 0 && !Close(g, refined, near, bases, ref unsafeSamples)) return null;
+            Mark($"closure: {refined.Count} refined, {near.Count} interface, {g.Blocks.Count} blocks");
+
+            var mesh = Build(g, bases, refined, near, simplify * h, out var stuck, out bool over);
+            if (over) return null;
+            // A coarse cell still in a crossing at its last placement: refine it too and build again.
+            if (mesh.Crossings == 0 || stuck.Count == 0 || k == 0 || restart >= RefineRestarts)
+                return mesh with { UnsafeSamples = unsafeSamples };
+            refined.UnionWith(stuck);
+        }
+    }
+
+    /// A base cell with a sign change: its vertices (one per sheet) and whether the base grid fails to resolve the
+    /// surface there, which puts it in the refined set: more than one sheet, a face crossed four times (a possible
+    /// tunnel), a placement off the surface, a fit residual over 0.05 cells, or two normals more than 90° apart.
+    sealed record BaseInfo(int Packed, int Count, V3[] Points, Qef[] Qefs, V3?[] Stable, bool Unresolved);
+
+    static Dictionary<int, BaseInfo> BaseCells(Grid g)
+    {
+        int nbx = g.Nbx, nby = g.Nby, nbz = g.Nbz, step = g.Step;
+        var slabs = new List<(int, BaseInfo)>[nbz];
+        Parallel.For(0, nbz, bk =>
+        {
+            var list = new List<(int, BaseInfo)>();
             Span<bool> s = stackalloc bool[8];
             Span<int> sheet = stackalloc int[12];
-            for (int j = 0; j < ny; j++)
-                for (int i = 0; i < nx; i++)
+            for (int bj = 0; bj < nby; bj++)
+                for (int bi = 0; bi < nbx; bi++)
                 {
                     int inside = 0;
                     for (int c = 0; c < 8; c++)
                     {
-                        s[c] = g.In(i + (c & 1), j + ((c >> 1) & 1), k + (c >> 2));
+                        s[c] = g.In((bi + (c & 1)) * step, (bj + ((c >> 1) & 1)) * step, (bk + (c >> 2)) * step);
                         if (s[c]) inside++;
                     }
                     if (inside == 0 || inside == 8) continue;
                     int count = Sheets(s, sheet), packed = 0;
                     for (int e = 0; e < 12; e++)
                         if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
+                    bool unresolved = count > 1 || FourCrossingFace(s);
+                    var points = new V3[count];
+                    var qefs = new Qef[count];
+                    var stables = new V3?[count];
                     for (int c = 0; c < count; c++)
                     {
-                        points.Add(CellVertex(g, i, j, k, s, sheet, c, out var q, out var stable));
-                        qefs.Add(q);
-                        stables.Add(stable);
-                        mins.Add(g.P(i, j, k));
+                        points[c] = CellVertex(g, bi * step, bj * step, bk * step, step, g.Hb, s, sheet, c, out qefs[c], out stables[c], out bool bad);
+                        unresolved |= bad;
                     }
-                    cells.Add((g.Cell(i, j, k), packed, count));
+                    list.Add((g.BaseCell(bi, bj, bk), new BaseInfo(packed, count, points, qefs, stables, unresolved)));
                 }
-            slabs[k] = (cells, points, qefs, stables, mins);
+            slabs[bk] = list;
         });
+        var result = new Dictionary<int, BaseInfo>();
+        foreach (var list in slabs)
+            foreach (var (cell, info) in list) result[cell] = info;
+        return result;
+    }
 
+    static bool FourCrossingFace(ReadOnlySpan<bool> inside)
+    {
+        foreach (var c in FaceCorners)
+            if (inside[c[0]] != inside[c[1]] && inside[c[1]] != inside[c[2]] && inside[c[2]] != inside[c[3]] && inside[c[3]] != inside[c[0]])
+                return true;
+        return false;
+    }
+
+    /// Grows the refined set until it can be joined to the rest consistently, and samples it finer.
+    ///
+    /// A base cell that is not refined but shares a face, edge or corner with a refined one is an interface cell: it
+    /// keeps its one base vertex, but the refined side meshes the faces they share on the fine lattice. Every refined
+    /// and interface cell gets a block of fine samples. An interface cell stays unrefined only if, on the fine lattice,
+    /// each of its base edges changes sign at most once and its fine samples agree with what one base vertex can
+    /// represent: none change sign if its corners don't, and otherwise the surface crosses its six faces in exactly one
+    /// loop. If not, it is refined and its neighbours become interface cells. This repeats until nothing changes.
+    ///
+    /// Each block also re-evaluates the base samples at its corners, which block skipping in step 1 may have filled
+    /// without evaluating. If one changes sign, the field changed faster than its bound promised there: the true value
+    /// is written back and the base cells around it are refined.
+    ///
+    /// False if the samples or the refined set go over budget.
+    static bool Close(Grid g, HashSet<int> refined, HashSet<int> near, Dictionary<int, BaseInfo> bases, ref int unsafeSamples)
+    {
+        int side = g.Step + 1;
+        long blockBytes = (long)side * side * side * 4;
+        var checkedOk = new HashSet<int>();
+        while (true)
+        {
+            // Interface cells of the current set.
+            near.Clear();
+            foreach (int cell in refined)
+            {
+                var (bi, bj, bk) = g.BaseCoords(cell);
+                for (int dk = -1; dk <= 1; dk++)
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++)
+                        {
+                            if (!g.HasBaseCell(bi + di, bj + dj, bk + dk)) continue;
+                            int n = g.BaseCell(bi + di, bj + dj, bk + dk);
+                            if (!refined.Contains(n)) near.Add(n);
+                        }
+            }
+            // Sample every block not yet sampled.
+            var missing = refined.Concat(near).Where(c => !g.Blocks.ContainsKey(c)).ToList();
+            if ((g.Blocks.Count + (long)missing.Count) * blockBytes + (long)refined.Count * g.Step * g.Step * g.Step * 64 > MemoryBudget)
+                return false;
+            Parallel.ForEach(missing, cell =>
+            {
+                var (bi, bj, bk) = g.BaseCoords(cell);
+                g.Blocks[cell] = g.Sample(bi, bj, bk);
+            });
+
+            bool grew = false;
+            // Base samples that change sign when evaluated: write back, refine the cells around them.
+            foreach (int cell in missing)
+            {
+                var (bi, bj, bk) = g.BaseCoords(cell);
+                var block = g.Blocks[cell];
+                for (int c = 0; c < 8; c++)
+                {
+                    int ci = bi + (c & 1), cj = bj + ((c >> 1) & 1), ck = bk + (c >> 2);
+                    float truth = block[(((c >> 2) * g.Step) * side + ((c >> 1) & 1) * g.Step) * side + (c & 1) * g.Step];
+                    long at = g.BaseSample(ci, cj, ck);
+                    if ((g.F[at] < 0) == (truth < 0)) { g.F[at] = truth; continue; }
+                    g.F[at] = truth;
+                    unsafeSamples++;
+                    for (int n = 0; n < 8; n++)
+                    {
+                        int ni = ci - (n & 1), nj = cj - ((n >> 1) & 1), nk = ck - (n >> 2);
+                        if (g.HasBaseCell(ni, nj, nk) && refined.Add(g.BaseCell(ni, nj, nk))) grew = true;
+                    }
+                }
+            }
+            if (!grew)
+                foreach (int cell in near)
+                {
+                    if (checkedOk.Contains(cell)) continue;
+                    if (InterfaceOk(g, cell)) checkedOk.Add(cell);
+                    else { refined.Add(cell); grew = true; }
+                }
+            if (!grew) return true;
+            if ((long)refined.Count * g.Step * g.Step * g.Step > 4 * FineCellBudget) return false;
+        }
+    }
+
+    /// Can interface cell <paramref name="cell"/> stay one base vertex next to refined cells (see Close)?
+    static bool InterfaceOk(Grid g, int cell)
+    {
+        var (bi, bj, bk) = g.BaseCoords(cell);
+        int step = g.Step, side = step + 1, i0 = bi * step, j0 = bj * step, k0 = bk * step;
+        var block = g.Blocks[cell];
+        bool At(int i, int j, int k) => block[(k * side + j) * side + i] < 0;
+        Span<bool> corner = stackalloc bool[8];
+        int inside = 0;
+        for (int c = 0; c < 8; c++)
+        {
+            corner[c] = At((c & 1) * step, ((c >> 1) & 1) * step, (c >> 2) * step);
+            if (corner[c]) inside++;
+        }
+        // Each base edge changes sign at most once along its fine samples.
+        foreach (var (a, b) in Edges)
+        {
+            int ax = a & 1, ay = (a >> 1) & 1, az = a >> 2, dx = (b & 1) - ax, dy = ((b >> 1) & 1) - ay, dz = (b >> 2) - az;
+            int changes = 0;
+            bool prev = corner[a];
+            for (int t = 1; t <= step; t++)
+            {
+                bool now = At(ax * step + dx * t, ay * step + dy * t, az * step + dz * t);
+                if (now != prev) changes++;
+                prev = now;
+            }
+            if (changes > 1) return false;
+        }
+        if (inside == 0 || inside == 8)
+        {
+            // No vertex: nothing may change sign anywhere in the cell.
+            foreach (float v in block)
+                if ((v < 0) != corner[0]) return false;
+            return true;
+        }
+        Span<int> sheet = stackalloc int[12];
+        if (Sheets(corner, sheet) != 1) return false;
+        return Octree.BoundaryLoops(g, i0, j0, k0, step, 1) == 1;
+    }
+
+    /// Steps 4 and on, for the base cells and refined set given: fine cells inside the refined set, coarse leaves
+    /// elsewhere, the octree with merging, contouring, and the crossing repair. <paramref name="stuck"/> returns the
+    /// coarse cells still in a crossing at their last placement; <paramref name="over"/> is set if over budget.
+    static Result Build(Grid g, Dictionary<int, BaseInfo> bases, HashSet<int> refined, HashSet<int> near, double tolerance, out HashSet<int> stuck, out bool over)
+    {
+        stuck = [];
+        over = false;
+        int k = g.K, step = g.Step;
+        double h = g.Hb;
         var vertices = new List<V3>();
         var quadrics = new List<Qef>();
-        var index = new Dictionary<int, (int Base, int Packed, int Count)>();
+        var index = new Dictionary<long, (int Base, int Packed, int Count)>();
         // Vertices placed by the sharp solve (see Place), with the stable position to fall back to.
         var fallback = new Dictionary<int, V3>();
-        // Per vertex, its cell's minimum corner, for the in-cell point that is the last step of the crossing repair.
+        // Per vertex, its cell (minimum corner and side), for the in-cell point that is the last step of the crossing
+        // repair; NaN for a merged vertex, which is unmerged instead.
         var cellMin = new List<V3>();
-        foreach (var (cells, points, qefs, stables, mins) in slabs)
+        var cellSide = new List<double>();
+        var coarse = new Dictionary<long, int>();      // level-k node of an unrefined base cell -> its vertex
+        var coarseCell = new Dictionary<int, int>();   // that vertex -> its base cell
+        int unresolved = 0;
+
+        void Add(V3 point, Qef q, V3? stable, V3 min, double sideLength)
         {
-            int at = vertices.Count;
-            foreach (var (cell, packed, count) in cells)
-            {
-                index[cell] = (at, packed, count);
-                at += count;
-            }
-            for (int v = 0; v < stables.Count; v++)
-                if (stables[v] is { } stable) fallback[vertices.Count + v] = stable;
-            vertices.AddRange(points);
-            quadrics.AddRange(qefs);
-            cellMin.AddRange(mins);
+            if (stable is { } st) fallback[vertices.Count] = st;
+            vertices.Add(point);
+            quadrics.Add(q);
+            cellMin.Add(min);
+            cellSide.Add(sideLength);
         }
 
-        // 3. Polygons.
+        if (k == 0)
+        {
+            // No refinement: the base cells are the finest cells, exactly as before.
+            foreach (var (cell, info) in bases.OrderBy(e => e.Key))
+            {
+                var (bi, bj, bk) = g.BaseCoords(cell);
+                index[g.Cell(bi, bj, bk)] = (vertices.Count, info.Packed, info.Count);
+                for (int c = 0; c < info.Count; c++) Add(info.Points[c], info.Qefs[c], info.Stable[c], g.P(bi, bj, bk), h);
+            }
+        }
+        else
+        {
+            // 4. Fine cells inside the refined set.
+            var cellsOf = new (List<(long Cell, int Packed, int Count)> Cells, List<(V3, Qef, V3?, V3)> Points, int Bad)[refined.Count];
+            var list = refined.OrderBy(c => c).ToArray();
+            Parallel.For(0, list.Length, n =>
+            {
+                var (bi, bj, bk) = g.BaseCoords(list[n]);
+                var cells = new List<(long, int, int)>();
+                var points = new List<(V3, Qef, V3?, V3)>();
+                int bad = 0;
+                Span<bool> s = stackalloc bool[8];
+                Span<int> sheet = stackalloc int[12];
+                for (int kk = bk * step; kk < (bk + 1) * step; kk++)
+                    for (int j = bj * step; j < (bj + 1) * step; j++)
+                        for (int i = bi * step; i < (bi + 1) * step; i++)
+                        {
+                            int inside = 0;
+                            for (int c = 0; c < 8; c++)
+                            {
+                                s[c] = g.In(i + (c & 1), j + ((c >> 1) & 1), kk + (c >> 2));
+                                if (s[c]) inside++;
+                            }
+                            if (inside == 0 || inside == 8) continue;
+                            int count = Sheets(s, sheet), packed = 0;
+                            for (int e = 0; e < 12; e++)
+                                if (sheet[e] >= 0) packed |= sheet[e] << (2 * e);
+                            for (int c = 0; c < count; c++)
+                            {
+                                var x = CellVertex(g, i, j, kk, 1, g.H, s, sheet, c, out var q, out var stable, out bool unres, out bool fellBack);
+                                if (fellBack) bad++;
+                                points.Add((x, q, stable, g.P(i, j, kk)));
+                            }
+                            cells.Add((g.Cell(i, j, kk), packed, count));
+                        }
+                cellsOf[n] = (cells, points, bad);
+            });
+            long fineCells = cellsOf.Sum(c => (long)c.Cells.Count);
+            if (fineCells > FineCellBudget || g.Blocks.Count * (long)(step + 1) * (step + 1) * (step + 1) * 4 + fineCells * 400 > MemoryBudget)
+            {
+                over = true;
+                return new Result([], [], 0, 0, 0, h);
+            }
+            foreach (var (cells, points, bad) in cellsOf)
+            {
+                int at = vertices.Count;
+                foreach (var (cell, packed, count) in cells)
+                {
+                    index[cell] = (at, packed, count);
+                    at += count;
+                }
+                foreach (var (x, q, stable, min) in points) Add(x, q, stable, min, g.H);
+                unresolved += bad;
+            }
+            // Coarse leaves: unrefined base cells with a sign change (one sheet, or they would be refined).
+            foreach (var (cell, info) in bases.OrderBy(e => e.Key))
+            {
+                if (refined.Contains(cell)) continue;
+                var (bi, bj, bk) = g.BaseCoords(cell);
+                coarse[new Octree.Node(k, bi, bj, bk).Key] = vertices.Count;
+                coarseCell[vertices.Count] = cell;
+                Add(info.Points[0], info.Qefs[0], info.Stable[0], g.P(bi * step, bj * step, bk * step), h);
+            }
+        }
+
+        Mark($"cells: {index.Count} finest, {coarse.Count} coarse, {vertices.Count} vertices");
+        // 5. Polygons.
         var tris = new List<int>();
         var sources = new List<long>(); // per triangle: the finest grid edge its polygon was built around, or -1
-        var octree = new Octree(g, index, vertices, quadrics, fallback, cellMin, tris, sources);
-        octree.Build(simplify * h);
+        var noMerge = new HashSet<long>();
+        foreach (int cell in refined.Concat(near))
+        {
+            var (bi, bj, bk) = g.BaseCoords(cell);
+            var node = new Octree.Node(k, bi, bj, bk);
+            for (int l = k + 1; l <= 30 && node.L < 62; l++) { node = node.Parent; if (!noMerge.Add(node.Key)) break; }
+        }
+        var octree = new Octree(g, index, coarse, noMerge, vertices, quadrics, fallback, cellMin, cellSide, tris, sources);
+        octree.Build(tolerance);
+        Mark("octree");
         void ContourAll()
         {
             tris.Clear();
@@ -284,8 +634,9 @@ public static class DualContour
             RepairTunnels(g, vertices, tris, sources);
         }
         ContourAll();
+        Mark($"contour: {tris.Count / 3} triangles");
 
-        // 4. Crossings. Where the grid under-resolves the surface (wedges and skins thinner than a cell), vertices
+        // 6. Crossings. Where the grid under-resolves the surface (wedges and skins thinner than a cell), vertices
         //    that each look fine can still make triangles pass through each other. Demote every vertex of a
         //    crossing pair one step (a merged cell is unmerged, a sharp placement goes back to its stable one, a
         //    stable one to its in-cell point) and contour again. Demotion only goes down that ladder, so it ends.
@@ -309,7 +660,9 @@ public static class DualContour
             var before = vertices.ToArray();
             var oldKeys = new HashSet<(int, int, int)>();
             for (int t = 0; t < tris.Count; t += 3) oldKeys.Add(Key(tris, t));
-            int changed = octree.Demote(bad);
+            int changed = octree.Demote(bad, out var bottom);
+            foreach (int v in bottom)
+                if (coarseCell.TryGetValue(v, out int cell)) stuck.Add(cell);
             if (changed == 0) break; // nothing left to demote: the result reports what remains
             demoted += changed;
             ContourAll();
@@ -327,8 +680,16 @@ public static class DualContour
             }
             crossings = Crossings.Involving(vertices, tris, h, candidates);
             full = false;
+            Mark($"repair round {round}: {changed} demoted, {candidates.Count} changed triangles, {crossings.Count} pairs");
         }
         if (!full) crossings = Crossings.All(vertices, tris, h);
+        Mark($"repair done: {crossings.Count} pairs");
+        // Coarse cells in a remaining crossing at their last placement.
+        if (crossings.Count > 0)
+            foreach (var (ta, tb) in crossings)
+                for (int c = 0; c < 3; c++)
+                    foreach (int v in new[] { tris[3 * ta + c], tris[3 * tb + c] })
+                        if (coarseCell.TryGetValue(v, out int cell) && octree.AtBottom(v)) stuck.Add(cell);
 
         // Merging leaves the vertices of merged cells unused.
         var remap = new int[vertices.Count];
@@ -340,7 +701,7 @@ public static class DualContour
             if (remap[v] < 0) { remap[v] = used.Count; used.Add(vertices[v]); }
             tris[t] = remap[v];
         }
-        return new Result(used, tris, nx, ny, nz, h, crossings.Count, demoted);
+        return new Result(used, tris, g.Nbx, g.Nby, g.Nbz, h, crossings.Count, demoted, g.H, k, refined.Count, unresolved);
     }
 
     /// A triangle's vertices in ascending order, to recognise it after contouring again.
@@ -355,9 +716,10 @@ public static class DualContour
 
     /// Octree over the grid's cells. A node at level L covers 2^L cells per side; level 0 nodes are the
     /// grid cells themselves. Only merged cells are stored: everything else is derived from the grid.
-    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<V3> cellMin, List<int> tris, List<long> sources)
+    sealed class Octree(Grid g, Dictionary<long, (int Base, int Packed, int Count)> cells, Dictionary<long, int> coarse, HashSet<long> noMerge,
+        List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<V3> cellMin, List<double> cellSide, List<int> tris, List<long> sources)
     {
-        readonly record struct Node(int L, int I, int J, int K)
+        public readonly record struct Node(int L, int I, int J, int K)
         {
             public long Key => ((long)L << 60) | ((long)I << 40) | ((long)J << 20) | (uint)K;
             public Node Child(int bx, int by, int bz) => new(L - 1, 2 * I + bx, 2 * J + by, 2 * K + bz);
@@ -373,9 +735,12 @@ public static class DualContour
         Kind KindOf(Node n)
         {
             if (n.L == 0) return g.HasCell(n.I, n.J, n.K) && cells.ContainsKey(g.Cell(n.I, n.J, n.K)) ? Kind.Leaf : Kind.Empty;
-            if (merged.ContainsKey(n.Key)) return Kind.Leaf;
+            if (merged.ContainsKey(n.Key) || coarse.ContainsKey(n.Key)) return Kind.Leaf;
             return occupied.Contains(n.Key) ? Kind.Internal : Kind.Empty;
         }
+
+        /// The vertex of a leaf node above level 0: a merged cell or a coarse (unrefined base) cell.
+        int VertexOf(Node n) => merged.TryGetValue(n.Key, out int v) ? v : coarse[n.Key];
 
         /// Records which nodes hold surface, and merges cells bottom-up while one vertex fits within
         /// <paramref name="tolerance"/> (model units; 0 = no merging).
@@ -383,22 +748,40 @@ public static class DualContour
         {
             var level = new HashSet<Node>();
             foreach (var cell in cells.Keys)
-                level.Add(new Node(1, cell % g.Nx >> 1, cell / g.Nx % g.Ny >> 1, cell / (g.Nx * g.Ny) >> 1));
-            Span<bool> corner = stackalloc bool[8];
-            Span<int> sheet = stackalloc int[12];
+                level.Add(new Node(1, (int)(cell % g.Nx) >> 1, (int)(cell / g.Nx % g.Ny) >> 1, (int)(cell / ((long)g.Nx * g.Ny)) >> 1));
+            var coarseNodes = coarse.Keys.Select(key => new Node((int)(key >> 60), (int)(key >> 40) & 0xFFFFF, (int)(key >> 20) & 0xFFFFF, (int)key & 0xFFFFF)).ToList();
             for (int l = 1; l <= levels; l++)
             {
+                if (l == g.K) level.UnionWith(coarseNodes);
                 var parents = new HashSet<Node>();
-                foreach (var n in level)
+                var nodes = level.ToArray();
+                foreach (var n in nodes)
                 {
                     occupied.Add(n.Key);
                     if (l < levels) parents.Add(n.Parent);
-                    if (tolerance <= 0 || !TryMerge(n, tolerance, corner, sheet, out var x, out var q, out var stable)) continue;
-                    merged[n.Key] = vertices.Count;
+                }
+                // A merge reads only the level below, so this level's merges can be tried in parallel; they are
+                // recorded in the same order as a serial pass would.
+                var tries = new (bool Ok, V3 X, Qef Q, V3? Stable)[nodes.Length];
+                if (tolerance > 0)
+                    Parallel.For(0, nodes.Length, i =>
+                    {
+                        if (coarse.ContainsKey(nodes[i].Key)) return; // already a leaf
+                        Span<bool> corner = stackalloc bool[8];
+                        Span<int> sheet = stackalloc int[12];
+                        bool ok = TryMerge(nodes[i], tolerance, corner, sheet, out var x, out var q, out var stable);
+                        tries[i] = (ok, x, q, stable);
+                    });
+                for (int i = 0; i < nodes.Length; i++)
+                {
+                    var (ok, x, q, stable) = tries[i];
+                    if (!ok) continue;
+                    merged[nodes[i].Key] = vertices.Count;
                     if (stable is { } s) fallback[vertices.Count] = s;
                     vertices.Add(x);
                     quadrics.Add(q);
                     cellMin.Add(new V3(double.NaN, double.NaN, double.NaN)); // a merged vertex in a crossing is unmerged, not moved
+                    cellSide.Add(double.NaN);
                 }
                 level = parents;
             }
@@ -409,6 +792,8 @@ public static class DualContour
             x = default;
             q = default;
             stable = null;
+            // Above the base level, only cells away from refinement merge: their boundary is all on the base lattice.
+            if (n.L > g.K && noMerge.Contains(n.Key)) return false;
             // Every child must be empty or a single-vertex leaf.
             for (int c = 0; c < 8; c++)
             {
@@ -420,6 +805,7 @@ public static class DualContour
                     q.Add(quadrics[e.Base]);
                 }
                 else if (merged.TryGetValue(child.Key, out int v)) q.Add(quadrics[v]);
+                else if (coarse.TryGetValue(child.Key, out int cv)) q.Add(quadrics[cv]);
                 else if (occupied.Contains(child.Key)) return false;
             }
 
@@ -446,19 +832,20 @@ public static class DualContour
             // the surface must cross that boundary in a single closed loop. The sign test above does not
             // guarantee it (a crease can make the surface leave and re-enter through one face), and two
             // loops would pinch two fans of triangles together at the vertex.
-            if (BoundaryLoops(i0, j0, k0, size) != 1) return false;
+            bool above = n.L > g.K;
+            if (BoundaryLoops(g, i0, j0, k0, size, above ? g.Step : 1) != 1) return false;
 
             var lo = new V3(i0 * g.H, j0 * g.H, k0 * g.H);
-            x = Place(g, q, lo, size * g.H, out stable);
+            x = Place(g, q, lo, size * g.H, above ? g.Hb : g.H, out stable, out _);
             if (q.Rms(x) > tolerance) return false;
             x += g.Origin;
             if (stable is { } s) stable = s + g.Origin;
             return true;
         }
 
-        /// Number of closed loops in which the surface crosses the boundary of the cube of
-        /// <paramref name="size"/> cells at sample (i0, j0, k0), traced over the finest grid squares.
-        int BoundaryLoops(int i0, int j0, int k0, int size)
+        /// Number of closed loops in which the surface crosses the boundary of the cube of <paramref name="size"/>
+        /// finest cells at sample (i0, j0, k0), traced over squares of <paramref name="step"/> finest cells.
+        public static int BoundaryLoops(Grid g, int i0, int j0, int k0, int size, int step)
         {
             var parent = new Dictionary<long, long>();
             long Find(long e)
@@ -474,18 +861,18 @@ public static class DualContour
             {
                 int p = P(axis), q = Q(axis);
                 for (int side = 0; side <= size; side += size)
-                    for (int u = 0; u < size; u++)
-                        for (int v = 0; v < size; v++)
+                    for (int u = 0; u < size; u += step)
+                        for (int v = 0; v < size; v += step)
                         {
                             // Corners in cyclic order (u,v), (u+1,v), (u+1,v+1), (u,v+1); edge n joins corner n to n+1.
                             for (int n = 0; n < 4; n++)
                             {
                                 at[0] = i0; at[1] = j0; at[2] = k0;
-                                at[axis] += side; at[p] += u + (n is 1 or 2 ? 1 : 0); at[q] += v + (n >= 2 ? 1 : 0);
+                                at[axis] += side; at[p] += u + (n is 1 or 2 ? step : 0); at[q] += v + (n >= 2 ? step : 0);
                                 sign[n] = g.In(at[0], at[1], at[2]);
                                 // An edge is named by its lower sample and its direction.
-                                if (n == 2) at[p]--;
-                                if (n == 3) at[q]--;
+                                if (n == 2) at[p] -= step;
+                                if (n == 3) at[q] -= step;
                                 edge[n] = (((long)at[2] * g.Sy + at[1]) * g.Sx + at[0]) * 3 + (n is 0 or 2 ? p : q);
                             }
                             int crossings = 0;
@@ -519,15 +906,20 @@ public static class DualContour
             foreach (var (key, vertex) in merged) owner[vertex] = key;
             var unmerge = new HashSet<long>();
             var restore = new HashSet<int>();
-            Span<int> corner = stackalloc int[3];
-            for (int t = 0; t < tris.Count; t += 3)
+            var folded = new bool[tris.Count / 3];
+            Parallel.For(0, folded.Length, n =>
             {
-                corner[0] = tris[t]; corner[1] = tris[t + 1]; corner[2] = tris[t + 2];
-                bool suspect = false;
-                foreach (int v in corner) suspect |= owner.ContainsKey(v) || fallback.ContainsKey(v);
-                if (!suspect || Facing(corner[0], corner[1], corner[2]) >= 0) continue;
-                foreach (int v in corner)
+                int a = tris[3 * n], b = tris[3 * n + 1], c = tris[3 * n + 2];
+                bool suspect = owner.ContainsKey(a) || fallback.ContainsKey(a) || owner.ContainsKey(b) || fallback.ContainsKey(b) ||
+                               owner.ContainsKey(c) || fallback.ContainsKey(c);
+                folded[n] = suspect && Facing(a, b, c) < 0;
+            });
+            for (int t = 0; t < folded.Length; t++)
+            {
+                if (!folded[t]) continue;
+                for (int i = 0; i < 3; i++)
                 {
+                    int v = tris[3 * t + i];
                     if (owner.TryGetValue(v, out long key)) unmerge.Add(key);
                     if (fallback.ContainsKey(v)) restore.Add(v);
                 }
@@ -542,10 +934,12 @@ public static class DualContour
         }
 
         /// One step down for each of <paramref name="verts"/>: a merged cell is unmerged, a sharp placement goes back to
-        /// its stable one, a stable one to its in-cell point. Vertices already at the bottom, and vertices added by
-        /// RepairTunnels, are left alone. Returns how many changed.
-        public int Demote(HashSet<int> verts)
+        /// its stable one, a stable one to its in-cell point. A coarse (unrefined base) cell is never unmerged, as it
+        /// has no finer cells: it is demoted in place. Vertices already at the bottom are returned in
+        /// <paramref name="bottom"/>; vertices added by RepairTunnels are left alone. Returns how many changed.
+        public int Demote(HashSet<int> verts, out List<int> bottom)
         {
+            bottom = [];
             var owner = new Dictionary<int, long>();
             foreach (var (key, vertex) in merged) owner[vertex] = key;
             int changed = 0;
@@ -554,20 +948,62 @@ public static class DualContour
                 if (v >= cellMin.Count) continue;
                 if (owner.TryGetValue(v, out long key)) merged.Remove(key);
                 else if (fallback.Remove(v, out var stable)) Move(v, stable);
-                else if (InCell(g, quadrics[v], cellMin[v] - g.Origin, g.H) + g.Origin is var x && x != vertices[v]) Move(v, x);
-                else continue;
+                else if (!AtBottom(v)) Move(v, InCellOf(v));
+                else { bottom.Add(v); continue; }
                 changed++;
             }
             return changed;
         }
 
-        public void Contour() => CellProc(new Node(levels, 0, 0, 0));
+        V3 InCellOf(int v) => InCell(g, quadrics[v], cellMin[v] - g.Origin, cellSide[v], cellSide[v]) + g.Origin;
+
+        /// Is vertex v at the last step of its ladder (its in-cell point, with no merge or sharp placement to undo)?
+        public bool AtBottom(int v) =>
+            v >= cellMin.Count || (!fallback.ContainsKey(v) && (double.IsNaN(cellSide[v]) || InCellOf(v) == vertices[v]));
+
+        // Polygons found by the octree walk, in order: (a, b, c, e, source) with e = -1 for a triangle. Choosing a
+        // quad's diagonal needs field samples, so that is done for all quads in parallel afterwards.
+        readonly List<(int A, int B, int C, int E, long Source)> polygons = [];
+
+        public void Contour()
+        {
+            polygons.Clear();
+            CellProc(new Node(levels, 0, 0, 0), polygons);
+            var viaAc = new bool[polygons.Count];
+            Parallel.For(0, polygons.Count, n =>
+            {
+                var (a, b, c, e, _) = polygons[n];
+                if (e >= 0) viaAc[n] = SplitAc(a, b, c, e);
+            });
+            for (int n = 0; n < polygons.Count; n++)
+            {
+                var (a, b, c, e, source) = polygons[n];
+                if (e < 0) { tris.Add(a); tris.Add(b); tris.Add(c); sources.Add(source); continue; }
+                if (viaAc[n]) { tris.Add(a); tris.Add(b); tris.Add(c); tris.Add(a); tris.Add(c); tris.Add(e); }
+                else { tris.Add(a); tris.Add(b); tris.Add(e); tris.Add(b); tris.Add(c); tris.Add(e); }
+                sources.Add(source);
+                sources.Add(source);
+            }
+        }
+
+        /// Split quad a, b, c, e along a-c (else b-e)? Along the diagonal that lies closer to the surface, so a
+        /// crease running through the quad becomes a triangle edge rather than being cut across; but never a split
+        /// that folds a triangle over (its normal against the field's gradient) when the other split does not.
+        bool SplitAc(int a, int b, int c, int e)
+        {
+            double ac = Midpoint(a, c), be = Midpoint(b, e);
+            double viaAc = Math.Min(Facing(a, b, c), Facing(a, c, e)), viaBe = Math.Min(Facing(a, b, e), Facing(b, c, e));
+            if (viaAc < 0 && viaBe > viaAc + 0.2) ac = double.MaxValue;
+            else if (viaBe < 0 && viaAc > viaBe + 0.2) be = double.MaxValue;
+            return ac <= be;
+        }
+
 
         // Field samples taken while contouring, kept across the repair rounds, which contour the same mesh again
         // with few vertices changed. An entry is valid while none of its vertices has moved since (see Move).
         readonly Dictionary<int, int> moves = [];
-        readonly Dictionary<(int, int, int), (int, int, int, V3)> gradients = [];
-        readonly Dictionary<(int, int), (int, int, double)> midpoints = [];
+        readonly ConcurrentDictionary<(int, int, int), (int, int, int, V3)> gradients = new();
+        readonly ConcurrentDictionary<(int, int), (int, int, double)> midpoints = new();
 
         int Stamp(int v) => moves.GetValueOrDefault(v);
 
@@ -602,8 +1038,8 @@ public static class DualContour
         }
 
         // Axis d = 0, 1, 2; the other two in cyclic order, so that d = p × q.
-        static int P(int d) => (d + 1) % 3;
-        static int Q(int d) => (d + 2) % 3;
+        public static int P(int d) => (d + 1) % 3;
+        public static int Q(int d) => (d + 2) % 3;
 
         static Node ChildAt(Node n, int a0, int b0, int a1, int b1, int a2, int b2)
         {
@@ -612,10 +1048,22 @@ public static class DualContour
             return n.Child(bit[0], bit[1], bit[2]);
         }
 
-        void CellProc(Node n)
+        void CellProc(Node n, List<(int A, int B, int C, int E, long Source)> output)
         {
             if (KindOf(n) != Kind.Internal) return;
-            for (int c = 0; c < 8; c++) CellProc(n.Child(c & 1, (c >> 1) & 1, c >> 2));
+            if (n.L >= levels - 2)
+            {
+                // Near the root: walk the eight subtrees in parallel, each into its own list, and keep their order.
+                var parts = new List<(int, int, int, int, long)>[8];
+                Parallel.For(0, 8, c =>
+                {
+                    parts[c] = [];
+                    CellProc(n.Child(c & 1, (c >> 1) & 1, c >> 2), parts[c]);
+                });
+                foreach (var part in parts) output.AddRange(part);
+            }
+            else
+                for (int c = 0; c < 8; c++) CellProc(n.Child(c & 1, (c >> 1) & 1, c >> 2), output);
             int half = 1 << (n.L - 1), i0 = n.I << n.L, j0 = n.J << n.L, k0 = n.K << n.L;
             Span<Node> around = stackalloc Node[4];
             Span<int> start = stackalloc int[3];
@@ -625,7 +1073,7 @@ public static class DualContour
                 // The four faces between children across axis d.
                 for (int u = 0; u < 2; u++)
                     for (int v = 0; v < 2; v++)
-                        FaceProc(d, ChildAt(n, d, 0, p, u, q, v), ChildAt(n, d, 1, p, u, q, v));
+                        FaceProc(d, ChildAt(n, d, 0, p, u, q, v), ChildAt(n, d, 1, p, u, q, v), output);
                 // The two edges along d through the centre.
                 for (int s = 0; s < 2; s++)
                 {
@@ -635,13 +1083,13 @@ public static class DualContour
                     around[3] = ChildAt(n, d, s, p, 0, q, 1);
                     start[0] = i0; start[1] = j0; start[2] = k0;
                     start[p] += half; start[q] += half; start[d] += s * half;
-                    EdgeProc(d, around, start[0], start[1], start[2], half);
+                    EdgeProc(d, around, start[0], start[1], start[2], half, output);
                 }
             }
         }
 
         /// <paramref name="a"/> and <paramref name="b"/> share a face across <paramref name="axis"/>, a on the low side.
-        void FaceProc(int axis, Node a, Node b)
+        void FaceProc(int axis, Node a, Node b, List<(int A, int B, int C, int E, long Source)> output)
         {
             Kind ka = KindOf(a), kb = KindOf(b);
             if (ka == Kind.Empty || kb == Kind.Empty || (ka == Kind.Leaf && kb == Kind.Leaf)) return;
@@ -650,7 +1098,7 @@ public static class DualContour
                 for (int v = 0; v < 2; v++)
                     FaceProc(axis,
                         ka == Kind.Internal ? ChildAt(a, axis, 1, p, u, q, v) : a,
-                        kb == Kind.Internal ? ChildAt(b, axis, 0, p, u, q, v) : b);
+                        kb == Kind.Internal ? ChildAt(b, axis, 0, p, u, q, v) : b, output);
 
             // The shared face's extent is that of the smaller node.
             var small = a.L <= b.L ? a : b;
@@ -675,7 +1123,7 @@ public static class DualContour
                     }
                     origin.CopyTo(start);
                     start[w] += half; start[d] += s * half;
-                    EdgeProc(d, around, start[0], start[1], start[2], half);
+                    EdgeProc(d, around, start[0], start[1], start[2], half, output);
                 }
             }
         }
@@ -698,7 +1146,7 @@ public static class DualContour
 
         /// The four nodes around an edge segment along <paramref name="d"/>, counter-clockwise about +d.
         /// The segment starts at sample (i, j, k) and is <paramref name="length"/> cells long.
-        void EdgeProc(int d, ReadOnlySpan<Node> around, int i, int j, int k, int length)
+        void EdgeProc(int d, ReadOnlySpan<Node> around, int i, int j, int k, int length, List<(int A, int B, int C, int E, long Source)> output)
         {
             bool anyInternal = false;
             for (int n = 0; n < 4; n++)
@@ -724,7 +1172,7 @@ public static class DualContour
                     }
                     start[0] = i; start[1] = j; start[2] = k;
                     start[d] += s * half;
-                    EdgeProc(d, next, start[0], start[1], start[2], half);
+                    EdgeProc(d, next, start[0], start[1], start[2], half, output);
                 }
                 return;
             }
@@ -745,7 +1193,7 @@ public static class DualContour
                     var (at, packed, _) = cells[g.Cell(n.I, n.J, n.K)];
                     v = at + ((packed >> (2 * EdgeInQuadrant[d][quadrant])) & 3);
                 }
-                else v = merged[n.Key];
+                else v = VertexOf(n);
                 if (count > 0 && (poly[count - 1] == v || poly[0] == v)) continue; // a larger cell spans two quadrants
                 poly[count++] = v;
             }
@@ -753,20 +1201,7 @@ public static class DualContour
             // Wind so the normal points from inside to outside.
             if (!inside) poly[..count].Reverse();
             long source = length == 1 ? (((long)k * g.Sy + j) * g.Sx + i) * 3 + d : -1;
-            if (count == 3) { tris.Add(poly[0]); tris.Add(poly[1]); tris.Add(poly[2]); sources.Add(source); return; }
-            // Split along the diagonal that lies closer to the surface, so a crease running through
-            // the quad becomes a triangle edge rather than being cut across.
-            int a = poly[0], b = poly[1], c = poly[2], e = poly[3];
-            double ac = Midpoint(a, c), be = Midpoint(b, e);
-            // But never pick a split that folds a triangle over (its normal against the field's gradient)
-            // when the other split does not.
-            double viaAc = Math.Min(Facing(a, b, c), Facing(a, c, e)), viaBe = Math.Min(Facing(a, b, e), Facing(b, c, e));
-            if (viaAc < 0 && viaBe > viaAc + 0.2) ac = double.MaxValue;
-            else if (viaBe < 0 && viaAc > viaBe + 0.2) be = double.MaxValue;
-            if (ac <= be) { tris.Add(a); tris.Add(b); tris.Add(c); tris.Add(a); tris.Add(c); tris.Add(e); }
-            else { tris.Add(a); tris.Add(b); tris.Add(e); tris.Add(b); tris.Add(c); tris.Add(e); }
-            sources.Add(source);
-            sources.Add(source);
+            output.Add((poly[0], poly[1], poly[2], count == 4 ? poly[3] : -1, source));
         }
     }
 
@@ -777,21 +1212,37 @@ public static class DualContour
     /// strip uses u-m and m-w while the other keeps u-w.
     static void RepairTunnels(Grid g, List<V3> vertices, List<int> tris, List<long> sources)
     {
-        var byEdge = new Dictionary<(int, int), List<int>>();
-        for (int t = 0; t < sources.Count; t++)
+        // Mesh edges shared by exactly four triangles, in the order each edge first appears.
+        int nt = sources.Count;
+        var entries = new (long Key, int Pos)[3 * nt];
+        Parallel.For(0, nt, t =>
+        {
             for (int c = 0; c < 3; c++)
             {
                 int a = tris[3 * t + c], b = tris[3 * t + (c + 1) % 3];
-                var key = a < b ? (a, b) : (b, a);
-                if (!byEdge.TryGetValue(key, out var list)) byEdge[key] = list = [];
-                list.Add(t);
+                entries[3 * t + c] = (a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a, 3 * t + c);
             }
+        });
+        Array.Sort(entries);
+        var fours = new List<(int First, int U, int W, int[] Around)>();
+        for (int run = 0; run < entries.Length;)
+        {
+            int end = run + 1;
+            while (end < entries.Length && entries[end].Key == entries[run].Key) end++;
+            if (end - run == 4)
+            {
+                long key = entries[run].Key;
+                fours.Add((entries[run].Pos, (int)(key >> 32), (int)(uint)key,
+                    [entries[run].Pos / 3, entries[run + 1].Pos / 3, entries[run + 2].Pos / 3, entries[run + 3].Pos / 3]));
+            }
+            run = end;
+        }
+        fours.Sort((x, y) => x.First.CompareTo(y.First));
 
         var at = new int[3];
         var lo = new int[3];
-        foreach (var ((u, w), around) in byEdge)
+        foreach (var (_, u, w, around) in fours)
         {
-            if (around.Count != 4) continue;
             // The four source edges must be the sides of one grid square: two along each of two axes.
             int axisA = -1, axisB = -1;
             bool ok = true;
@@ -934,12 +1385,18 @@ public static class DualContour
         return e;
     }
 
-    /// The vertex for sheet number <paramref name="which"/> of cell (i, j, k), and the quadric it minimises.
-    static V3 CellVertex(Grid g, int i, int j, int k, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which, out Qef q, out V3? stable)
+    /// The vertex for sheet number <paramref name="which"/> of the cell at finest sample (i, j, k) that is
+    /// <paramref name="step"/> finest cells wide, and the quadric it minimises. <paramref name="unresolved"/>: the cell
+    /// does not resolve the surface (placement off the surface, a fit residual over 0.05 cells, or two normals more
+    /// than 90° apart); <paramref name="fellBack"/>: the placement went to the in-cell point.
+    static V3 CellVertex(Grid g, int i, int j, int k, int step, double unit, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which,
+        out Qef q, out V3? stable, out bool unresolved, out bool fellBack)
     {
         var cellMin = g.P(i, j, k);
-        double h = g.H;
+        double h = unit;
         q = default;
+        Span<V3> normals = stackalloc V3[12];
+        int count = 0;
         for (int edge = 0; edge < 12; edge++)
         {
             if (sheet[edge] != which) continue;
@@ -954,12 +1411,24 @@ public static class DualContour
                 if (g.Field.Value(mid) < 0) pin = mid; else pout = mid;
             }
             var p = (pin + pout) * 0.5;
-            q.Add(g.Field.Gradient(p, 1e-5 * h).Normalized(), p - g.Origin);
+            var n = g.Field.Gradient(p, 1e-5 * h).Normalized();
+            normals[count++] = n;
+            q.Add(n, p - g.Origin);
         }
-        var x = Place(g, q, cellMin - g.Origin, h, out stable) + g.Origin;
+        var x = Place(g, q, cellMin - g.Origin, h, h, out stable, out fellBack);
+        unresolved = fellBack || q.Rms(x) > 0.05 * h;
+        for (int a = 0; a < count && !unresolved; a++)
+            for (int b = a + 1; b < count; b++)
+                if (V3.Dot(normals[a], normals[b]) < 0) { unresolved = true; break; }
+        x += g.Origin;
         if (stable is { } s) stable = s + g.Origin;
         return x;
     }
+
+    /// <see cref="CellVertex"/> without the diagnostics.
+    static V3 CellVertex(Grid g, int i, int j, int k, int step, double unit, ReadOnlySpan<bool> inside, ReadOnlySpan<int> sheet, int which,
+        out Qef q, out V3? stable, out bool unresolved) =>
+        CellVertex(g, i, j, k, step, unit, inside, sheet, which, out q, out stable, out unresolved, out _);
 
     /// Vertex position (relative to the grid origin) for a cell at <paramref name="min"/> of side
     /// <paramref name="size"/>.
@@ -975,30 +1444,34 @@ public static class DualContour
     /// If neither answer is within <see cref="OffSurface"/> cells of the surface, the cell does not resolve the
     /// surface there and the QEF's answer cannot be trusted: the vertex goes to its <see cref="InCell"/> point, which
     /// is also the last step of the crossing repair in Mesh.
-    static V3 Place(Grid g, in Qef q, V3 min, double size, out V3? stable)
+    /// <paramref name="unit"/> is the cell size the thresholds are in: the cell's own level for a finest or coarse
+    /// cell, the base cell for a merged one. <paramref name="fellBack"/>: the in-cell point was used.
+    static V3 Place(Grid g, in Qef q, V3 min, double size, double unit, out V3? stable, out bool fellBack)
     {
-        var x = Solve(g, q, min, size, out stable);
-        if (Off(g, x) <= OffSurface * g.H) return x;
-        if (stable is { } s && Off(g, s) <= OffSurface * g.H) { stable = null; return s; }
+        fellBack = false;
+        var x = Solve(g, q, min, size, unit, out stable);
+        if (Off(g, x, unit) <= OffSurface * unit) return x;
+        if (stable is { } s && Off(g, s, unit) <= OffSurface * unit) { stable = null; return s; }
         stable = null;
-        return InCell(g, q, min, size);
+        fellBack = true;
+        return InCell(g, q, min, size, unit);
     }
 
     /// Distance estimate from <paramref name="x"/> (relative to the grid origin) to the surface: |f| / |grad f|.
     /// A field may be scaled down by any factor and stay valid, so a small gradient is not a small distance:
     /// without a usable gradient the distance is unknown, which counts as far.
-    static double Off(Grid g, V3 x)
+    static double Off(Grid g, V3 x, double unit)
     {
         var p = x + g.Origin;
         double f = Math.Abs(g.Field.Value(p));
         if (f == 0) return 0;
-        double len = g.Field.Gradient(p, 1e-5 * g.H).Length;
+        double len = g.Field.Gradient(p, 1e-5 * unit).Length;
         double d = f / len;
         return len > 0 && double.IsFinite(d) ? d : double.PositiveInfinity;
     }
 
     /// The mass point of the crossings, walked onto the surface by Newton steps that never leave the cell.
-    static V3 InCell(Grid g, in Qef q, V3 min, double size)
+    static V3 InCell(Grid g, in Qef q, V3 min, double size, double unit)
     {
         var x = ClampIn(q.Mass, min, size);
         for (int it = 0; it < 6; it++)
@@ -1006,10 +1479,10 @@ public static class DualContour
             var p = x + g.Origin;
             double f = g.Field.Value(p);
             if (f == 0) break;
-            var grad = g.Field.Gradient(p, 1e-5 * g.H);
+            var grad = g.Field.Gradient(p, 1e-5 * unit);
             double g2 = V3.Dot(grad, grad);
             // Stop on the surface by the distance estimate, not by |f|, which any valid scaling of the field shrinks.
-            if (!(g2 > 0) || !double.IsFinite(f / g2) || Math.Abs(f) / Math.Sqrt(g2) < 1e-4 * g.H) break;
+            if (!(g2 > 0) || !double.IsFinite(f / g2) || Math.Abs(f) / Math.Sqrt(g2) < 1e-4 * unit) break;
             x = ClampIn(x - grad * (f / g2), min, size);
         }
         return x;
@@ -1019,14 +1492,14 @@ public static class DualContour
         Math.Clamp(x.X, min.X, min.X + size), Math.Clamp(x.Y, min.Y, min.Y + size), Math.Clamp(x.Z, min.Z, min.Z + size));
 
     /// The QEF placement with its sharp second attempt (see Place).
-    static V3 Solve(Grid g, in Qef q, V3 min, double size, out V3? stable)
+    static V3 Solve(Grid g, in Qef q, V3 min, double size, double unit, out V3? stable)
     {
         stable = null;
-        var safe = Clamp(q.Solve(Cutoff), min, size, g.H);
+        var safe = Clamp(q.Solve(Cutoff), min, size, unit);
         if (SharpCutoff <= 0) return safe;
         double off = Math.Abs(g.Field.Value(safe + g.Origin));
-        if (off <= 0.02 * g.H) return safe;
-        var sharp = Clamp(q.Solve(SharpCutoff), min, size, g.H);
+        if (off <= 0.02 * unit) return safe;
+        var sharp = Clamp(q.Solve(SharpCutoff), min, size, unit);
         if (Math.Abs(g.Field.Value(sharp + g.Origin)) >= 0.5 * off) return safe;
         stable = safe;
         return sharp;

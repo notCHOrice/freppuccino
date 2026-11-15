@@ -26,6 +26,7 @@ public class FrepMeshCommand : Command
     // Remembered between runs, like Rhino's own commands.
     static int resolution = 128;
     static double simplify = 0.03;
+    static int refine = 2;
     static bool quads;
 
     public override string EnglishName => "FrepMesh";
@@ -63,11 +64,14 @@ public class FrepMeshCommand : Command
         if (rc != Result.Success) return rc;
         rc = RhinoGet.GetNumber("Simplification tolerance in cells (0 = uniform density)", true, ref simplify, 0, 1);
         if (rc != Result.Success) return rc;
+        rc = RhinoGet.GetInteger("Refine: extra levels where the grid is too coarse for thin features (0 = off)", true, ref refine, 0, 3);
+        if (rc != Result.Success) return rc;
         rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower, and it reshapes the surface slightly)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
 
         var watch = Stopwatch.StartNew();
-        var result = DualContour.Mesh(field, resolution, simplify);
+        // The finest cell stays well above the document's tolerance.
+        var result = DualContour.Mesh(field, resolution, simplify, refine, 16 * doc.ModelAbsoluteTolerance);
         if (result.Triangles.Count == 0)
         {
             RhinoApp.WriteLine("FrepMesh: the F-reps produced no surface at this resolution.");
@@ -135,6 +139,16 @@ public class FrepMeshCommand : Command
         RhinoApp.WriteLine(
             $"FrepMesh: {built.Count} blend(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
             $"{quality}, {watch.ElapsedMilliseconds} ms.");
+        if (refine > 0)
+        {
+            string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
+            RhinoApp.WriteLine(
+                $"FrepMesh: refine {result.Refine}{lowered}: {result.RefinedCells} cells sampled at {result.MinCellSize:0.####} {doc.ModelUnitSystem}" +
+                (result.Unresolved > 0 ? $"; {result.Unresolved} of those still too thin to resolve" : "") + ".");
+        }
+        if (result.UnsafeSamples > 0)
+            RhinoApp.WriteLine($"FrepMesh: {result.UnsafeSamples} sample(s) changed sign when evaluated again: the field changes faster " +
+                "than its Lipschitz bound there, so skipping samples was unsafe. Those cells were refined.");
         return Result.Success;
     }
 
