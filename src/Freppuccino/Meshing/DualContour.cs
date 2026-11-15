@@ -506,7 +506,10 @@ public static class DualContour
             Mark($"deep closure: {deep.Count} deep, {deepNear.Count} interface, {g.Deep.Count} deep blocks");
             var built = Build(g, bases, refined, near, forbidden, tolerance, true, deep, deepNear, out _, out _, out _, out var more, out bool over);
             if (over) return null;
-            mesh = built with { UnsafeSamples = unsafeSamples };
+            // A deeper pass is kept only if it leaves no more crossing pairs than the best mesh so far (the level mesh
+            // to begin with): extra depth must not trade validity for accuracy.
+            if (built.Crossings <= mesh.Crossings) mesh = built with { UnsafeSamples = unsafeSamples };
+            else Mark($"deep pass {pass}: {built.Crossings} crossing pairs, against {mesh.Crossings}; kept the previous mesh");
             more.ExceptWith(deep);
             if (more.Count == 0) break;
             deep.UnionWith(more);
