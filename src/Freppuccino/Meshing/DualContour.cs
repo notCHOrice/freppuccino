@@ -17,8 +17,13 @@ namespace Freppuccino.Meshing;
 /// neighbour, which shows up as a self-intersection. Quads are split along the diagonal that does not
 /// fold, and merges or sharp vertex placements that still end up in a folded triangle are undone.
 ///
-/// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed.
-/// Self-intersection is not ruled out, only what the fold test catches.
+/// Crossings: where a wedge or skin is thinner than a cell, the grid under-resolves it and vertices that each
+/// look right can still make triangles pass through each other. A vertex whose placement is off the surface goes
+/// to an in-cell point, and the vertices of triangles that actually cross (<see cref="Crossings"/>) are demoted
+/// step by step and the mesh contoured again until none cross; <see cref="Result.Crossings"/> reports any left.
+///
+/// To be refined: nothing is sampled finer than the grid, so features thinner than a cell can be missed, and
+/// the repair makes such places valid, not accurate (a thin skin becomes blocky).
 ///
 /// Tunnel faces: when both cells sharing a four-crossing face route all four crossings through one
 /// sheet, the surface passes through that face as two strips joining the same two cell vertices, so
@@ -27,7 +32,10 @@ namespace Freppuccino.Meshing;
 /// wide, can remain; <see cref="Defects"/> counts them and FrepMesh reports them.
 public static class DualContour
 {
-    public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize);
+    /// Crossings: triangle pairs that still pass through each other (see <see cref="Meshing.Crossings"/>), from a check
+    /// of the whole output; 0 unless the repair in Mesh ran out of vertices to demote or of rounds.
+    /// Demoted: vertex placements the repair stepped down.
+    public sealed record Result(List<V3> Vertices, List<int> Triangles, int Nx, int Ny, int Nz, double CellSize, int Crossings = 0, int Demoted = 0);
 
     const int Block = 8;
 
@@ -39,6 +47,14 @@ public static class DualContour
 
     /// Cutoff for the sharper second attempt in Place; 0 disables it.
     public static double SharpCutoff = 1e-3;
+
+    /// A placement farther than this from the surface, in finest cells (|f| / |grad f|), means the cell under-resolves
+    /// the surface there (a wedge or skin thinner than a cell): the vertex goes to its in-cell point (see Place).
+    public static double OffSurface = 0.1;
+
+    /// Most rounds of the crossing repair (see Mesh). Each round demotes at least one vertex one step, and every
+    /// vertex has a few steps at most, so the repair ends anyway; this bounds the time.
+    public static int RepairRounds = 16;
 
     /// Counts topology defects in a result: edges not shared by exactly two triangles, and vertices whose
     /// surrounding triangles do not form a single closed fan (a pinched vertex passes the edge count).
@@ -116,6 +132,8 @@ public static class DualContour
             mass += o.mass; N += o.N;
         }
 
+        public readonly V3 Mass => mass * (1.0 / N);
+
         readonly V3 Times(V3 v) => new(xx * v.X + xy * v.Y + xz * v.Z, xy * v.X + yy * v.Y + yz * v.Z, xz * v.X + yz * v.Y + zz * v.Z);
 
         /// Minimiser, solved about the mass point. Small eigenvalues are dropped, so on a flat or gently
@@ -187,13 +205,14 @@ public static class DualContour
 
         // 2. One vertex per surface sheet in each cell that has a sign change.
         //    Packed = 2 bits per cell edge: which of the cell's vertices that edge's polygon uses.
-        var slabs = new (List<(int Cell, int Packed, int Count)> Cells, List<V3> Points, List<Qef> Qefs, List<V3?> Stable)[nz];
+        var slabs = new (List<(int Cell, int Packed, int Count)> Cells, List<V3> Points, List<Qef> Qefs, List<V3?> Stable, List<V3> Mins)[nz];
         Parallel.For(0, nz, k =>
         {
             var cells = new List<(int, int, int)>();
             var points = new List<V3>();
             var qefs = new List<Qef>();
             var stables = new List<V3?>();
+            var mins = new List<V3>();
             Span<bool> s = stackalloc bool[8];
             Span<int> sheet = stackalloc int[12];
             for (int j = 0; j < ny; j++)
@@ -214,10 +233,11 @@ public static class DualContour
                         points.Add(CellVertex(g, i, j, k, s, sheet, c, out var q, out var stable));
                         qefs.Add(q);
                         stables.Add(stable);
+                        mins.Add(g.P(i, j, k));
                     }
                     cells.Add((g.Cell(i, j, k), packed, count));
                 }
-            slabs[k] = (cells, points, qefs, stables);
+            slabs[k] = (cells, points, qefs, stables, mins);
         });
 
         var vertices = new List<V3>();
@@ -225,7 +245,9 @@ public static class DualContour
         var index = new Dictionary<int, (int Base, int Packed, int Count)>();
         // Vertices placed by the sharp solve (see Place), with the stable position to fall back to.
         var fallback = new Dictionary<int, V3>();
-        foreach (var (cells, points, qefs, stables) in slabs)
+        // Per vertex, its cell's minimum corner, for the in-cell point that is the last step of the crossing repair.
+        var cellMin = new List<V3>();
+        foreach (var (cells, points, qefs, stables, mins) in slabs)
         {
             int at = vertices.Count;
             foreach (var (cell, packed, count) in cells)
@@ -237,24 +259,76 @@ public static class DualContour
                 if (stables[v] is { } stable) fallback[vertices.Count + v] = stable;
             vertices.AddRange(points);
             quadrics.AddRange(qefs);
+            cellMin.AddRange(mins);
         }
 
         // 3. Polygons.
         var tris = new List<int>();
         var sources = new List<long>(); // per triangle: the finest grid edge its polygon was built around, or -1
-        var octree = new Octree(g, index, vertices, quadrics, fallback, tris, sources);
+        var octree = new Octree(g, index, vertices, quadrics, fallback, cellMin, tris, sources);
         octree.Build(simplify * h);
-        octree.Contour();
-        // A merged cell's one vertex can fold the triangles that join it to finer neighbours along a
-        // crease, and so can a vertex the sharp solve moved. Undo those and contour again; a few rounds
-        // settle it.
-        for (int round = 0; round < 8 && octree.UndoFolded() > 0; round++)
+        void ContourAll()
         {
             tris.Clear();
             sources.Clear();
             octree.Contour();
+            // A merged cell's one vertex can fold the triangles that join it to finer neighbours along a
+            // crease, and so can a vertex the sharp solve moved. Undo those and contour again; a few rounds
+            // settle it.
+            for (int round = 0; round < 8 && octree.UndoFolded() > 0; round++)
+            {
+                tris.Clear();
+                sources.Clear();
+                octree.Contour();
+            }
+            RepairTunnels(g, vertices, tris, sources);
         }
-        RepairTunnels(g, vertices, tris, sources);
+        ContourAll();
+
+        // 4. Crossings. Where the grid under-resolves the surface (wedges and skins thinner than a cell), vertices
+        //    that each look fine can still make triangles pass through each other. Demote every vertex of a
+        //    crossing pair one step (a merged cell is unmerged, a sharp placement goes back to its stable one, a
+        //    stable one to its in-cell point) and contour again. Demotion only goes down that ladder, so it ends.
+        //    After the first round only the triangles that changed are checked, against everything near them (two
+        //    unchanged triangles were already checked); a clean incremental round is confirmed by a full check.
+        var crossings = Crossings.All(vertices, tris, h);
+        bool full = true;
+        int demoted = 0;
+        for (int round = 0; round < RepairRounds; round++)
+        {
+            if (crossings.Count == 0)
+            {
+                if (full) break;
+                crossings = Crossings.All(vertices, tris, h);
+                full = true;
+                if (crossings.Count == 0) break;
+            }
+            var bad = new HashSet<int>();
+            foreach (var (ta, tb) in crossings)
+                for (int c = 0; c < 3; c++) { bad.Add(tris[3 * ta + c]); bad.Add(tris[3 * tb + c]); }
+            var before = vertices.ToArray();
+            var oldKeys = new HashSet<(int, int, int)>();
+            for (int t = 0; t < tris.Count; t += 3) oldKeys.Add(Key(tris, t));
+            int changed = octree.Demote(bad);
+            if (changed == 0) break; // nothing left to demote: the result reports what remains
+            demoted += changed;
+            ContourAll();
+            // Changed triangles: new ones, and those with a vertex that moved (by the demotion or by UndoFolded).
+            var candidates = new List<int>();
+            for (int t = 0; t < tris.Count; t += 3)
+            {
+                bool same = oldKeys.Contains(Key(tris, t));
+                for (int c = 0; c < 3 && same; c++)
+                {
+                    int v = tris[t + c];
+                    same = v < before.Length && before[v] == vertices[v];
+                }
+                if (!same) candidates.Add(t / 3);
+            }
+            crossings = Crossings.Involving(vertices, tris, h, candidates);
+            full = false;
+        }
+        if (!full) crossings = Crossings.All(vertices, tris, h);
 
         // Merging leaves the vertices of merged cells unused.
         var remap = new int[vertices.Count];
@@ -266,12 +340,22 @@ public static class DualContour
             if (remap[v] < 0) { remap[v] = used.Count; used.Add(vertices[v]); }
             tris[t] = remap[v];
         }
-        return new Result(used, tris, nx, ny, nz, h);
+        return new Result(used, tris, nx, ny, nz, h, crossings.Count, demoted);
+    }
+
+    /// A triangle's vertices in ascending order, to recognise it after contouring again.
+    static (int, int, int) Key(List<int> tris, int t)
+    {
+        int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+        if (a > b) (a, b) = (b, a);
+        if (b > c) (b, c) = (c, b);
+        if (a > b) (a, b) = (b, a);
+        return (a, b, c);
     }
 
     /// Octree over the grid's cells. A node at level L covers 2^L cells per side; level 0 nodes are the
     /// grid cells themselves. Only merged cells are stored: everything else is derived from the grid.
-    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<int> tris, List<long> sources)
+    sealed class Octree(Grid g, Dictionary<int, (int Base, int Packed, int Count)> cells, List<V3> vertices, List<Qef> quadrics, Dictionary<int, V3> fallback, List<V3> cellMin, List<int> tris, List<long> sources)
     {
         readonly record struct Node(int L, int I, int J, int K)
         {
@@ -314,6 +398,7 @@ public static class DualContour
                     if (stable is { } s) fallback[vertices.Count] = s;
                     vertices.Add(x);
                     quadrics.Add(q);
+                    cellMin.Add(new V3(double.NaN, double.NaN, double.NaN)); // a merged vertex in a crossing is unmerged, not moved
                 }
                 level = parents;
             }
@@ -454,6 +539,26 @@ public static class DualContour
                 fallback.Remove(v);
             }
             return unmerge.Count + restore.Count;
+        }
+
+        /// One step down for each of <paramref name="verts"/>: a merged cell is unmerged, a sharp placement goes back to
+        /// its stable one, a stable one to its in-cell point. Vertices already at the bottom, and vertices added by
+        /// RepairTunnels, are left alone. Returns how many changed.
+        public int Demote(HashSet<int> verts)
+        {
+            var owner = new Dictionary<int, long>();
+            foreach (var (key, vertex) in merged) owner[vertex] = key;
+            int changed = 0;
+            foreach (int v in verts)
+            {
+                if (v >= cellMin.Count) continue;
+                if (owner.TryGetValue(v, out long key)) merged.Remove(key);
+                else if (fallback.Remove(v, out var stable)) vertices[v] = stable;
+                else if (InCell(g, quadrics[v], cellMin[v] - g.Origin, g.H) + g.Origin is var x && x != vertices[v]) vertices[v] = x;
+                else continue;
+                changed++;
+            }
+            return changed;
         }
 
         public void Contour() => CellProc(new Node(levels, 0, 0, 0));
@@ -828,7 +933,51 @@ public static class DualContour
     /// field says it is at least twice as close. The field, not the fit, is the judge, so a sharp solve
     /// that slid away on a smooth patch is never preferred. When the sharp answer is taken,
     /// <paramref name="stable"/> returns the other one, to fall back to if the vertex folds a triangle.
+    ///
+    /// If neither answer is within <see cref="OffSurface"/> cells of the surface, the cell does not resolve the
+    /// surface there and the QEF's answer cannot be trusted: the vertex goes to its <see cref="InCell"/> point, which
+    /// is also the last step of the crossing repair in Mesh.
     static V3 Place(Grid g, in Qef q, V3 min, double size, out V3? stable)
+    {
+        var x = Solve(g, q, min, size, out stable);
+        if (Off(g, x) <= OffSurface * g.H) return x;
+        if (stable is { } s && Off(g, s) <= OffSurface * g.H) { stable = null; return s; }
+        stable = null;
+        return InCell(g, q, min, size);
+    }
+
+    /// Distance estimate from <paramref name="x"/> (relative to the grid origin) to the surface: |f| / |grad f|.
+    static double Off(Grid g, V3 x)
+    {
+        var p = x + g.Origin;
+        double f = Math.Abs(g.Field.Value(p));
+        if (f == 0) return 0;
+        double len = g.Field.Gradient(p, 1e-5 * g.H).Length;
+        return len > 1e-9 ? f / len : f;
+    }
+
+    /// The mass point of the crossings, walked onto the surface by Newton steps that never leave the cell.
+    static V3 InCell(Grid g, in Qef q, V3 min, double size)
+    {
+        var x = ClampIn(q.Mass, min, size);
+        for (int it = 0; it < 6; it++)
+        {
+            var p = x + g.Origin;
+            double f = g.Field.Value(p);
+            if (Math.Abs(f) < 1e-4 * g.H) break;
+            var grad = g.Field.Gradient(p, 1e-5 * g.H);
+            double g2 = V3.Dot(grad, grad);
+            if (g2 < 1e-12) break;
+            x = ClampIn(x - grad * (f / g2), min, size);
+        }
+        return x;
+    }
+
+    static V3 ClampIn(V3 x, V3 min, double size) => new(
+        Math.Clamp(x.X, min.X, min.X + size), Math.Clamp(x.Y, min.Y, min.Y + size), Math.Clamp(x.Z, min.Z, min.Z + size));
+
+    /// The QEF placement with its sharp second attempt (see Place).
+    static V3 Solve(Grid g, in Qef q, V3 min, double size, out V3? stable)
     {
         stable = null;
         var safe = Clamp(q.Solve(Cutoff), min, size, g.H);

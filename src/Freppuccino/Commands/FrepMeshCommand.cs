@@ -113,6 +113,11 @@ public class FrepMeshCommand : Command
         var (badEdges, badVertices) = Defects(mesh);
         string quality = $"{(closed ? "closed" : "OPEN")}, " +
             (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
+        // The mesher removes triangles that pass through each other by stepping vertices back to safer positions; if
+        // it ran out of steps, say so rather than present the mesh as clean. (Counted on the triangle mesh, before
+        // any QuadRemesh, which makes its own surface.)
+        if (result.Crossings > 0)
+            quality += $", {result.Crossings} SELF-INTERSECTING triangle pair(s){(quads ? " before QuadRemesh" : "")} (try a higher resolution)";
 
         var attributes = doc.CreateDefaultAttributes();
         attributes.Name = "FrepMesh";
