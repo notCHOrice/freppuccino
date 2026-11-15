@@ -9,6 +9,10 @@ public interface IGpuBackend : IDisposable
     /// Draws program.VertexCount vertices (triangle list). `uniforms` (std140, <= Uniforms.MaxBytes) bound to both stages; may be empty.
     /// False if nothing was drawn (unsupported pass, compile failure already logged, etc.). Never throws.
     bool Draw(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms);
+
+    /// Why <paramref name="program"/> can't be drawn (shader / pipeline compile failure, never retried), or null if it
+    /// hasn't failed (yet). Lets the caller tell a broken program from a pass it just can't draw in.
+    string? CompileError(ShaderSource program);
 }
 
 public static class GpuBackends

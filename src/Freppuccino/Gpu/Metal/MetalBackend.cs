@@ -30,6 +30,7 @@ public sealed unsafe class MetalBackend : IGpuBackend
     IntPtr device, dss;                                                  // device borrowed (identity only); dss owned
     readonly Dictionary<string, (IntPtr vs, IntPtr fs)> functions = [];  // per ShaderSource.Hash; zeros = compile failed
     readonly Dictionary<(string, MetalPassFormat), IntPtr> psos = [];    // zero = build failed
+    readonly Dictionary<string, string> errors = [];                     // per ShaderSource.Hash: why it failed
     bool loggedUnavailable, loggedException;
 
     public bool Draw(DisplayPipeline pipeline, ShaderSource program, ReadOnlySpan<byte> uniforms)
@@ -85,7 +86,11 @@ public sealed unsafe class MetalBackend : IGpuBackend
             Send(desc, selSetSampleCount, fmt.Samples);
             IntPtr error = IntPtr.Zero;
             pso = Send(device, selNewPso, desc, &error);
-            if (pso == IntPtr.Zero) Log($"pipeline state failed ({program.Hash[..8]}, {fmt}): {ErrorText(error)}");
+            if (pso == IntPtr.Zero)
+            {
+                errors[program.Hash] = $"Metal pipeline state: {ErrorText(error)}";
+                Log($"pipeline state failed ({program.Hash[..8]}, {fmt}): {ErrorText(error)}");
+            }
             return psos[key] = pso;
         }
         finally
@@ -109,6 +114,7 @@ public sealed unsafe class MetalBackend : IGpuBackend
         catch (ShaderCompileException ex)
         {
             Release(ref vs); Release(ref fs);
+            errors[program.Hash] = ex.Message;
             Log($"shader {program.Hash[..8]} failed: {ex.Message}");
             return default;
         }
@@ -156,10 +162,12 @@ public sealed unsafe class MetalBackend : IGpuBackend
     {
         foreach (var k in psos.Keys.ToList()) { var p = psos[k]; Release(ref p); }
         foreach (var (vs0, fs0) in functions.Values) { var vs = vs0; var fs = fs0; Release(ref vs); Release(ref fs); }
-        psos.Clear(); functions.Clear();
+        psos.Clear(); functions.Clear(); errors.Clear();
         Release(ref dss);
         device = IntPtr.Zero;
     }
+
+    public string? CompileError(ShaderSource program) => errors.GetValueOrDefault(program.Hash);
 
     public void Dispose() => ReleaseAll();
 

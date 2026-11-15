@@ -47,6 +47,16 @@ const DEFORM_FIELDS = {
   y_axis: vec3('repeat: optional lattice Y direction (default [0,1,0])'),
 }
 
+const FN_PARAMS = {
+  type: 'object',
+  additionalProperties: { type: 'number' },
+  description: 'param values by name, e.g. {"cell": 8}; omitted params keep their value (or declared default)',
+}
+const FN_LIPSCHITZ = {
+  type: 'number',
+  description: 'Lipschitz scale L > 0 (default 1): sdf / L must change by ≤ 1 per unit or the render gets holes; raise it if so',
+}
+
 const TYPES = ['sphere', 'box', 'ellipsoid', 'cylinder', 'cone', 'torus', 'pyramid']
 
 function tool(name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ToolDef {
@@ -193,6 +203,50 @@ export const TOOLS: ToolDef[] = [
       size: { type: 'number', description: 'image size in px (default 512, max 1024)' },
     },
   ),
+  // FFunction: user SDF code clipped by a box (Ai/AiFunctions.cs; guide: skill freppuccino-ffunction).
+  tool(
+    'create_function',
+    'Adds a function primitive: your SDF code (GLSL subset, entry float sdf(vec3 p), p in the box frame in model units) clipped by ' +
+      'a box (center, size = full lengths, x_axis?, y_axis?). Field = max(sdf(p) / lipschitz, box). Rejected with diagnostics if the ' +
+      'code has errors (unless allow_errors). Load the freppuccino-ffunction skill first. Returns ref, ok, diagnostics, params.',
+    {
+      name: { type: 'string', description: 'short snake_case name' },
+      center: SHAPE_FIELDS.center,
+      size: vec3('clip box full lengths [x,y,z]; nothing outside it is drawn'),
+      x_axis: SHAPE_FIELDS.x_axis,
+      y_axis: SHAPE_FIELDS.y_axis,
+      code: { type: 'string', description: 'DSL source: param float name = default; ... float sdf(vec3 p) { ... }' },
+      params: FN_PARAMS,
+      lipschitz: FN_LIPSCHITZ,
+      color: SHAPE_FIELDS.color,
+      allow_errors: { type: 'boolean', description: 'create even if the code has errors (it is not drawn until fixed)' },
+    },
+    ['center', 'size', 'code'],
+  ),
+  tool(
+    'set_function_code',
+    "Replaces a function's code. Param values carry over by name. With errors nothing changes (diagnostics in the error) " +
+      'unless allow_errors. Returns ok, diagnostics, params, hash.',
+    {
+      target: { type: 'string', description: 'function ref' },
+      code: { type: 'string' },
+      allow_errors: { type: 'boolean' },
+    },
+    ['target', 'code'],
+  ),
+  tool(
+    'get_function',
+    "Reads a function: code, params (name, default, value), lipschitz, clip box, ok, diagnostics, hash, and shader_error if the " +
+      'viewport shader failed to compile.',
+    { target: { type: 'string', description: 'function ref' } },
+    ['target'],
+  ),
+  tool(
+    'set_function_params',
+    "Sets a function's param values and/or lipschitz without changing its code (no recompile).",
+    { target: { type: 'string', description: 'function ref' }, params: FN_PARAMS, lipschitz: FN_LIPSCHITZ },
+    ['target'],
+  ),
   tool(
     'load_skill',
     'Reads a skill: guidance and proven recipes for a kind of object or task. Load the matching ones before building.',
@@ -271,6 +325,13 @@ function summarize(name: string, args: Record<string, unknown>, result: Record<s
       return `${result.item} → ${((result.parents as string[]) ?? []).join(', ') || 'root'}`
     case 'delete':
       return ((result.deleted as string[]) ?? []).join(', ') || 'nothing'
+    case 'create_function':
+      return `function ${result.ref}${result.ok === false ? ' (errors)' : ''}`
+    case 'set_function_code':
+    case 'set_function_params':
+      return `${result.ref}${result.ok === false ? ' (errors)' : ''}`
+    case 'get_function':
+      return `${args.target}${result.ok === false ? ' (errors)' : ''}${result.shader_error ? ' (shader error)' : ''}`
     case 'transform':
       return ((result.transformed as string[]) ?? []).join(', ')
     default:

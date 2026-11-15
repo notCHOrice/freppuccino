@@ -4,6 +4,7 @@ using Freppuccino.Csg;
 using Freppuccino.Meshing;
 using Freppuccino.Scene;
 using Freppuccino.Sdf;
+using Freppuccino.UserFn;
 using Rhino.Display;
 using Rhino.Geometry;
 
@@ -29,12 +30,28 @@ public static class FrepShaderGen
     /// Sphere: 1 row (xyz center, w s). Ellipsoid: 3 rows (origin, unit X, unit Y; Z = X × Y).
     /// Every other kind: 4 rows. The fourth is the third row of A⁻¹ and σ_min(A), so a sheared or off-axis-scaled
     /// primitive (SDF.Linear.*) still raymarches. Rigid primitives pass the frame axes and σ_min = 1, which is the old toLocal.
-    public static int Rows(SdKind kind) => kind switch
+    /// User (FFunction): the 4 box rows (b in .w) + ceil((1 + params) / 4) rows: L, then param values in declaration order.
+    public static int Rows(SdPrimitive p) => p.Kind switch
     {
         SdKind.Sphere => 1,
         SdKind.Ellipsoid => 3,
+        SdKind.User => 4 + (UserData(p).Length + 3) / 4,
         _ => 4,
     };
+
+    /// FFunction data rows' payload: L, then each param value (declared default if missing).
+    static double[] UserData(SdPrimitive p)
+    {
+        var fn = p.Fn;
+        var prms = fn?.Program?.Params ?? [];
+        var data = new double[1 + prms.Length];
+        data[0] = fn?.L ?? 1;
+        for (int i = 0; i < prms.Length; i++) data[1 + i] = i < fn!.Values.Length ? fn.Values[i] : prms[i].Default;
+        return data;
+    }
+
+    /// GLSL name of a compiled FFunction (one definition per distinct program).
+    static string UserFnName(UserFnProgram program) => "ufn_" + program.Hash;
     /// Twist: (start, rate), (dir, extent). Bend: (start, length), (dir, angle), (bend normal, min radius). Repeat: see WarpUniforms.
     static int WarpRows(FrepOp op) => op switch { FrepOp.Twist => 2, FrepOp.Bend => 3, FrepOp.Repeat => 5, _ => 0 };
     static int KRows(int nodes) => (nodes + 3) / 4;
@@ -54,8 +71,9 @@ public static class FrepShaderGen
     static readonly Dictionary<string, ShaderSource> cache = [];
 
     /// GLSL call evaluating one primitive whose rows start at <paramref name="row"/> at point <paramref name="p"/>.
-    static string Term(SdKind kind, int row, string p)
+    static string Term(SdPrimitive prim, int row, string p)
     {
+        var kind = prim.Kind;
         if (kind == SdKind.Sphere) return $"sdSphere({p}, u.data[{row}])";
         string o = $"u.data[{row}]", x = $"u.data[{row + 1}]", y = $"u.data[{row + 2}]";
         if (kind == SdKind.Ellipsoid)
@@ -70,10 +88,26 @@ public static class FrepShaderGen
             SdKind.Cylinder => $"sdCappedCylinder({q}, {o}.w, {x}.w)",
             SdKind.Cone => $"sdCappedCone({q}, {o}.w, {x}.w, {y}.w)",
             SdKind.Pyramid => $"sdPyramidScaled({q}, {o}.w, {x}.w)",
+            SdKind.User => UserTerm(prim, row + 4, q, $"vec3({o}.w, {x}.w, {y}.w)"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
         return $"({sd}) * {z}.w";
     }
+
+    /// max(f(q) / L, sdBox(q, b)): the box always clips. Data rows from <paramref name="row"/>: .x = L, then params.
+    static string UserTerm(SdPrimitive prim, int row, string q, string b)
+    {
+        var program = prim.Fn?.Program ?? throw new ArgumentException("FFunction without a compiled program", nameof(prim));
+        string Slot(int i) => $"u.data[{row + i / 4}].{"xyzw"[i % 4]}";
+        var args = string.Concat(Enumerable.Range(1, program.Params.Length).Select(i => ", " + Slot(i)));
+        return $"max({UserFnName(program)}({q}{args}) / {Slot(0)}, sdBox({q}, {b}))";
+    }
+
+    /// Per-prim row shapes + warp ops + k count. Two programs with equal Layout read the same uniform bytes the same way
+    /// (ShaderConduit falls back to the last good program only then).
+    static string Layout(IReadOnlyList<SdPrimitive> prims, IEnumerable<FrepOp> warps, int ks) =>
+        string.Join(",", prims.Select(p => p.Kind == SdKind.User ? $"U{Rows(p)}" : p.Kind.ToString())) + "|" +
+        string.Join(",", warps) + "|" + ks;
 
     const string Vertex = """
         #version 450
@@ -99,7 +133,7 @@ public static class FrepShaderGen
         {
             index[ids[i]] = i;
             primRow[i] = row;
-            row += Rows(prims[i].Kind);
+            row += Rows(prims[i]);
         }
         // Prim colors right after the prim rows.
         int cBase = row;
@@ -130,6 +164,7 @@ public static class FrepShaderGen
         var color = new StringBuilder();
         void Both(string line) { map.Append(line); color.Append(line); }
         var memo = new Dictionary<(FrepOperand, int), string?>();
+        var fns = new SortedDictionary<string, UserFnProgram>(StringComparer.Ordinal); // FFunctions reached, by hash
         int contexts = 1;
         static string Suffix(int c) => c == 0 ? "" : $"_{c}";
         static string Point(int c) => c == 0 ? "p" : $"q{c}";
@@ -145,8 +180,13 @@ public static class FrepShaderGen
         string? EvalPrim(Guid id, int c)
         {
             if (!index.TryGetValue(id, out var i)) return null;
+            if (prims[i].Kind == SdKind.User)
+            {
+                if (prims[i].Fn?.Program is not { } program) return null; // doesn't compile: missing leaf
+                fns[program.Hash] = program;
+            }
             var v = $"p{i}{Suffix(c)}";
-            var term = Term(prims[i].Kind, primRow[i], Point(c));
+            var term = Term(prims[i], primRow[i], Point(c));
             map.Append($"    float {v} = {term};\n");
             color.Append($"    vec4 {v} = vec4(unpackColor(u.data[{cBase + i / 4}].{"xyzw"[i % 4]}), {term});\n");
             return v;
@@ -224,36 +264,22 @@ public static class FrepShaderGen
         }
 
         int dataRows = kBase + KRows(ks.Count);
-        var key = dataRows + "\n" + map + "\n" + color;
+        var key = dataRows + "\n" + string.Join(",", fns.Keys) + "\n" + map + "\n" + color;
         if (!cache.TryGetValue(key, out var src))
-            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, map.ToString(), color.ToString()));
+        {
+            var userFns = string.Concat(fns.Values.Select(f => f.Glsl(UserFnName(f)).TrimEnd() + "\n"));
+            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, userFns, map.ToString(), color.ToString()))
+            {
+                Layout = Layout(prims, warps.Select(id => tree.Find(id)!.Op), ks.Count),
+            };
+        }
         return (src, ks, warps);
     }
 
-    static string Fragment(int dataRows, string map, string color) => $$"""
-        #version 450
-        layout(location = 0) in vec2 vNdc;
-        layout(location = 0) out vec4 outColor;
-        layout(std140, set = 0, binding = 0) uniform Frame
-        {
-            vec4 camPos;     // xyz eye; w = 1 perspective, 0 parallel
-            vec4 camX;       // xyz unit right
-            vec4 camY;       // xyz unit up
-            vec4 camZ;       // xyz unit view direction; w = near
-            vec4 frustum;    // left, right, bottom, top (camera coords, at near)
-            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
-            vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
-            vec4 zebraCfg;   // FZebra on unions: x = stripe count (0 = off), y = 1 vertical / 0 horizontal, z/w = colors (0xRRGGBB)
-            // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
-            // then node blend k's (4 per row)
-            // sphere: 1 row  (xyz center, w radius s)
-            // others: 3 rows (xyz origin, w P.x), (xyz unit X axis, w P.y), (xyz unit Y axis, w P.z); Z = X × Y
-            //   box b = P; torus t = P.xy; cylinder h, r; cone h, r1, r2; ellipsoid r = P; pyramid h, s
-            vec4 data[{{dataRows}}];
-        } u;
-
-        const vec3 GREY = vec3(0.78);
-
+    /// Inline copies of what UserFnLibrary.Glsl provides (smin smax dot2 sdBox sdTorus sdCappedCylinder sdCappedCone
+    /// sdEllipsoid sdPyramid sdPyramidScaled). TODO(integrator): delete once UserFnLibrary.Glsl holds them (agent A); this guard
+    /// only exists so the shader works while the UserFn stub's library is empty.
+    const string InlineLibrary = """
         // IQ quadratic smooth min/max; k = blend distance, 0 = hard.
         float smin(float a, float b, float k)
         {
@@ -263,42 +289,7 @@ public static class FrepShaderGen
         }
         float smax(float a, float b, float k) { return -smin(-a, -b, k); }
 
-        vec3 unpackColor(float packed)
-        {
-            // round, not +0.5: above 2^23 floats step by 1, so 0xFFFFFF + 0.5 rounds up to 0x1000000 (white came out black).
-            uint c = uint(round(packed));
-            return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
-        }
-        // Same ops over vec4(rgb, d). Colors mix with IQ's smin weight, so they fade across the blend region
-        // (|a - b| < k) and are pure away from it; k = 0 picks the nearer operand's color.
-        vec4 cmin(vec4 a, vec4 b, float k)
-        {
-            if (k <= 0.0) return a.w < b.w ? a : b;
-            float h = clamp(0.5 + 0.5 * (b.w - a.w) / k, 0.0, 1.0);
-            return vec4(mix(b.rgb, a.rgb, h), smin(a.w, b.w, k));
-        }
-        vec4 cmax(vec4 a, vec4 b, float k)
-        {
-            if (k <= 0.0) return a.w > b.w ? a : b;
-            float h = clamp(0.5 + 0.5 * (a.w - b.w) / k, 0.0, 1.0);
-            return vec4(mix(b.rgb, a.rgb, h), smax(a.w, b.w, k));
-        }
-        vec4 csub(vec4 a, vec4 b, float k) { return vec4(a.rgb, smax(a.w, -b.w, k)); } // cut faces keep the base's color
         float dot2(vec2 v) { return dot(v, v); }
-        vec3 toLocal(vec3 p, vec4 o, vec4 x, vec4 y)
-        {
-            vec3 d = p - o.xyz;
-            return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, cross(x.xyz, y.xyz)));
-        }
-        // x, y, z are the rows of A⁻¹. For a rigid frame they are the frame axes, so this matches toLocal.
-        vec3 toLocalAffine(vec3 p, vec4 o, vec4 x, vec4 y, vec4 z)
-        {
-            vec3 d = p - o.xyz;
-            return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, z.xyz));
-        }
-
-        // IQ, https://iquilezles.org/articles/distfunctions/ (all in local space, Y-up)
-        float sdSphere(vec3 p, vec4 s) { return length(p - s.xyz) - s.w; }
         float sdBox(vec3 p, vec3 b)
         {
             vec3 q = abs(p) - b;
@@ -354,6 +345,73 @@ public static class FrepShaderGen
             return max(d, -p.y); // inside: floor may be closer than the side faces; outside (d > 0): unchanged
         }
         float sdPyramidScaled(vec3 p, float h, float s) { return sdPyramid(p / s, h / s) * s; } // base side s
+        """;
+
+    /// The shared GLSL library (also callable from user code): UserFnLibrary.Glsl once it exists, else the inline copies.
+    static string Library => UserFnLibrary.Glsl.Length > 0 ? UserFnLibrary.Glsl : InlineLibrary;
+
+    static string Fragment(int dataRows, string userFns, string map, string color) => $$"""
+        #version 450
+        layout(location = 0) in vec2 vNdc;
+        layout(location = 0) out vec4 outColor;
+        layout(std140, set = 0, binding = 0) uniform Frame
+        {
+            vec4 camPos;     // xyz eye; w = 1 perspective, 0 parallel
+            vec4 camX;       // xyz unit right
+            vec4 camY;       // xyz unit up
+            vec4 camZ;       // xyz unit view direction; w = near
+            vec4 frustum;    // left, right, bottom, top (camera coords, at near)
+            vec4 params;     // x = silhouette inset (screen px), y = eps per unit t, z = eps const, w unused
+            vec4 bound;      // xyz center, w radius: sphere enclosing the (warped) scene + smooth-union growth; w <= 0 = empty
+            vec4 zebraCfg;   // FZebra on unions: x = stripe count (0 = off), y = 1 vertical / 0 horizontal, z/w = colors (0xRRGGBB)
+            // prims, then prim colors (packed 0xRRGGBB floats, 4 per row), then warp rows (see opTwist/opBend/opRepeat),
+            // then node blend k's (4 per row)
+            // sphere: 1 row  (xyz center, w radius s)
+            // ellipsoid: 3 rows (xyz origin, w r.x), (xyz unit X axis, w r.y), (xyz unit Y axis, w r.z); Z = X × Y
+            // others: 4 rows (xyz origin, w P.x), (xyz A⁻¹ row 0, w P.y), (xyz A⁻¹ row 1, w P.z), (xyz A⁻¹ row 2, w σ_min(A))
+            //   box b = P; torus t = P.xy; cylinder h, r; cone h, r1, r2; pyramid h, s; function b = P (clip box)
+            // function: + ceil((1 + params) / 4) rows: L, then param values (declaration order), packed xyzw
+            vec4 data[{{dataRows}}];
+        } u;
+
+        const vec3 GREY = vec3(0.78);
+
+        {{Library}}
+        vec3 unpackColor(float packed)
+        {
+            // round, not +0.5: above 2^23 floats step by 1, so 0xFFFFFF + 0.5 rounds up to 0x1000000 (white came out black).
+            uint c = uint(round(packed));
+            return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0;
+        }
+        // Same ops over vec4(rgb, d). Colors mix with IQ's smin weight, so they fade across the blend region
+        // (|a - b| < k) and are pure away from it; k = 0 picks the nearer operand's color.
+        vec4 cmin(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w < b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (b.w - a.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smin(a.w, b.w, k));
+        }
+        vec4 cmax(vec4 a, vec4 b, float k)
+        {
+            if (k <= 0.0) return a.w > b.w ? a : b;
+            float h = clamp(0.5 + 0.5 * (a.w - b.w) / k, 0.0, 1.0);
+            return vec4(mix(b.rgb, a.rgb, h), smax(a.w, b.w, k));
+        }
+        vec4 csub(vec4 a, vec4 b, float k) { return vec4(a.rgb, smax(a.w, -b.w, k)); } // cut faces keep the base's color
+        vec3 toLocal(vec3 p, vec4 o, vec4 x, vec4 y)
+        {
+            vec3 d = p - o.xyz;
+            return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, cross(x.xyz, y.xyz)));
+        }
+        // x, y, z are the rows of A⁻¹. For a rigid frame they are the frame axes, so this matches toLocal.
+        vec3 toLocalAffine(vec3 p, vec4 o, vec4 x, vec4 y, vec4 z)
+        {
+            vec3 d = p - o.xyz;
+            return vec3(dot(d, x.xyz), dot(d, y.xyz), dot(d, z.xyz));
+        }
+
+        // IQ, https://iquilezles.org/articles/distfunctions/ (all in local space, Y-up)
+        float sdSphere(vec3 p, vec4 s) { return length(p - s.xyz) - s.w; }
 
         // Domain warps: return the point to evaluate the child at; lip = local Lipschitz bound (child distance gets divided by it).
         // Twist: a = (line start, rate rad/unit), d = (unit dir, extent = child radius around the axis, clamps the bound).
@@ -404,6 +462,8 @@ public static class FrepShaderGen
             vec3 i = clamp(round(toLocal(p, o, x, y) / max(s, vec3(1e-9))), lo.xyz, hi.xyz) * s;
             return p - x.xyz * i.x - y.xyz * i.y - cross(x.xyz, y.xyz) * i.z;
         }
+        // FFunctions (user code, see UserFn/), one per distinct program.
+        {{userFns}}
         float map(vec3 p)
         {
         {{map}}    return d;
@@ -515,6 +575,10 @@ public static class FrepShaderGen
             u.Vec4(rx.X, rx.Y, rx.Z, v.Y)
              .Vec4(ry.X, ry.Y, ry.Z, v.Z)
              .Vec4(rz.X, rz.Y, rz.Z, lip);
+            if (kind != SdKind.User) continue;
+            var d = UserData(prim);
+            double D(int i) => i < d.Length ? d[i] : 0;
+            for (int i = 0; i < d.Length; i += 4) u.Vec4(D(i), D(i + 1), D(i + 2), D(i + 3));
         }
         var cs = scene.Colors;
         double C(int i) => i < cs.Count ? PackColor(cs[i]) : 0;
@@ -551,7 +615,7 @@ public static class FrepShaderGen
         return p.Kind switch
         {
             SdKind.Sphere => Math.Abs(v.X),
-            SdKind.Box => new Vector3d(v.X, v.Y, v.Z).Length,
+            SdKind.Box or SdKind.User => new Vector3d(v.X, v.Y, v.Z).Length, // User: the clip box
             SdKind.Torus => Math.Abs(v.X) + Math.Abs(v.Y),
             SdKind.Cylinder => Math.Sqrt(v.X * v.X + v.Y * v.Y),
             SdKind.Cone => Math.Sqrt(v.X * v.X + Math.Max(v.Y * v.Y, v.Z * v.Z)),

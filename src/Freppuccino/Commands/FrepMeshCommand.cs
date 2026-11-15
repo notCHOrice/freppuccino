@@ -160,6 +160,14 @@ public class FrepMeshCommand : Command
                 z = basis.Z;
                 if (SdfTransforms.TryMetrics(basis, out _, out _, out _, out var sigmaMin, out _)) lip = sigmaMin;
             }
+            if (kind == SdKind.User)
+            {
+                // Scene already drops FFunctions that don't compile; skipping here keeps that a missing leaf too.
+                if (prim.Fn?.Program is not { } program) continue;
+                var u = program.Params.Select((prm, j) => j < prim.Fn.Values.Length ? prim.Fn.Values[j] : prm.Default).ToArray();
+                index[scene.Ids[i]] = field.AddUser(V(frame.Origin), V(x), V(y), V(p), new UserField(program.Cpu, u, prim.Fn.L), V(z), lip);
+                continue;
+            }
             var fieldKind = kind switch
             {
                 SdKind.Sphere => FieldKind.Sphere,
@@ -210,7 +218,7 @@ public class FrepMeshCommand : Command
 
         var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
         for (int i = 0; i < scene.Primitives.Count; i++)
-            if (!referenced.Contains(FrepOperand.Object(scene.Ids[i]))) field.AddRoot(FieldRef.Primitive(i));
+            if (!referenced.Contains(FrepOperand.Object(scene.Ids[i])) && index.TryGetValue(scene.Ids[i], out var fi)) field.AddRoot(FieldRef.Primitive(fi));
         foreach (var n in tree.Nodes)
             if (nodeRef[n.Id] is { } r && !referenced.Contains(FrepOperand.Node(n.Id))) field.AddRoot(r);
         return field;
