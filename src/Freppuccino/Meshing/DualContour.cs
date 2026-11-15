@@ -114,6 +114,11 @@ public static class DualContour
     static readonly System.Diagnostics.Stopwatch clock = new();
     static void Mark(string what) => Trace?.Invoke($"  [{clock.ElapsedMilliseconds,6} ms] {what}");
 
+    /// The current Mesh call's progress callback. Thread-static: it is set on the calling thread only, so stage lines
+    /// come from that thread, between stages, and never from inside a parallel loop.
+    [ThreadStatic] static Action<string>? progress;
+    static void Say(string stage) => progress?.Invoke(stage);
+
     /// Counts topology defects in a result: edges not shared by exactly two triangles, and vertices whose
     /// surrounding triangles do not form a single closed fan (a pinched vertex passes the edge count).
     public static (int Edges, int Vertices) Defects(Result mesh)
@@ -389,7 +394,17 @@ public static class DualContour
     /// <paramref name="refine"/> = extra levels (0 to 3) where the base grid under-resolves the field: such cells, and
     /// enough of their neighbours to join them consistently, are sampled at cells of 1 / 2^refine (see MeshAt).
     /// <paramref name="minCell"/> = the finest cell may not be smaller than this (model units); refine is lowered to fit.
-    public static Result Mesh(FrepField field, int resolution, double simplify = 0, int refine = 0, double minCell = 0)
+    /// <paramref name="onProgress"/>, if given, is called on the calling thread with a short line as each stage starts
+    /// (sampling, refining, building, repair rounds, deep passes, retries); it does not change the result.
+    public static Result Mesh(FrepField field, int resolution, double simplify = 0, int refine = 0, double minCell = 0, Action<string>? onProgress = null)
+    {
+        var outer = progress;
+        progress = onProgress;
+        try { return MeshWithProgress(field, resolution, simplify, refine, minCell); }
+        finally { progress = outer; }
+    }
+
+    static Result MeshWithProgress(FrepField field, int resolution, double simplify, int refine, double minCell)
     {
         var (bmin, bmax) = field.Bounds();
         var size = bmax - bmin;
@@ -402,8 +417,13 @@ public static class DualContour
         for (; ; k--)
         {
             Result? result;
-            int e = k > 0 ? Math.Clamp(ExtraDepth, 0, 3) : 0;
-            while (e > 0 && h / (1 << (k + e)) < minCell) e--;
+            int DepthAt(int kk)
+            {
+                int d = kk > 0 ? Math.Clamp(ExtraDepth, 0, 3) : 0;
+                while (d > 0 && h / (1 << (kk + d)) < minCell) d--;
+                return d;
+            }
+            int e = DepthAt(k);
             // Over budget: fewer deep levels first (a fresh grid, as positions and caches depend on the depth), then a
             // lower Refine level.
             for (result = null; result == null && e >= 0; e--)
@@ -412,6 +432,9 @@ public static class DualContour
                 catch (BudgetExceeded) when (k > 0) { result = null; }
                 // Thrown inside a parallel loop it arrives wrapped; only a budget overrun is a retry, nothing else.
                 catch (AggregateException ae) when (k > 0 && ae.Flatten().InnerExceptions.All(x => x is BudgetExceeded)) { result = null; }
+                if (result == null)
+                    Say($"refine {k}, extra depth {e} hit a mesher resource limit (memory, cells or cache): retrying at refine " +
+                        (e > 0 ? $"{k}, extra depth {e - 1}" : $"{k - 1}, extra depth {DepthAt(k - 1)}"));
             }
             if (result != null) return result;
         }
@@ -426,6 +449,7 @@ public static class DualContour
         if (k > 0) g.CentreCap = MemoryBudget / Grid.CentreBytes / 4;
         int nbx = g.Nbx, nby = g.Nby, nbz = g.Nbz, sx = nbx + 1, sy = nby + 1, sz = nbz + 1;
         var f = g.F;
+        Say($"sampling the field on the base grid: {nbx} x {nby} x {nbz} cells of {h:0.####}" + (k > 0 ? $" (refine {k}, extra depth {e})" : ""));
 
         // 1. Base samples. |field| never exceeds the distance to the surface (see FrepField), so a block of
         //    samples whose centre is farther from the surface than the block's radius has no sign change:
@@ -483,16 +507,19 @@ public static class DualContour
         {
             // 3. Close the refined set (k > 0 only): see Close.
             var near = new HashSet<int>();
+            if (k > 0) Say($"refining {refined.Count} cells to level {k}");
             if (k > 0 && !Close(g, refined, near, bases, ref unsafeSamples)) return null;
             Mark($"closure: {refined.Count} refined, {near.Count} interface, {g.Blocks.Count} blocks");
 
             bool last = restart >= RefineRestarts;
+            Say(k == 0 ? "building the mesh" : $"building the mesh, pass {restart + 1}");
             var mesh = Build(g, bases, refined, near, forbidden, simplify * h, last, NoDeep, NoDeep, out var stuck, out var missCells, out var missMerged,
                 out var deepCandidates, out bool over);
             if (over) return null;
             if (k == 0) return mesh;
             // A coarse cell still in a crossing at its last placement: refine it too and build again.
             bool again = mesh.Crossings > 0 && stuck.Count > 0 && restart < RefineRestarts;
+            int offSurface = 0;
             // Output triangles off the surface at a coarse or merged vertex: refine those cells, stop those merges.
             // A pass runs only if it changes something (a cell joins the refined set or a merge is forbidden).
             if (mesh.ProbeFailures > 0 && accuracyPass < AccuracyPasses && restart < RefineRestarts)
@@ -500,7 +527,15 @@ public static class DualContour
                 int before = refined.Count + forbidden.Count;
                 refined.UnionWith(missCells);
                 forbidden.UnionWith(missMerged);
-                if (refined.Count + forbidden.Count > before) { again = true; accuracyPass++; }
+                offSurface = refined.Count + forbidden.Count - before;
+                if (offSurface > 0) { again = true; accuracyPass++; }
+            }
+            if (again)
+            {
+                var why = new List<string>();
+                if (offSurface > 0) why.Add($"{offSurface} cell(s) off the surface");
+                if (mesh.Crossings > 0 && stuck.Count > 0) why.Add($"{stuck.Count} cell(s) stuck in a self-intersection");
+                Say($"pass {restart + 1}: {string.Join(", ", why)}; building again");
             }
             if (!again)
             {
@@ -542,8 +577,10 @@ public static class DualContour
         long reserved = Bytes(levelMesh);
         for (int pass = 0; pass < DeepPasses; pass++)
         {
+            Say($"sampling {g.E} level(s) deeper around {deep.Count} cell(s), deep pass {pass + 1}");
             if (!CloseDeep(g, refined, near, bases, deep, deepNear, ref unsafeSamples, reserved)) return null;
             Mark($"deep closure: {deep.Count} deep, {deepNear.Count} interface, {g.Deep.Count} deep blocks");
+            Say($"building the mesh with {deep.Count} deeper cells, deep pass {pass + 1}");
             var built = Build(g, bases, refined, near, forbidden, tolerance, true, deep, deepNear, out _, out _, out _, out var more, out bool over, reserved);
             if (over) return null;
             // A deeper pass is kept only if it leaves no more crossing pairs than the best mesh so far (the level mesh
@@ -552,6 +589,7 @@ public static class DualContour
             else
             {
                 rejected++;
+                Say($"deep pass {pass + 1} discarded: it left {built.Crossings} self-intersecting pair(s), against {mesh.Crossings}");
                 Mark($"deep pass {pass}: {built.Crossings} crossing pairs, against {mesh.Crossings}; kept the previous mesh");
             }
             reserved = Bytes(mesh); // the mesh kept so far is retained for the next pass
@@ -1256,6 +1294,7 @@ public static class DualContour
                 full = true;
                 if (crossings.Count == 0) break;
             }
+            Say($"removing self-intersections: {crossings.Count} pair(s){(round > 0 ? " among the changed triangles" : "")}, round {round + 1}");
             var bad = new HashSet<int>();
             foreach (var (ta, tb) in crossings)
             {

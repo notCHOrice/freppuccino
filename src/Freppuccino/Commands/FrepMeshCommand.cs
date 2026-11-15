@@ -28,10 +28,25 @@ public class FrepMeshCommand : Command
     static double simplify = 0.03;
     static int refine = 2;
     static bool quads;
+    // Progress lines pump Rhino's message loop (RhinoApp.Wait) so they paint during the run; this keeps a second
+    // FrepMesh from starting inside the first while it does.
+    static bool running;
 
     public override string EnglishName => "FrepMesh";
 
     protected override Result RunCommand(RhinoDoc doc, RunMode mode)
+    {
+        if (running)
+        {
+            RhinoApp.WriteLine("FrepMesh: already running; wait for it to finish.");
+            return Result.Nothing;
+        }
+        running = true;
+        try { return Run(doc); }
+        finally { running = false; }
+    }
+
+    Result Run(RhinoDoc doc)
     {
         var scene = FrepScene.Get(doc);
         if (scene.Count == 0)
@@ -70,8 +85,15 @@ public class FrepMeshCommand : Command
         if (rc != Result.Success) return rc;
 
         var watch = Stopwatch.StartNew();
-        // The finest cell stays well above the document's tolerance.
-        var result = DualContour.Mesh(field, resolution, simplify, refine, 16 * doc.ModelAbsoluteTolerance);
+        // Stage lines while it runs, timed from the start of this run; RhinoApp.Wait paints each one as it is written.
+        void Stage(string what)
+        {
+            RhinoApp.WriteLine($"FrepMesh: [{watch.Elapsed.TotalSeconds:0.0} s] {what}");
+            RhinoApp.Wait();
+        }
+        // The finest cell stays well above the document's tolerance. The field and roots are snapshots taken above,
+        // so document changes while the lines paint do not reach the mesher.
+        var result = DualContour.Mesh(field, resolution, simplify, refine, 16 * doc.ModelAbsoluteTolerance, Stage);
         if (result.Triangles.Count == 0)
         {
             RhinoApp.WriteLine("FrepMesh: the F-reps produced no surface at this resolution.");
@@ -95,6 +117,7 @@ public class FrepMeshCommand : Command
         string faces = $"{mesh.Faces.Count} triangles";
         if (quads)
         {
+            Stage("remeshing to quads with QuadRemesh");
             var parameters = new QuadRemeshParameters
             {
                 TargetQuadCount = Math.Max(200, mesh.Faces.Count / 2),
@@ -111,6 +134,7 @@ public class FrepMeshCommand : Command
             else RhinoApp.WriteLine("FrepMesh: QuadRemesh produced nothing; keeping the triangle mesh.");
         }
 
+        Stage("checking the mesh and adding it to the document");
         // Our own check on the mesh being added, whichever pass produced it: it also catches pinched
         // vertices, which an edge-based test such as Mesh.IsManifold passes.
         bool closed = mesh.IsClosed;
