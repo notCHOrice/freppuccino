@@ -43,6 +43,8 @@ public static class FrepCarriers
             Sync(doc);
         };
         FrepTrees.Changed += _ => dirty = true;
+        Rhino.Commands.Command.EndCommand += (_, e) => { if (e.Document is { } d) Restore(d); };
+        RhinoApp.Idle += (_, _) => { if (restore.Count > 0 && RhinoDoc.ActiveDoc is { } d && !Rhino.Commands.Command.InCommand()) Restore(d); };
         RhinoDoc.AddRhinoObject += (_, _) => dirty = true;
         RhinoDoc.DeleteRhinoObject += (_, _) => dirty = true;
         RhinoDoc.UndeleteRhinoObject += (_, _) => dirty = true;
@@ -218,6 +220,11 @@ public static class FrepCarriers
         // the change, whichever root is the leaf's primary).
         foreach (var i in instances)
             if (moved.Contains(i.Root) && moving.Contains(i.Object)) skip.Add(i.Object);
+        // Such a leaf whose primary root did NOT move is still moved by Rhino (it's in the selection): its real brep must
+        // go back to its primary instance once the transform is done (sol #149).
+        if (!X(x, out var xi)) xi = Transform.Identity;
+        foreach (var obj in skip)
+            if (primary.TryGetValue(obj, out var p) && !moved.Contains(p.Root)) restore.Add((doc.RuntimeSerialNumber, obj, xi));
 
         // Derived real geometry, once per object, by primary ownership: leaves whose primary instance is in a moved root.
         foreach (var (obj, inst) in primary)
@@ -247,6 +254,29 @@ public static class FrepCarriers
             doc.Objects.ModifyAttributes(r.Id, a, true);
         }
         return skip;
+    }
+
+    static bool X(Transform x, out Transform inverse) => x.TryGetInverse(out inverse);
+
+    /// Leaves Rhino moved that must return to their primary instance: (doc, object, X⁻¹).
+    static readonly List<(uint Doc, Guid Obj, Transform Undo)> restore = [];
+
+    /// After the transforming command: inside its undo record when it is still open, so one Undo covers everything;
+    /// otherwise (gumball drags) on Idle in an undo record of its own.
+    static void Restore(RhinoDoc doc)
+    {
+        if (restore.Count == 0) return;
+        var items = restore.Where(r => r.Doc == doc.RuntimeSerialNumber).ToList();
+        restore.RemoveAll(r => r.Doc == doc.RuntimeSerialNumber);
+        uint record = doc.UndoRecordingIsActive ? 0 : doc.BeginUndoRecord("Keep shared shape");
+        foreach (var (_, obj, inv) in items)
+            if (doc.Objects.FindId(obj) is { } o)
+            {
+                var g = o.Geometry.Duplicate();
+                if (g.Transform(inv)) doc.Objects.Replace(obj, g, true);
+            }
+        if (record != 0) doc.EndUndoRecord(record);
+        doc.Views.Redraw();
     }
 
     static IEnumerable<FrepNode> Subtree(FrepTree tree, int id)
