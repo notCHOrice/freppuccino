@@ -38,6 +38,8 @@ public static class OperationKind
     public const string Twist = "twist";
     public const string Bend = "bend";
     public const string Repeat = "repeat";
+    /// One child, a Repeat. K fillets every copy (0 = sharp). Not a combine op.
+    public const string Blend = "blend";
 }
 
 /// <summary>
@@ -145,14 +147,18 @@ public sealed record SetColorRequest(string Id, string Color, bool Preview = fal
 /// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);
 
+/// Insert a blend node (k = 0) directly above a Repeat. Its slider fillets the copies.
+public sealed record BlendRepeatRequest(string Id);
+
 /// Edit an existing operation node. Preview = live drag tick (no undo); the next non-preview edit ends the gesture as one undo step.
 public sealed record SetOperationRequest(string Id, string Op, double K, bool Preview = false);
 
 /// Edit one param of a warp node (FrepOps.ParamNames). Preview semantics as SetOperationRequest.
 public sealed record SetNodeParamRequest(string Id, string Name, double Value, bool Preview = false);
 
-/// Delete operation nodes nothing else uses.
-public sealed record DeleteNodesRequest(string[] Ids);
+/// Delete operation nodes or primitives. Without <see cref="Deep"/>, a node's children take its place.
+/// With <see cref="Deep"/>, the node and every node and primitive under it are removed.
+public sealed record DeleteNodesRequest(string[] Ids, bool Deep = false);
 
 /// AI agent tool call (Ai/AiTools.cs); answered with an AiToolResultMessage carrying the same CallId.
 public sealed record AiToolRequest(string CallId, string Tool, JsonElement? Args = null);

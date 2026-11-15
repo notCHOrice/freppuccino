@@ -1,4 +1,4 @@
-import { ArrowUpDown, Trash2 } from 'lucide-react'
+import { ArrowUpDown, Trash2, Ungroup } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { ParamSlider } from '@/components/param-slider'
 import { ColorField } from '@/components/color-field'
 import { CodeView } from '@/components/code-view'
 import { send, useHost } from '@/bridge/host'
-import type { AllowedCommand, DeformKind, OperationKind, SceneNode } from '@/bridge/protocol'
+import type { AllowedCommand, DeformKind, Id, OperationKind, SceneNode } from '@/bridge/protocol'
 import { DEFORMS, OPERATIONS, PRIMITIVES, displayParams, isDeform, typeLabel } from '@/lib/scene'
 
 /** Bottom half of the panel; what it shows depends on the selection (pick order). */
@@ -22,16 +22,18 @@ export function Inspector(props: { selected: SceneNode[]; labels: Map<string, st
       <>
         {one.kind === 'primitive' ? (
           <PrimitiveSection key={one.id} node={one} labels={labels} />
+        ) : one.op === 'blend' ? (
+          <BlendSection key={one.id} node={one} labels={labels} />
         ) : isDeform(one.op) ? (
-          <DeformSection key={one.id} node={one} labels={labels} roots={roots} />
+          <DeformSection key={one.id} node={one} labels={labels} />
         ) : (
-          <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} roots={roots} />
+          <CombineSection key={one.id} operands={one.children ?? []} labels={labels} existing={one} />
         )}
-        <DeformButtons />
+        <DeformButtons repeatId={one.op === 'repeat' ? one.id : undefined} />
       </>
     )
   const canCombine = selected.length === 2 && selected.every((n) => roots.has(n.id))
-  if (canCombine) return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} roots={roots} />
+  if (canCombine) return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
   return (
     <Section title="Combine">
       <p className="type-small text-muted-foreground">Select exactly two top-level nodes to combine them.</p>
@@ -56,22 +58,13 @@ function Section(props: { title: string; badge?: string; children: React.ReactNo
 
 function CreateSection() {
   return (
-    <>
-      <Section title="Create">
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
-          {Object.values(PRIMITIVES).map((p) => (
-            <CommandTile key={p.command} label={p.label} icon={p.icon} command={p.command} />
-          ))}
-        </div>
-      </Section>
-      <div className="mx-4 h-px bg-border" />
-      <Section title="View">
-        <p className="type-small text-muted-foreground">Select exactly two top-level nodes to combine them; blend is per operation.</p>
-        <Button variant="secondary" onClick={() => send({ type: 'runCommand', command: 'Freppuccino' })}>
-          <BrandIcon name="preview" /> F-rep display mode
-        </Button>
-      </Section>
-    </>
+    <Section title="Create">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
+        {Object.values(PRIMITIVES).map((p) => (
+          <CommandTile key={p.command} label={p.label} icon={p.icon} command={p.command} />
+        ))}
+      </div>
+    </Section>
   )
 }
 
@@ -212,17 +205,34 @@ function PrimitiveSection(props: { node: SceneNode; labels: Map<string, string> 
           onCommit={(v) => commit(p.key, v)}
         />
       ))}
+      <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [node.id] })}>
+        <Trash2 /> Delete
+      </Button>
     </Section>
   )
 }
 
 // ── ≥ 2 objects / nodes: new operation; or one operation node: edit it ──
 
-function CombineSection(props: { operands: SceneNode[]; labels: Map<string, string>; roots: Set<string>; existing?: SceneNode }) {
-  const { labels, existing, roots } = props
+/** Split unwraps the node and leaves its children. Delete removes the node and everything under it. */
+function NodeActions(props: { id: Id }) {
+  return (
+    <div className="flex gap-2">
+      <Button variant="outline" className="flex-1" onClick={() => send({ type: 'deleteNodes', ids: [props.id] })}>
+        <Ungroup /> Split
+      </Button>
+      <Button variant="outline" className="flex-1" onClick={() => send({ type: 'deleteNodes', ids: [props.id], deep: true })}>
+        <Trash2 /> Delete
+      </Button>
+    </div>
+  )
+}
+
+function CombineSection(props: { operands: SceneNode[]; labels: Map<string, string>; existing?: SceneNode }) {
+  const { labels, existing } = props
   const units = useHost((s) => s.settings.units)
   const [swapped, setSwapped] = useState(false)
-  const existingOp = isDeform(existing?.op) ? undefined : existing?.op
+  const existingOp = existing?.op === 'union' || existing?.op === 'subtract' || existing?.op === 'intersect' ? existing.op : undefined
   const [op, setOp] = useState<OperationKind>(existingOp ?? 'union')
   const [k, setK] = useState(existing?.k ?? 5)
 
@@ -337,11 +347,7 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
       />
 
       {existing ? (
-        roots.has(existing.id) && (
-          <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [existing.id] })}>
-            <Trash2 /> Delete
-          </Button>
-        )
+        <NodeActions id={existing.id} />
       ) : (
         <Button onClick={() => send({ type: 'applyOperation', operands: operands.map((o) => o.id), op, k })}>
           Apply {OPERATIONS[op].label.toLowerCase()}
@@ -353,8 +359,8 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
 
 // ── One deform node: its params ──
 
-function DeformSection(props: { node: SceneNode; labels: Map<string, string>; roots: Set<string> }) {
-  const { node, labels, roots } = props
+function DeformSection(props: { node: SceneNode; labels: Map<string, string> }) {
+  const { node, labels } = props
   const units = useHost((s) => s.settings.units)
   const params = displayParams(node)
   const isAngle = node.op !== 'repeat'
@@ -406,35 +412,106 @@ function DeformSection(props: { node: SceneNode; labels: Map<string, string>; ro
           onCommit={(v) => commit(p.key, v)}
         />
       ))}
-      {roots.has(node.id) && (
-        <Button variant="outline" onClick={() => send({ type: 'deleteNodes', ids: [node.id] })}>
-          <Trash2 /> Delete
-        </Button>
-      )}
+      <NodeActions id={node.id} />
     </Section>
   )
 }
 
-/** Runs FTwist / FBend / FRepeat on the selection (they then ask for the line / box). */
-function DeformButtons() {
+/** Blend node above a Repeat. The slider is the same one a union uses; it fillets every copy. */
+function BlendSection(props: { node: SceneNode; labels: Map<string, string> }) {
+  const { node, labels } = props
+  const child = node.children?.[0]
+  return (
+    <Section title={labels.get(node.id) ?? ''} badge="Blend" icon={<BrandIcon name="blend" className="size-6" />}>
+      {child && <Operand node={child} label={labels.get(child.id)} role="Child" />}
+      <BlendSlider id={node.id} k={node.k ?? 0} />
+      <NodeActions id={node.id} />
+    </Section>
+  )
+}
+
+function BlendSlider(props: { id: Id; k: number }) {
+  const units = useHost((s) => s.settings.units)
+  const [k, setK] = useState(props.k)
+  const [dragging, setDragging] = useState(false)
+  const [pending, setPending] = useState<number | null>(null)
+  if (!dragging && pending === null && k !== props.k) setK(props.k)
+  if (!dragging && pending !== null && Math.abs((props.k ?? 0) - pending) < 1e-6) setPending(null)
+
+  const live = useRef({ timer: 0, k: props.k, previewed: false })
+  const sendK = (value: number, preview: boolean) => {
+    setPending(value)
+    send({ type: 'setOperation', id: props.id, op: 'blend', k: value, preview })
+  }
+  const preview = (value: number) => {
+    const l = live.current
+    l.k = value
+    if (l.timer) return
+    l.timer = window.setTimeout(() => {
+      l.timer = 0
+      l.previewed = true
+      sendK(l.k, true)
+    }, PREVIEW_MS)
+  }
+  const commit = (value: number) => {
+    const l = live.current
+    clearTimeout(l.timer)
+    l.timer = 0
+    setDragging(false)
+    if (l.previewed || value !== props.k) sendK(value, false)
+    l.previewed = false
+  }
+  useEffect(() => {
+    const l = live.current
+    return () => {
+      clearTimeout(l.timer)
+      if (l.previewed) send({ type: 'setOperation', id: props.id, op: 'blend', k: l.k })
+    }
+  }, [props.id])
+
+  return (
+    <ParamSlider
+      label="Blend radius"
+      units={k === 0 ? 'sharp' : units}
+      value={k}
+      max={20}
+      onChange={(v) => {
+        setK(v)
+        setDragging(true)
+        preview(v)
+      }}
+      onCommit={(v) => {
+        setK(v)
+        commit(v)
+      }}
+    />
+  )
+}
+
+/** Runs FTwist / FBend / FRepeat on the selection (they then ask for the line / box).
+ *  A Repeat also gets Blend, which inserts a blend node above that repeat. */
+function DeformButtons(props: { repeatId?: Id }) {
   return (
     <Section title="Deform">
       <div className="grid grid-cols-[repeat(auto-fill,minmax(72px,1fr))] gap-2">
         {(Object.keys(DEFORMS) as DeformKind[]).map((kind) => (
           <CommandTile key={kind} {...DEFORMS[kind]} />
         ))}
+        {props.repeatId && (
+          <CommandTile label="Blend" icon="blend" onClick={() => send({ type: 'blendRepeat', id: props.repeatId! })} />
+        )}
       </div>
     </Section>
   )
 }
 
 /** Icon + label button that runs a Rhino command (Create / Deform grids). */
-function CommandTile(props: { label: string; icon: BrandIconName; command: AllowedCommand }) {
+function CommandTile(props: { label: string; icon: BrandIconName; command?: AllowedCommand; onClick?: () => void }) {
   return (
     <button
       type="button"
-      title={props.command}
-      onClick={() => send({ type: 'runCommand', command: props.command })}
+      title={props.command ?? props.label}
+      onClick={props.onClick ?? (() => props.command && send({ type: 'runCommand', command: props.command }))}
       className="group flex flex-col items-center gap-1 rounded-md border border-input bg-card px-1 pt-2 pb-1.5 transition-[background-color,translate,box-shadow] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px"
     >
       <BrandIcon name={props.icon} className="size-7 transition-transform group-hover:-translate-y-0.5" />

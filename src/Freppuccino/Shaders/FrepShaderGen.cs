@@ -162,6 +162,8 @@ public static class FrepShaderGen
         // map: float distances. color: the same DAG over vec4(rgb, d) (same variable names), so the shaded color follows the blend.
         var map = new StringBuilder();
         var color = new StringBuilder();
+        var helpers = new StringBuilder();
+        var repeatFn = new HashSet<int>();
         void Both(string line) { map.Append(line); color.Append(line); }
         var memo = new Dictionary<(FrepOperand, int), string?>();
         var fns = new SortedDictionary<string, UserFnProgram>(StringComparer.Ordinal); // FFunctions reached, by hash
@@ -232,6 +234,20 @@ public static class FrepShaderGen
                 return v;
             }
 
+            // Blend sits above a Repeat and fillets its copies. The Repeat node itself stays a hard warp.
+            if (n.Op == FrepOp.Blend)
+            {
+                if (n.Operands.Length == 0) return null;
+                var only = n.Operands[0];
+                if (only.IsNode && tree.Find(only.NodeId) is { Op: FrepOp.Repeat, Hidden: false } rep
+                    && warpRow.TryGetValue(rep.Id, out var rr) && rep.Operands.Length > 0)
+                {
+                    if (!EmitRepeat(n, rep, rr, c, v)) return null;
+                    return v;
+                }
+                return Eval(only, c);
+            }
+
             var terms = n.Operands.Select(o => Eval(o, c)).ToList();
             List<string>? live = n.Op switch
             {
@@ -264,6 +280,74 @@ public static class FrepShaderGen
             return v;
         }
 
+        // One function for the repeated child, then a fold of smin over the nearest cell and its neighbors.
+        // The blend node's k drives it. k = 0 visits only the nearest cell (a hard repeat). k > 0 also visits
+        // the 26 adjacent cells, so every copy fillets into its neighbors.
+        bool EmitRepeat(FrepNode blend, FrepNode rep, int r, int c, string v)
+        {
+            if (!repeatFn.Contains(rep.Id))
+            {
+                int fc = contexts++;
+                var savedMap = map;
+                var savedColor = color;
+                map = new StringBuilder();
+                color = new StringBuilder();
+                var child = Eval(rep.Operands[0], fc);
+                var bodyMap = map;
+                var bodyColor = color;
+                map = savedMap;
+                color = savedColor;
+                if (child == null) return false;
+                string arg = Point(fc);
+                helpers.Append($"        float repD{rep.Id}(vec3 {arg})\n        {{\n{bodyMap}            return {child};\n        }}\n");
+                helpers.Append($"        vec4 repC{rep.Id}(vec3 {arg}, float tol, inout float zeb)\n        {{\n{bodyColor}            return {child};\n        }}\n");
+                repeatFn.Add(rep.Id);
+            }
+            int slot = kSlot[blend.Id];
+            string k = $"u.data[{kBase + slot / 4}].{"xyzw"[slot % 4]}";
+            string rows = $"{Row(r)}, {Row(r + 1)}, {Row(r + 2)}, {Row(r + 3)}, {Row(r + 4)}";
+            string p = Point(c);
+            map.Append($$"""
+                    float {{v}} = 1e20;
+                    {
+                        float rk = {{k}};
+                        int rad = rk > 0.0 ? 1 : 0;
+                        for (int dz = -1; dz <= 1; ++dz)
+                        for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            if (abs(dx) > rad || abs(dy) > rad || abs(dz) > rad) continue;
+                            vec3 rq;
+                            if (!repeatCell({{p}}, {{rows}}, vec3(float(dx), float(dy), float(dz)), rq)) continue;
+                            {{v}} = smin({{v}}, repD{{rep.Id}}(rq), rk);
+                        }
+                    }
+
+                """);
+            color.Append($$"""
+                    vec4 {{v}} = vec4(0.0, 0.0, 0.0, 1e20);
+                    {
+                        float rk = {{k}};
+                        int rad = rk > 0.0 ? 1 : 0;
+                        bool got = false;
+                        for (int dz = -1; dz <= 1; ++dz)
+                        for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            if (abs(dx) > rad || abs(dy) > rad || abs(dz) > rad) continue;
+                            vec3 rq;
+                            if (!repeatCell({{p}}, {{rows}}, vec3(float(dx), float(dy), float(dz)), rq)) continue;
+                            vec4 cell = repC{{rep.Id}}(rq, tol, zeb);
+                            if (!got) { {{v}} = cell; got = true; }
+                            else {{v}} = cmin({{v}}, cell, rk);
+                        }
+                        zeb = max(zeb, 1.0 - step(tol, abs({{v}}.w)));
+                    }
+
+                """);
+            return true;
+        }
+
         var referenced = tree.Nodes.SelectMany(n => n.Operands).ToHashSet();
         var roots = new List<string>();
         for (int i = 0; i < prims.Count; i++)
@@ -281,11 +365,11 @@ public static class FrepShaderGen
         }
 
         int dataRows = kBase + KRows(ks.Count);
-        var key = dataRows + "\n" + string.Join(",", fns.Keys) + "\n" + map + "\n" + color;
+        var key = dataRows + "\n" + string.Join(",", fns.Keys) + "\n" + helpers + "\n" + map + "\n" + color;
         if (!cache.TryGetValue(key, out var src))
         {
             var userFns = string.Concat(fns.Values.Select(f => f.Glsl(UserFnName(f)).TrimEnd() + "\n"));
-            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, userFns, map.ToString(), color.ToString()))
+            cache[key] = src = new ShaderSource(Vertex, Fragment(dataRows, userFns, helpers.ToString(), map.ToString(), color.ToString()))
             {
                 Layout = Layout(prims, warps.Select(id => tree.Find(id)!.Op), ks.Count),
             };
@@ -296,7 +380,7 @@ public static class FrepShaderGen
     /// The shared GLSL library (also callable from user code).
     static string Library => UserFnLibrary.Glsl;
 
-    static string Fragment(int dataRows, string userFns, string map, string color) => $$"""
+    static string Fragment(int dataRows, string userFns, string helpers, string map, string color) => $$"""
         #version 450
         layout(location = 0) in vec2 vNdc;
         layout(location = 0) out vec4 outColor;
@@ -418,8 +502,19 @@ public static class FrepShaderGen
             vec3 i = vec3(c) * vec3(o.w, x.w, y.w);
             return p - x.xyz * i.x - y.xyz * i.y - cross(x.xyz, y.xyz) * i.z;
         }
+        // Neighbor copy for the blend above a Repeat. An offset that would fall outside the box is rejected
+        // instead of clamped: clamping lands on a copy already in the fold, and smin of a field with itself
+        // grows it by k/4 (the outer copies, several times over at a corner).
+        bool repeatCell(vec3 p, vec4 o, vec4 x, vec4 y, vec4 lo, vec4 hi, vec3 delta, out vec3 q)
+        {
+            vec3 s = vec3(o.w, x.w, y.w);
+            vec3 id = clamp(round(toLocal(p, o, x, y) / max(s, vec3(1e-9))), lo.xyz, hi.xyz) + delta;
+            q = p - x.xyz * id.x * s.x - y.xyz * id.y * s.y - cross(x.xyz, y.xyz) * id.z * s.z;
+            return all(greaterThanEqual(id, lo.xyz)) && all(lessThanEqual(id, hi.xyz));
+        }
         // FFunctions (user code, see UserFn/), one per distinct program.
         {{userFns}}
+        {{helpers}}
         float map(vec3 p)
         {
         {{map}}    return d;

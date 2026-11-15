@@ -6,13 +6,15 @@ using Rhino.FileIO;
 
 namespace Freppuccino.Csg;
 
-/// Union/Intersect/Difference: CSG over ≥ 1 operand (created with ≥ 2; operand edits may leave 1 = pass-through), blend K. Twist/Bend/Repeat: domain warps of one operand,
-/// shaped by a referenced Rhino object (<see cref="FrepNode.Ref"/>: line for Twist/Bend, box for Repeat) + <see cref="FrepNode.Params"/>.
-public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5 }
+/// Union/Intersect/Difference: CSG over ≥ 1 operand (created with ≥ 2; operand edits may leave 1 = pass-through), blend K.
+/// Blend: one child (a Repeat); K fillets its copies.
+/// Twist/Bend/Repeat: domain warps of one operand, shaped by a referenced Rhino object
+/// (<see cref="FrepNode.Ref"/>: line for Twist/Bend, box for Repeat) + <see cref="FrepNode.Params"/>.
+public enum FrepOp { Union = 0, Intersect = 1, Difference = 2, Twist = 3, Bend = 4, Repeat = 5, Blend = 6 }
 
 public static class FrepOps
 {
-    public static bool IsWarp(this FrepOp op) => op >= FrepOp.Twist;
+    public static bool IsWarp(this FrepOp op) => op is FrepOp.Twist or FrepOp.Bend or FrepOp.Repeat;
 
     /// Param names per warp op (index = slot in FrepNode.Params). Angles in degrees.
     ///   Twist  angle: total twist from line start to end (linear, continues past the ends)
@@ -37,7 +39,8 @@ public readonly record struct FrepOperand(int NodeId, Guid ObjectId)
 
 /// Difference: Operands[0] − Operands[1..]. K = smooth blend distance (model units, 0 = hard).
 /// Hidden: dropped like a hidden primitive (a missing leaf for its parents; not drawn as a root).
-/// Warps: Operands = [child], Ref = line/box object, Params per <see cref="FrepOps.ParamNames"/>; K unused.
+/// Warps: Operands = [child], Ref = line/box object, Params per <see cref="FrepOps.ParamNames"/>.
+/// Blend uses K as the fillet between a Repeat's copies (0 = hard). Warps ignore K.
 public sealed record FrepNode(int Id, FrepOp Op, double K, ImmutableArray<FrepOperand> Operands, bool Hidden = false,
     Guid Ref = default, ImmutableArray<double> Params = default)
 {
@@ -77,6 +80,18 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
     {
         var node = new FrepNode(NextId, op, 0, [child], Ref: reference, Params: [.. parameters]);
         return (new FrepTree(Nodes.Add(node), NextId + 1), node);
+    }
+
+    /// Blend node directly above <paramref name="repeatId"/>. Parents that used the repeat now use the blend.
+    public (FrepTree Tree, FrepNode Node) BlendOver(int repeatId)
+    {
+        var (tree, blend) = Add(FrepOp.Blend, 0, [FrepOperand.Node(repeatId)]);
+        var nodes = tree.Nodes.Select(n =>
+        {
+            if (n.Id == blend.Id || !n.Operands.Any(o => o.IsNode && o.NodeId == repeatId)) return n;
+            return n with { Operands = [.. n.Operands.Select(o => o.IsNode && o.NodeId == repeatId ? FrepOperand.Node(blend.Id) : o)] };
+        }).ToImmutableList();
+        return (tree with { Nodes = nodes }, blend);
     }
 
     public FrepTree WithParam(int id, int index, double value) => Edit(id, n =>
@@ -231,6 +246,99 @@ public sealed record FrepTree(ImmutableList<FrepNode> Nodes, int NextId)
 
     /// Caller ensures nothing references it.
     public FrepTree Remove(int id) => this with { Nodes = Nodes.RemoveAll(n => n.Id == id) };
+
+    /// A transform replaces the Rhino object, so operands and warp refs follow the new id.
+    public FrepTree Retarget(Guid from, Guid to)
+    {
+        if (from == Guid.Empty || to == Guid.Empty || from == to) return this;
+        var nodes = new List<FrepNode>(Nodes.Count);
+        bool changed = false;
+        foreach (var n in Nodes)
+        {
+            bool refHit = n.Ref == from;
+            bool opHit = n.Operands.Any(o => !o.IsNode && o.ObjectId == from);
+            if (!refHit && !opHit) { nodes.Add(n); continue; }
+            changed = true;
+            var ops = opHit
+                ? n.Operands.Select(o => !o.IsNode && o.ObjectId == from ? FrepOperand.Object(to) : o).ToImmutableArray()
+                : n.Operands;
+            nodes.Add(n with { Ref = refHit ? to : n.Ref, Operands = ops });
+        }
+        return changed ? this with { Nodes = nodes.ToImmutableList() } : this;
+    }
+
+    /// Drop these nodes and primitive operands. A deleted node's children take its place.
+    /// A union, intersect, or difference left with one operand is replaced by that operand;
+    /// a node left with none is removed. Twist, bend, repeat, and blend keep their one child.
+    public FrepTree Excise(IReadOnlySet<int> dropNodes, IReadOnlySet<Guid> dropObjects)
+    {
+        List<FrepOperand> Expand(FrepOperand o, HashSet<int> stack)
+        {
+            if (!o.IsNode)
+                return dropObjects.Contains(o.ObjectId) ? [] : [o];
+            if (!dropNodes.Contains(o.NodeId))
+                return [o];
+            if (!stack.Add(o.NodeId))
+                return [];
+            var found = Find(o.NodeId);
+            var acc = new List<FrepOperand>();
+            if (found != null)
+                foreach (var c in found.Operands)
+                    acc.AddRange(Expand(c, stack));
+            stack.Remove(o.NodeId);
+            return acc;
+        }
+
+        var kept = new List<FrepNode>(Nodes.Count);
+        bool changed = false;
+        foreach (var n in Nodes)
+        {
+            if (dropNodes.Contains(n.Id)) { changed = true; continue; }
+            var ops = new List<FrepOperand>();
+            foreach (var o in n.Operands)
+                ops.AddRange(Expand(o, []));
+            if (ops.Count == n.Operands.Length && ops.SequenceEqual(n.Operands))
+                kept.Add(n);
+            else
+            {
+                kept.Add(n with { Operands = [.. ops] });
+                changed = true;
+            }
+        }
+        if (!changed) return this;
+        return new FrepTree(kept.ToImmutableList(), NextId).Collapse();
+    }
+
+    /// Combine ops with one operand become that operand; empty nodes go away. Repeats until nothing else folds.
+    FrepTree Collapse()
+    {
+        var nodes = Nodes;
+        while (true)
+        {
+            int i = nodes.FindIndex(n => n.Operands.Length == 0
+                || (n.Operands.Length == 1 && n.Op is FrepOp.Union or FrepOp.Intersect or FrepOp.Difference));
+            if (i < 0) break;
+            var gone = nodes[i];
+            FrepOperand? only = gone.Operands.Length == 1 ? gone.Operands[0] : null;
+            nodes = nodes.RemoveAt(i).Select(n => ReplaceOperand(n, gone.Id, only)).ToImmutableList();
+        }
+        return ReferenceEquals(nodes, Nodes) ? this : this with { Nodes = nodes };
+    }
+
+    static FrepNode ReplaceOperand(FrepNode n, int goneId, FrepOperand? only)
+    {
+        if (!n.Operands.Any(o => o.IsNode && o.NodeId == goneId)) return n;
+        var ops = ImmutableArray.CreateBuilder<FrepOperand>(n.Operands.Length);
+        foreach (var o in n.Operands)
+        {
+            if (o.IsNode && o.NodeId == goneId)
+            {
+                if (only is { } kept) ops.Add(kept);
+            }
+            else ops.Add(o);
+        }
+        return n with { Operands = ops.ToImmutable() };
+    }
 
     const int Major = 1, Minor = 2; // 1.1: per-node Hidden; 1.2: Ref + Params
 
