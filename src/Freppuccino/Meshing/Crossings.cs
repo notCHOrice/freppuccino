@@ -31,6 +31,15 @@ public static class Crossings
                     found.Add(i < j ? (i, j) : (j, i));
                 }
         });
+        // Triangles too large to bin are tested against every triangle (a few at most).
+        Parallel.ForEach(bins.Large, i =>
+        {
+            for (int j = 0; j < tris.Count / 3; j++)
+            {
+                if (j == i || (bins.IsLarge(j) && j < i)) continue;
+                if (Overlap(vertices, tris, i, j, eps)) found.Add(i < j ? (i, j) : (j, i));
+            }
+        });
         var result = found.ToList();
         result.Sort();
         return result;
@@ -233,34 +242,60 @@ public static class Crossings
         return (lo, hi);
     }
 
-    /// Triangles binned by their bounding boxes.
+    /// Triangles binned by their bounding boxes, on a grid relative to the mesh's own bounds, so bin indices stay
+    /// small whatever the coordinates. A triangle spanning too many bins is kept aside as "large" instead.
     sealed class Bins
     {
-        readonly Dictionary<(int, int, int), List<int>> map = [];
-        readonly (int X0, int Y0, int Z0, int X1, int Y1, int Z1)[] box;
+        const int Axis = 1 << 20;      // bins per axis at most
+        const int MaxSpan = 512;       // bins one triangle may occupy before it counts as large
+        readonly Dictionary<long, List<int>> map = [];
         readonly Dictionary<List<int>, (int, int, int)> keyOf = new(ReferenceEqualityComparer.Instance);
+        readonly (int X0, int Y0, int Z0, int X1, int Y1, int Z1)[] box;
+        readonly bool[] large;
+        readonly List<int> all = [];
+        readonly V3 origin;
         readonly double size;
 
         public Bins(IReadOnlyList<V3> vs, IReadOnlyList<int> t, double h)
         {
-            size = 2 * h;
-            double pad = Eps(h);
             int n = t.Count / 3;
             box = new (int, int, int, int, int, int)[n];
+            large = new bool[n];
+            double pad = Eps(h);
+            V3 lo = new(double.MaxValue, double.MaxValue, double.MaxValue), hi = new(double.MinValue, double.MinValue, double.MinValue);
+            foreach (int v in t)
+            {
+                var p = vs[v];
+                lo = new V3(Math.Min(lo.X, p.X), Math.Min(lo.Y, p.Y), Math.Min(lo.Z, p.Z));
+                hi = new V3(Math.Max(hi.X, p.X), Math.Max(hi.Y, p.Y), Math.Max(hi.Z, p.Z));
+            }
+            var extent = hi - lo;
+            double span = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
+            origin = lo - new V3(2 * pad, 2 * pad, 2 * pad);
+            size = Math.Max(2 * h, (span + 4 * pad) / (Axis - 2));
+            if (!double.IsFinite(size) || size <= 0) size = double.PositiveInfinity; // non-finite mesh: one bin, below
             for (int i = 0; i < n; i++)
             {
                 V3 a = vs[t[3 * i]], b = vs[t[3 * i + 1]], c = vs[t[3 * i + 2]];
                 // Padded by the tolerance, so triangles that only touch across a bin boundary still share a bin.
                 var bx = box[i] = (
-                    Floor(Math.Min(a.X, Math.Min(b.X, c.X)) - pad), Floor(Math.Min(a.Y, Math.Min(b.Y, c.Y)) - pad), Floor(Math.Min(a.Z, Math.Min(b.Z, c.Z)) - pad),
-                    Floor(Math.Max(a.X, Math.Max(b.X, c.X)) + pad), Floor(Math.Max(a.Y, Math.Max(b.Y, c.Y)) + pad), Floor(Math.Max(a.Z, Math.Max(b.Z, c.Z)) + pad));
+                    Index(Math.Min(a.X, Math.Min(b.X, c.X)) - pad, origin.X), Index(Math.Min(a.Y, Math.Min(b.Y, c.Y)) - pad, origin.Y), Index(Math.Min(a.Z, Math.Min(b.Z, c.Z)) - pad, origin.Z),
+                    Index(Math.Max(a.X, Math.Max(b.X, c.X)) + pad, origin.X), Index(Math.Max(a.Y, Math.Max(b.Y, c.Y)) + pad, origin.Y), Index(Math.Max(a.Z, Math.Max(b.Z, c.Z)) + pad, origin.Z));
+                long count = (long)(bx.X1 - bx.X0 + 1) * (bx.Y1 - bx.Y0 + 1) * (bx.Z1 - bx.Z0 + 1);
+                if (count > MaxSpan)
+                {
+                    large[i] = true;
+                    all.Add(i);
+                    continue;
+                }
                 for (int x = bx.X0; x <= bx.X1; x++)
                     for (int y = bx.Y0; y <= bx.Y1; y++)
                         for (int z = bx.Z0; z <= bx.Z1; z++)
                         {
-                            if (!map.TryGetValue((x, y, z), out var list))
+                            long key = ((long)z * Axis + y) * Axis + x;
+                            if (!map.TryGetValue(key, out var list))
                             {
-                                map[(x, y, z)] = list = [];
+                                map[key] = list = [];
                                 keyOf[list] = (x, y, z);
                             }
                             list.Add(i);
@@ -268,9 +303,19 @@ public static class Crossings
             }
         }
 
-        int Floor(double v) => (int)Math.Floor(v / size);
+        /// Bin index of a coordinate, in [0, Axis); anything out of range or not finite lands in the end bins.
+        int Index(double v, double o)
+        {
+            double d = Math.Floor((v - o) / size);
+            return d >= 0 ? (d < Axis - 1 ? (int)d : Axis - 1) : 0;
+        }
 
         public IEnumerable<List<int>> Cells => map.Values;
+
+        /// Triangles too large to bin.
+        public List<int> Large => all;
+
+        public bool IsLarge(int i) => large[i];
 
         /// Is <paramref name="cell"/> the bin at the low corner of the overlap of i's and j's bin ranges?
         public bool Owns(int i, int j, List<int> cell)
@@ -281,13 +326,21 @@ public static class Crossings
             return x == Math.Max(a.X0, b.X0) && y == Math.Max(a.Y0, b.Y0) && z == Math.Max(a.Z0, b.Z0);
         }
 
+        /// The bins triangle <paramref name="i"/> occupies, plus the large triangles; for a large triangle, everything.
         public IEnumerable<List<int>> Near(int i)
         {
+            if (large[i])
+            {
+                foreach (var list in map.Values) yield return list;
+                yield return all;
+                yield break;
+            }
             var bx = box[i];
             for (int x = bx.X0; x <= bx.X1; x++)
                 for (int y = bx.Y0; y <= bx.Y1; y++)
                     for (int z = bx.Z0; z <= bx.Z1; z++)
-                        if (map.TryGetValue((x, y, z), out var list)) yield return list;
+                        if (map.TryGetValue(((long)z * Axis + y) * Axis + x, out var list)) yield return list;
+            if (all.Count > 0) yield return all;
         }
     }
 }
