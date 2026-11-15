@@ -28,7 +28,7 @@ public enum FieldKind { Sphere, Box, Torus, Cylinder, Cone, Ellipsoid, Pyramid, 
 public sealed record UserField(UserFnEval Eval, double[] U, double L);
 
 /// Twist/Bend/Repeat: domain warps of one operand (see <see cref="FrepField.AddWarp"/>).
-public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat, Blend }
+public enum FieldOp { Union, Intersect, Difference, Twist, Bend, Repeat, Blend, Offset }
 
 /// A primitive (by index) or an earlier node (by index).
 public readonly record struct FieldRef(bool IsNode, int Index)
@@ -204,7 +204,13 @@ public sealed class FrepField
         else
         {
             var n = nodes[r.Index];
-            if (n.Op == FieldOp.Blend)
+            if (n.Op == FieldOp.Offset)
+            {
+                d = n.Operands.Length == 0
+                    ? double.PositiveInfinity
+                    : Eval(n.Operands[0], p, ctx, ref memo, ref top, stride) - n.K;
+            }
+            else if (n.Op == FieldOp.Blend)
             {
                 var only = n.Operands[0];
                 // The fillet lives on this node, above the Repeat. The Repeat itself stays a hard nearest-cell warp.
@@ -514,6 +520,11 @@ public sealed class FrepField
             if (t == none) continue;
             var n = nodes[i];
             if (n.Op == FieldOp.Difference) { Ask(n.Operands[0], t); continue; }
+            if (n.Op == FieldOp.Offset)
+            {
+                if (n.Operands.Length > 0) Ask(n.Operands[0], t + n.K);
+                continue;
+            }
             // The fillet bulges by up to k past the hard copies, same bound as a many-operand union.
             if (n.Op == FieldOp.Blend)
             {

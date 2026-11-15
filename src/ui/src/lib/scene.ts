@@ -45,12 +45,14 @@ export function isDeform(op: SceneNode['op']): op is DeformKind {
 
 export function nodeIconName(node: SceneNode): BrandIconName | undefined {
   if (node.op === 'blend') return 'blend'
+  if (node.op === 'offset') return 'offset'
   if (node.kind === 'operation') return !node.op ? undefined : isDeform(node.op) ? DEFORMS[node.op].icon : OPERATIONS[node.op].icon
   return node.sdfType ? PRIMITIVES[node.sdfType]?.icon : undefined
 }
 
 export function typeLabel(node: SceneNode): string {
   if (node.op === 'blend') return 'Blend'
+  if (node.op === 'offset') return 'Offset'
   if (node.kind === 'operation') return !node.op ? 'Operation' : isDeform(node.op) ? DEFORMS[node.op].label : OPERATIONS[node.op].label
   return (node.sdfType && PRIMITIVES[node.sdfType]?.label) || node.sdfType || 'Primitive'
 }

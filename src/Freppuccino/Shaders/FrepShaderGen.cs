@@ -248,6 +248,17 @@ public static class FrepShaderGen
                 return Eval(only, c);
             }
 
+            // Offset moves the child's surface: positive k grows the solid (d - k).
+            if (n.Op == FrepOp.Offset)
+            {
+                if (n.Operands.Length == 0 || Eval(n.Operands[0], c) is not { } shifted) return null;
+                int off = kSlot[id];
+                var ok = $"u.data[{kBase + off / 4}].{"xyzw"[off % 4]}";
+                map.Append($"    float {v} = {shifted} - {ok};\n");
+                color.Append($"    vec4 {v} = vec4({shifted}.rgb, {shifted}.w - {ok});\n");
+                return v;
+            }
+
             var terms = n.Operands.Select(o => Eval(o, c)).ToList();
             List<string>? live = n.Op switch
             {

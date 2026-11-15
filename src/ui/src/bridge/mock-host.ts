@@ -135,6 +135,19 @@ export function createMockHost(): Transport {
         scene = map(scene, (x) => (x.id === m.id ? { ...x, color: m.color.toUpperCase() } : x))
         emit({ type: 'scene', scene })
         break
+      case 'offsetNode': {
+        let created: string | null = null
+        scene = map(scene, (x) => {
+          if (x.id !== m.id || (x.op !== 'union' && x.op !== 'subtract' && x.op !== 'intersect')) return x
+          const offset = opNode('offset', 0, [x])
+          created = offset.id
+          return offset
+        })
+        if (created) selection = [created]
+        emit({ type: 'scene', scene })
+        emit({ type: 'selection', ids: selection })
+        break
+      }
       case 'blendRepeat': {
         let created: string | null = null
         scene = map(scene, (x) => {

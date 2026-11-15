@@ -23,9 +23,9 @@ export interface SceneNode {
   sdfType?: string
   /** primitive: SDF.<param> values without the prefix, e.g. { s: 1 } or { "b.x": 1, "b.y": 2, "b.z": 3 } */
   params?: Record<string, number>
-  /** operation. 'blend' is a node above a repeat; its k fillets every copy. */
-  op?: OperationKind | DeformKind | 'blend'
-  /** operation: blend distance in model units, 0 = sharp. On a blend node, fillets every copy of the repeat below it. */
+  /** operation. 'blend' sits above a repeat; 'offset' sits above a union, intersection, or difference. */
+  op?: OperationKind | DeformKind | 'blend' | 'offset'
+  /** operation: blend distance in model units, 0 = sharp. On a blend node, fillets every copy. On an offset node, the signed surface shift (positive grows). */
   k?: number
   children?: SceneNode[]
   /** operand whose object / node was deleted */
@@ -98,9 +98,11 @@ export type UiMessage =
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
   /** Insert a blend node (k = 0) directly above a repeat. */
   | { type: 'blendRepeat'; id: Id }
+  /** Insert an offset node (k = 0) directly above a union, intersection, or difference. */
+  | { type: 'offsetNode'; id: Id }
   /** preview: live drag tick, no undo; the next non-preview setOperation ends the gesture as one undo step.
-   *  op 'blend' only updates that node's fillet; it does not turn the node into a union. */
-  | { type: 'setOperation'; id: Id; op: OperationKind | 'blend'; k: number; preview?: boolean }
+   *  op 'blend' and 'offset' only update that node's k; they do not turn the node into a union. */
+  | { type: 'setOperation'; id: Id; op: OperationKind | 'blend' | 'offset'; k: number; preview?: boolean }
   /** One deform param; preview as setOperation. */
   | { type: 'setNodeParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Remove nodes. deep: also remove every node and primitive under them. Otherwise children take the node's place. */
