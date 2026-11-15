@@ -185,11 +185,19 @@ public static class FrepCarriers
         }
     }
 
+    /// Before a save. This runs inside the Save command, so without pausing undo recording the deletions become an undo
+    /// step of their own ("Undoing SaveAs" would bring back stale carriers instead of undoing the user's last edit).
     static void RemoveAll(RhinoDoc doc)
     {
-        var settings = new ObjectEnumeratorSettings { HiddenObjects = true, LockedObjects = true, ObjectTypeFilter = ObjectType.Mesh };
-        foreach (var o in doc.Objects.GetObjectList(settings).ToList())
-            if (IsCarrier(o)) Delete(doc, o);
+        bool recording = doc.UndoRecordingEnabled;
+        doc.UndoRecordingEnabled = false;
+        try
+        {
+            var settings = new ObjectEnumeratorSettings { HiddenObjects = true, LockedObjects = true, ObjectTypeFilter = ObjectType.Mesh };
+            foreach (var o in doc.Objects.GetObjectList(settings).ToList())
+                if (IsCarrier(o)) Delete(doc, o);
+        }
+        finally { doc.UndoRecordingEnabled = recording; }
     }
 
     static void Delete(RhinoDoc doc, RhinoObject o)
