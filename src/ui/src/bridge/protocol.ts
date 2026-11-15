@@ -108,6 +108,6 @@ export type UiMessage =
   /** Remove nodes. deep: also remove every node and primitive under them. Otherwise children take the node's place. */
   | { type: 'deleteNodes'; ids: Id[]; deep?: boolean }
   /** AI agent tool call (src/ui/src/ai/tools.ts → Ai/AiTools.cs); answered by aiToolResult. */
-  | { type: 'aiTool'; callId: string; tool: string; args: Record<string, unknown> }
+  | { type: 'aiTool'; callId: string; tool: string; args: Record<string, unknown>; source?: 'ai' | 'script' }
   /** Save a finished AI run to disk for review (Ai/AiRunLog.cs). Images become PNG files next to transcript.json. */
   | { type: 'aiSaveRun'; title: string; transcript: unknown; images: { name: string; dataUrl: string }[] }

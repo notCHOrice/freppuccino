@@ -84,6 +84,66 @@ public class FrepMeshCommand : Command
         rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower, and it reshapes the surface slightly)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
 
+        var baked = Bake(doc, field, resolution, simplify, refine, quads, "FrepMesh", out var error);
+        if (baked == null)
+        {
+            RhinoApp.WriteLine($"FrepMesh: {error}.");
+            return Result.Failure;
+        }
+
+        // The Freppuccino display mode draws the F-reps over unselected objects; selecting the mesh shows it.
+        doc.Objects.UnselectAll();
+        doc.Objects.Select(baked.Id);
+        doc.Views.Redraw();
+        var result = baked.Mesh;
+        RhinoApp.WriteLine(
+            $"FrepMesh: {built.Count} blend(s) -> {baked.Faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
+            $"{baked.Quality}, {baked.Milliseconds} ms.");
+        if (refine > 0)
+        {
+            string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
+            RhinoApp.WriteLine(
+                $"FrepMesh: refine {result.Refine}{lowered}: accuracy cell {result.AccuracyCellSize:0.####} {doc.ModelUnitSystem}, {result.RefinedCells} cells refined" +
+                (result.DeepCells > 0 ? $", {result.DeepCells} finer cells sampled {result.ExtraDepth} level(s) deeper" : "") +
+                $"; smallest cell sampled {result.MinCellSize:0.#####} {doc.ModelUnitSystem}" +
+                (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
+            if (result.DeepPassesRejected > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.DeepPassesRejected} deeper pass(es) were discarded because they left more self-intersections; " +
+                    (result.DeepCells > 0 ? "the mesh kept is an earlier deep pass, with the depth reported above." : "the mesh kept has no extra depth."));
+            if (result.Contradictory > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.Contradictory} finest vertices still hold opposing surface normals in one sheet.");
+            if (result.ProbeFailures > 0)
+                RhinoApp.WriteLine($"FrepMesh: {result.ProbeFailures} triangle(s) at coarse cells are still more than {0.25 * result.AccuracyCellSize:0.####} " +
+                    $"{doc.ModelUnitSystem} from the surface by the field's estimate (refinement passes ran out).");
+        }
+        if (result.Fragments > 0)
+            RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small disconnected component(s), at most {4 * result.AccuracyCellSize:0.####} {doc.ModelUnitSystem} " +
+                "across, kept as meshed. Some may be parts of features thinner than the finest cell; a higher resolution or refine level can join those.");
+        if (result.UnsafeSamples > 0)
+            RhinoApp.WriteLine($"FrepMesh: {result.UnsafeSamples} sample(s) changed sign when evaluated again: the field changes faster " +
+                "than its Lipschitz bound there, so skipping samples was unsafe. Those cells were refined.");
+        return Result.Success;
+    }
+
+    public sealed record BakeResult(Guid Id, string Faces, int FaceCount, DualContour.Result Mesh, bool Quads, bool Closed, int BadEdges, int BadVertices,
+        long Milliseconds)
+    {
+        public double CellSize => Mesh.CellSize;
+        public int Crossings => Mesh.Crossings;
+        public bool Manifold => BadEdges + BadVertices == 0;
+        // The mesher removes triangles that pass through each other by stepping vertices back to safer positions; if
+        // it ran out of steps, say so rather than present the mesh as clean. (Counted on the triangle mesh, before
+        // any QuadRemesh, which makes its own surface.)
+        public string Quality => $"{(Closed ? "closed" : "OPEN")}, " +
+            (Manifold ? "manifold" : $"NON-MANIFOLD ({BadEdges} bad edges, {BadVertices} pinched vertices; try a higher resolution)") +
+            (Crossings > 0
+                ? $", {Crossings} SELF-INTERSECTING triangle pair(s){(Quads ? " before QuadRemesh" : "")} ({(Mesh.Refine < 3 ? $"try Refine {Mesh.Refine + 1} or a higher resolution" : "try a higher resolution")})"
+                : "");
+    }
+
+    public static BakeResult? Bake(RhinoDoc doc, FrepField field, int resolution, double simplify, int refineLevels, bool quads, string name, out string error)
+    {
+        error = "";
         var watch = Stopwatch.StartNew();
         // Stage lines while it runs, timed from the start of this run; RhinoApp.Wait paints each one as it is written.
         void Stage(string what)
@@ -93,11 +153,11 @@ public class FrepMeshCommand : Command
         }
         // The finest cell stays well above the document's tolerance. The field and roots are snapshots taken above,
         // so document changes while the lines paint do not reach the mesher.
-        var result = DualContour.Mesh(field, resolution, simplify, refine, 16 * doc.ModelAbsoluteTolerance, Stage);
+        var result = DualContour.Mesh(field, resolution, simplify, refineLevels, 16 * doc.ModelAbsoluteTolerance, Stage);
         if (result.Triangles.Count == 0)
         {
-            RhinoApp.WriteLine("FrepMesh: the F-reps produced no surface at this resolution.");
-            return Result.Failure;
+            error = "the F-reps produced no surface at this resolution";
+            return null;
         }
 
         var mesh = new Mesh();
@@ -139,54 +199,16 @@ public class FrepMeshCommand : Command
         // vertices, which an edge-based test such as Mesh.IsManifold passes.
         bool closed = mesh.IsClosed;
         var (badEdges, badVertices) = Defects(mesh);
-        string quality = $"{(closed ? "closed" : "OPEN")}, " +
-            (badEdges + badVertices == 0 ? "manifold" : $"NON-MANIFOLD ({badEdges} bad edges, {badVertices} pinched vertices; try a higher resolution)");
-        // The mesher removes triangles that pass through each other by stepping vertices back to safer positions; if
-        // it ran out of steps, say so rather than present the mesh as clean. (Counted on the triangle mesh, before
-        // any QuadRemesh, which makes its own surface.)
-        if (result.Crossings > 0)
-            quality += $", {result.Crossings} SELF-INTERSECTING triangle pair(s){(quads ? " before QuadRemesh" : "")} ({(result.Refine < 3 ? $"try Refine {result.Refine + 1} or a higher resolution" : "try a higher resolution")})";
 
         var attributes = doc.CreateDefaultAttributes();
-        attributes.Name = "FrepMesh";
+        attributes.Name = name;
         var id = doc.Objects.AddMesh(mesh, attributes);
         if (id == Guid.Empty)
         {
-            RhinoApp.WriteLine("FrepMesh: unable to add the mesh to the document.");
-            return Result.Failure;
+            error = "unable to add the mesh to the document";
+            return null;
         }
-
-        // The Freppuccino display mode draws the F-reps over unselected objects; selecting the mesh shows it.
-        doc.Objects.UnselectAll();
-        doc.Objects.Select(id);
-        doc.Views.Redraw();
-        RhinoApp.WriteLine(
-            $"FrepMesh: {built.Count} blend(s) -> {faces}, cell size {result.CellSize:0.####} {doc.ModelUnitSystem}, " +
-            $"{quality}, {watch.ElapsedMilliseconds} ms.");
-        if (refine > 0)
-        {
-            string lowered = result.Refine < refine ? $" (lowered from {refine}: budget or document tolerance)" : "";
-            RhinoApp.WriteLine(
-                $"FrepMesh: refine {result.Refine}{lowered}: accuracy cell {result.AccuracyCellSize:0.####} {doc.ModelUnitSystem}, {result.RefinedCells} cells refined" +
-                (result.DeepCells > 0 ? $", {result.DeepCells} finer cells sampled {result.ExtraDepth} level(s) deeper" : "") +
-                $"; smallest cell sampled {result.MinCellSize:0.#####} {doc.ModelUnitSystem}" +
-                (result.Unresolved > 0 ? $"; {result.Unresolved} finest vertices ended at their fallback position" : "") + ".");
-            if (result.DeepPassesRejected > 0)
-                RhinoApp.WriteLine($"FrepMesh: {result.DeepPassesRejected} deeper pass(es) were discarded because they left more self-intersections; " +
-                    (result.DeepCells > 0 ? "the mesh kept is an earlier deep pass, with the depth reported above." : "the mesh kept has no extra depth."));
-            if (result.Contradictory > 0)
-                RhinoApp.WriteLine($"FrepMesh: {result.Contradictory} finest vertices still hold opposing surface normals in one sheet.");
-            if (result.ProbeFailures > 0)
-                RhinoApp.WriteLine($"FrepMesh: {result.ProbeFailures} triangle(s) at coarse cells are still more than {0.25 * result.AccuracyCellSize:0.####} " +
-                    $"{doc.ModelUnitSystem} from the surface by the field's estimate (refinement passes ran out).");
-        }
-        if (result.Fragments > 0)
-            RhinoApp.WriteLine($"FrepMesh: {result.Fragments} small disconnected component(s), at most {4 * result.AccuracyCellSize:0.####} {doc.ModelUnitSystem} " +
-                "across, kept as meshed. Some may be parts of features thinner than the finest cell; a higher resolution or refine level can join those.");
-        if (result.UnsafeSamples > 0)
-            RhinoApp.WriteLine($"FrepMesh: {result.UnsafeSamples} sample(s) changed sign when evaluated again: the field changes faster " +
-                "than its Lipschitz bound there, so skipping samples was unsafe. Those cells were refined.");
-        return Result.Success;
+        return new BakeResult(id, faces, mesh.Faces.Count, result, quads, closed, badEdges, badVertices, watch.ElapsedMilliseconds);
     }
 
     /// Click blends (an F-rep selection session: the picker acts during this prompt, adding each clicked root); Enter ends.

@@ -309,6 +309,66 @@ export function createMockHost(): Transport {
         return { ok: true, note: 'mock host: no geometry' }
       case 'capture_views':
         throw new Error('Screenshots need Rhino (the mock host has no viewport). Skip visual checks.')
+      case 'check_function_code': {
+        const fn = mockCompile(String(args.code ?? ''), {}, 1)
+        return { ok: fn.ok, diagnostics: fn.diagnostics, hash: fn.hash, params: fn.params.map(({ name, default: d }) => ({ name, default: d })) }
+      }
+      case 'create_function': {
+        const code = String(args.code ?? '')
+        const fn = mockCompile(code, (args.params as Record<string, number>) ?? {}, Number(args.lipschitz ?? 1))
+        if (!fn.ok && !args.allow_errors) throw new Error(`code has errors, nothing created:\n${fn.diagnostics.map((d) => `${d.line}:${d.column}: ${d.message}`).join('\n')}`)
+        let name = String(args.name ?? 'function').replace(/\s+/g, '_')
+        while (flat(scene).some((x) => x.name === name)) name += '_2'
+        const size = (args.size as number[]) ?? [2, 2, 2]
+        const p: SceneNode = {
+          ...prim('sdUser', { 'b.x': size[0] / 2, 'b.y': size[1] / 2, 'b.z': size[2] / 2 }, name),
+          color: mockColor(args.color) ?? '#FCFCFC',
+          userFn: fn,
+        }
+        scene = [...scene, p]
+        return { ref: name, guid: p.id, ok: fn.ok, diagnostics: fn.diagnostics, params: fn.params, lipschitz: fn.lipschitz }
+      }
+      case 'set_function_code':
+      case 'set_function_params': {
+        const p = find(String(args.target))
+        if (!p.userFn) throw new Error(`${p.name ?? p.id} is not a function`)
+        const values = Object.fromEntries(p.userFn.params.map((x) => [x.name, x.value]))
+        const code = tool === 'set_function_code' ? String(args.code ?? '') : p.userFn.code
+        const fn = mockCompile(code, { ...values, ...((args.params as Record<string, number>) ?? {}) }, Number(args.lipschitz ?? p.userFn.lipschitz))
+        if (!fn.ok && !args.allow_errors) throw new Error(`code has errors, code not changed:\n${fn.diagnostics.map((d) => `${d.line}:${d.column}: ${d.message}`).join('\n')}`)
+        scene = map(scene, (x) => (x.id === p.id ? { ...x, userFn: fn } : x))
+        return { ref: p.name ?? p.id, ok: fn.ok, diagnostics: fn.diagnostics, params: fn.params, lipschitz: fn.lipschitz }
+      }
+      case 'get_function': {
+        const p = find(String(args.target))
+        if (!p.userFn) throw new Error(`${p.name ?? p.id} is not a function`)
+        return { ref: p.name ?? p.id, ...p.userFn }
+      }
+      case 'select': {
+        const refs = (args.refs as string[] | undefined) ?? []
+        const ids = refs.map((r) => find(r).id)
+        selection = args.mode === 'add' ? [...new Set([...selection, ...ids])] : ids
+        emit({ type: 'selection', ids: selection })
+        return { selection: refs }
+      }
+      case 'wrap': {
+        const target = find(String(args.target))
+        const op = String(args.op)
+        if (op === 'offset' && !['union', 'subtract', 'intersect'].includes(String(target.op))) throw new Error('offset wraps a union / subtract / intersect node')
+        if (op === 'blend' && target.op !== 'repeat') throw new Error('blend wraps a repeat node')
+        const node = opNode(op as SceneNode['op'], Number(args.k ?? 0), [target])
+        scene = [...scene.filter((x) => x !== target), node]
+        return { ref: node.id, op, k: node.k, target: target.id }
+      }
+      case 'unwrap': {
+        const ids = new Set((args.refs as string[]).map((r) => find(r).id))
+        scene = excise(scene, ids)
+        return { unwrapped: [...ids] }
+      }
+      case 'mesh':
+        return { mesh: id(), name: String(args.name ?? 'FrepMesh'), faces: 0, closed: true, manifold: true, note: 'mock host: no mesh' }
+      case 'set_zebra':
+        return { zebra: Boolean(args.on), note: 'mock host: no viewport' }
       default:
         throw new Error(`unknown tool '${tool}'`)
     }
@@ -350,7 +410,7 @@ function mockCompile(code: string, values: Record<string, number>, lipschitz: nu
     const at = line.indexOf('@')
     if (at >= 0) diagnostics.push({ line: i + 1, column: at + 1, message: "unexpected character '@'" })
     const r = line.search(/\bradius\b/)
-    if (r >= 0) diagnostics.push({ line: i + 1, column: r + 1, message: "undeclared identifier 'radius'" })
+    if (r >= 0 && !/param\s+float\s+radius\b/.test(code)) diagnostics.push({ line: i + 1, column: r + 1, message: "undeclared identifier 'radius'" })
   })
   const ok = diagnostics.length === 0
   const params = ok

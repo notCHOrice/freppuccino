@@ -88,6 +88,21 @@ public static partial class AiTools
         return o;
     }
 
+    static JsonNode CheckFunctionCode(JsonObject args)
+    {
+        var code = args["code"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : throw new AiToolException("missing 'code' (string)");
+        var result = UserFnCompiler.Compile(code);
+        var o = new JsonObject { ["ok"] = result.Ok };
+        o["diagnostics"] = new JsonArray([.. result.Diagnostics.Select(d =>
+            (JsonNode)new JsonObject { ["line"] = d.Line, ["column"] = d.Column, ["message"] = d.Message })]);
+        if (result.Program is { } program)
+        {
+            o["hash"] = program.Hash;
+            o["params"] = new JsonArray([.. program.Params.Select(p => (JsonNode)new JsonObject { ["name"] = p.Name, ["default"] = p.Default })]);
+        }
+        return o;
+    }
+
     // ───────────────────────── help ─────────────────────────
 
     /// One line per tool (all of AiTools.Run). Keep in sync with Run and src/ui/src/ai/tools.ts.
@@ -101,10 +116,13 @@ public static partial class AiTools
         ("set_function_code", "{target, code, allow_errors?} replace a function's code; returns diagnostics, params, hash"),
         ("get_function", "{target} code, params (name/default/value), lipschitz, box, diagnostics, hash, shader_error"),
         ("set_function_params", "{target, params?: {name: value}, lipschitz?} change param values / Lipschitz scale"),
+        ("check_function_code", "{code} compile only (nothing written): ok, diagnostics, params"),
         ("transform", "{refs, translate?, rotate?: {angle_degrees, axis?}, scale?, pivot?} move / rotate / scale (functions stretch with scale)"),
         ("combine", "{op: union|subtract|intersect, operands, k?} new CSG node (N#)"),
         ("deform", "{op: twist|bend|repeat, target, ...} wrap a primitive or node in a warp node"),
-        ("edit_operation", "{ref, op?, k?, ...deform fields} change a node"),
+        ("edit_operation", "{ref, op?, k?, ...deform fields} change a node (offset: k may be negative)"),
+        ("wrap", "{op: offset|blend, target, k?} offset a union/subtract/intersect node's surface, or fillet a repeat's copies"),
+        ("unwrap", "{refs} remove operation nodes, their children take their place"),
         ("add_operand", "{node, operand, index?} add an operand to an existing CSG node"),
         ("remove_operand", "{node, operand} take an operand out of a node (it becomes a root if unused)"),
         ("move", "{item, to?, from?, index?} re-parent a primitive or node (no 'to' = make it a root)"),
@@ -113,6 +131,9 @@ public static partial class AiTools
         ("set_color", "{refs, color} | {colors: [{ref, color}]} shader color (SDF.Color); a node colors every primitive under it"),
         ("clear_scene", "{} delete every F-rep primitive and operation"),
         ("capture_views", "{views?, focus?, size?} screenshots (RunJson saves them as PNG files and returns their paths)"),
+        ("select", "{refs?, mode?: replace|add|toggle} select in Rhino + the panel (no refs = clear); get_scene reports the selection"),
+        ("mesh", "{refs?, resolution?, simplify?, refine?, quads?, name?} bake roots (default: all) to a Rhino mesh, like FrepMesh"),
+        ("set_zebra", "{on, stripes?, vertical?} zebra stripes on union surfaces (blend continuity check), like FZebra"),
     ];
 
     static JsonNode Help(JsonObject args)

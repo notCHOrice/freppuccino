@@ -15,7 +15,9 @@ src/ui/              Vite + React 19 + TypeScript + Tailwind 4 + shadcn/ui (radi
   src/brand/         fonts, command icons, wordmark copied from brand-kit/ (icons recoloured: ink → currentColor)
   src/index.css      brand tokens (brand-kit/tokens.json) mapped onto shadcn's CSS variables; Latte / Espresso themes
   src/bridge/        host.ts (transport + store + useHost), mock-host.ts (fake Rhino for the browser)
-  src/components/    scene-tree.tsx (browser), inspector.tsx (create / primitive / combine), param-slider.tsx, code-view.tsx (FFunction source)
+  src/components/    scene-tree.tsx (browser), inspector.tsx (create / primitive / combine), param-slider.tsx, code-view.tsx (FFunction source),
+                     script-panel.tsx + code-editor.tsx (Script tab: FFunction editor)
+  src/lib/examples.ts FFunction examples (examples/ffunction/*.glsl + clip boxes) for the Script tab and the AI
   src/lib/scene.ts   display names, icons, labels per SDF type / operation
   src/ai/            AI assistant (AI tab): agent loop, tools, skills; see docs/ai.md
 ```
@@ -39,6 +41,7 @@ Layout: `WebViewHost.cs` is shared (start URL, missing-UI placeholder, origin ch
 | Hot reload inside Rhino | Run `npm run dev`, then start the **"Rhino 9 + Freppuccino (UI dev server)"** launch config, which sets `FREPPUCCINO_UI_DEV_URL=http://localhost:5173`. |
 | Normal plugin build | `dotnet build` copies `src/ui/dist` to `bin/.../ui/`. It runs `npm run build` itself only for Release builds or when `dist` is missing; otherwise run `npm run build` after UI changes. Pass `-p:SkipUiBuild=true` to skip. |
 | Debug the page in Rhino | Debug builds: Windows F12 / right-click → Inspect (WebView2 DevTools); macOS right-click → Inspect Element (Web Inspector, 13.3+). |
+| Blank panel, console "Invalid hook call" (Windows) | React got bundled twice because the build ran from a lowercase drive path (`c:\...`, e.g. Git Bash or some VS Code terminals): Vite registers the same file under both casings. Build / `npm run dev` from a `C:\...` working directory (PowerShell) and check that `dist/assets/*.js` contains `__CLIENT_INTERNALS_DO_NOT_USE` 3 times, not 5. |
 
 In Rhino, run `FrepPanel`, or open the Freppuccino panel from the panels menu.
 
@@ -77,7 +80,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
 | `setColor {id, color, preview?}` | ✅ write `SDF.Color` (`"#RRGGBB"`) on a primitive; same preview/commit gesture as `setOperation` (one "F-rep color" undo step per picker drag) |
 | `setParam {id, name, value, preview?}` | ✅ write `SDF.<name>` on a primitive and rebuild its proxy brep (`PrimitiveProxy`); same preview/commit gesture as `setOperation` (one "Edit F-rep parameter" undo step per drag). Sizes must be > 0 (cone radii ≥ 0). sdUser also takes `L` (> 0) and `u.<param>` (declared in the code, any finite value); both written round-trip exact, always stored |
-| `aiTool {callId, tool, args}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md) |
+| `aiTool {callId, tool, args, source?}` | ✅ AI agent tool call (`Ai/AiTools.cs`), see [ai.md](ai.md). The Script tab sends the same calls with `source: "script"` (undo label "Script: …" instead of "AI: …") |
 | `aiSaveRun {title, transcript, images}` | ✅ writes an AI run log (`Ai/AiRunLog.cs`) |
 
 Live edits: the inspector has no Update button. An op click sends one `setOperation`; a Blend drag sends `preview` ticks (≤ ~30 Hz, trailing) then a final one on release. The host (`FrepTrees.Preview`/`Commit`) remembers the tree from before the gesture and records one undo step back to it. A gesture whose final message never arrives is committed by any other page message, any Rhino command (incl. Undo), a page reload / doc switch, or panel close. The page ignores host snapshots for the node while dragging and until the host echoes its last sent value, so stale snapshots can't yank the slider.
@@ -115,6 +118,6 @@ userFn { code,                          // SDF.Code
 
 Any user-text edit (panel, `SetUserText`, an AI agent) fires `ModifyObjectAttributes` → the next Idle sends a new `scene`, so code changes show up without reselecting.
 
-Inspector: read-only code view (`components/code-view.tsx`: line numbers, diagnostic lines tinted red with the message on hover, 240px cap with a resize handle + expand, copy), diagnostics list (click → scroll to line) or "Compiles OK · <hash>", then a slider per declared param, `Lipschitz L`, and the bounding box half-extents. Param slider range from default d: d > 0 → [0, 4d], d < 0 → [4d, 0], d = 0 → [−1, 1]; step ≈ span/100; typed values may go past either end. The code isn't editable from the panel.
+Inspector: read-only code view (`components/code-view.tsx`: line numbers, diagnostic lines tinted red with the message on hover, 240px cap with a resize handle + expand, copy), diagnostics list (click → scroll to line) or "Compiles OK · <hash>", then a slider per declared param, `Lipschitz L`, and the bounding box half-extents. Param slider range from default d: d > 0 → [0, 4d], d < 0 → [4d, 0], d = 0 → [−1, 1]; step ≈ span/100; typed values may go past either end. The code view has an **Edit** button that opens the function in the Script tab (`components/script-panel.tsx`, editor: `components/code-editor.tsx`; see [ai.md](ai.md#coverage-app-features-vs-ai-tools)), where the code is editable, checked as you type, and applied with Ctrl+Enter.
 
 Inspector: one primitive → its color (`SDF.Color`: current-color swatch / picker + hex field; new primitives start white `#FCFCFC`) and parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).
