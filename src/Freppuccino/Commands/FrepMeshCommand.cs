@@ -26,7 +26,7 @@ public class FrepMeshCommand : Command
     // Remembered between runs, like Rhino's own commands.
     static int resolution = 128;
     static double simplify = 0.03;
-    static int refine = 2;
+    static int refine = 0;
     static bool quads;
     // Progress lines pump Rhino's message loop (RhinoApp.Wait) so they paint during the run; this keeps a second
     // FrepMesh from starting inside the first while it does.
@@ -79,7 +79,7 @@ public class FrepMeshCommand : Command
         if (rc != Result.Success) return rc;
         rc = RhinoGet.GetNumber("Simplification tolerance in cells (0 = uniform density)", true, ref simplify, 0, 1);
         if (rc != Result.Success) return rc;
-        rc = RhinoGet.GetInteger("Refine: extra levels where the grid is too coarse for thin features (0 = off)", true, ref refine, 0, 3);
+        rc = RhinoGet.GetInteger("Refine: extra levels for thin features and sharp creases (0 = off, fastest; 1-3 = slower, for models that mesh badly)", true, ref refine, 0, 3);
         if (rc != Result.Success) return rc;
         rc = RhinoGet.GetBool("Remesh to quads with Rhino's QuadRemesh (slower, and it reshapes the surface slightly)", true, "No", "Yes", ref quads);
         if (rc != Result.Success) return rc;
@@ -145,7 +145,7 @@ public class FrepMeshCommand : Command
         // it ran out of steps, say so rather than present the mesh as clean. (Counted on the triangle mesh, before
         // any QuadRemesh, which makes its own surface.)
         if (result.Crossings > 0)
-            quality += $", {result.Crossings} SELF-INTERSECTING triangle pair(s){(quads ? " before QuadRemesh" : "")} (try a higher resolution)";
+            quality += $", {result.Crossings} SELF-INTERSECTING triangle pair(s){(quads ? " before QuadRemesh" : "")} ({(result.Refine < 3 ? $"try Refine {result.Refine + 1} or a higher resolution" : "try a higher resolution")})";
 
         var attributes = doc.CreateDefaultAttributes();
         attributes.Name = "FrepMesh";
