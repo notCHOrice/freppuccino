@@ -96,7 +96,7 @@ export type UiMessage =
   | { type: 'setParam'; id: Id; name: string; value: number; preview?: boolean }
   /** Writes SDF.Color ("#RRGGBB") on a primitive; preview as setOperation (one undo step per gesture). */
   | { type: 'setColor'; id: Id; color: string; preview?: boolean }
-  /** New CSG node over ≥ 2 primitives / nodes. For subtract, operands[0] is the target. */
+  /** New CSG node over top-level primitives / nodes. Union and intersect take any number ≥ 2; subtract takes exactly two (operands[0] is the target). */
   | { type: 'applyOperation'; operands: Id[]; op: OperationKind; k: number }
   /** Insert a blend node (k = 0) directly above a repeat. */
   | { type: 'blendRepeat'; id: Id }

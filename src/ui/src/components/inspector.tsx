@@ -42,11 +42,13 @@ export function Inspector(props: {
         />
       </>
     )
-  const canCombine = selected.length === 2 && selected.every((n) => roots.has(n.id))
+  const canCombine = selected.length >= 2 && selected.every((n) => roots.has(n.id))
   if (canCombine) return <CombineSection key={selected.map((s) => s.id).join()} operands={selected} labels={labels} />
   return (
     <Section title="Combine">
-      <p className="type-small text-muted-foreground">Select exactly two top-level nodes to combine them.</p>
+      <p className="type-small text-muted-foreground">
+        Select two or more top-level nodes. Subtract takes exactly two.
+      </p>
     </Section>
   )
 }
@@ -308,6 +310,7 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
   // Swapping only makes sense for two new operands; otherwise pick order decides the subtract target.
   const canSwap = !existing && props.operands.length === 2
   const operands = canSwap && swapped ? [...props.operands].reverse() : props.operands
+  const subtractOk = operands.length === 2
   const ordered = op === 'subtract'
   const role = (i: number) => (ordered ? (i === 0 ? 'Target' : 'Tool') : `#${i + 1}`)
 
@@ -336,14 +339,21 @@ function CombineSection(props: { operands: SceneNode[]; labels: Map<string, stri
         spacing={0}
         value={op}
         onValueChange={(v) => {
-          if (!v || v === op) return
+          if (!v || v === op || (v === 'subtract' && !subtractOk)) return
           setOp(v as OperationKind)
           edit({ op: v as OperationKind, k }, false)
         }}
         className="w-full"
       >
         {(Object.keys(OPERATIONS) as OperationKind[]).map((kind) => (
-          <ToggleGroupItem key={kind} value={kind} className="flex-1 px-1" aria-label={OPERATIONS[kind].label}>
+          <ToggleGroupItem
+            key={kind}
+            value={kind}
+            disabled={kind === 'subtract' && !subtractOk}
+            title={kind === 'subtract' && !subtractOk ? 'Subtract takes exactly two nodes' : undefined}
+            className="flex-1 px-1"
+            aria-label={OPERATIONS[kind].label}
+          >
             <BrandIcon name={OPERATIONS[kind].icon} /> {OPERATIONS[kind].label}
           </ToggleGroupItem>
         ))}

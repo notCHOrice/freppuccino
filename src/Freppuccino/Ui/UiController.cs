@@ -696,9 +696,12 @@ public sealed class UiController : IDisposable
         if (ParseKind(request.Op) is not { } op) throw new JsonException($"unknown op '{request.Op}'");
         var tree0 = FrepTrees.Get(doc);
         var operands = request.Operands.Select(k => ParseOperand(tree0, k)).OfType<FrepOperand>().Distinct().ToList();
-        if (operands.Count != 2 || operands.Any(tree0.IsReferenced))
+        bool topLevel = operands.Count >= 2 && !operands.Any(tree0.IsReferenced);
+        if (!topLevel || (op == FrepOp.Difference && operands.Count != 2))
         {
-            web.Send(new NoticeMessage("warning", "Select two top-level nodes."));
+            web.Send(new NoticeMessage("warning", op == FrepOp.Difference
+                ? "Subtract takes exactly two top-level nodes."
+                : "Select two or more top-level nodes."));
             return;
         }
         var (tree, node) = tree0.Add(op, Math.Max(0, request.K), operands);
@@ -755,6 +758,7 @@ public sealed class UiController : IDisposable
         }
         if (ParseKind(request.Op) is not { } op) throw new JsonException($"unknown op '{request.Op}'");
         if (node.Op.IsWarp()) return;
+        if (op == FrepOp.Difference && node.Op != FrepOp.Difference && node.Operands.Length != 2) return;
         // Previews apply live; the final message records the whole gesture as one undo step.
         if (node.Op != op || node.K != k) FrepTrees.Preview(doc, tree.WithOp(id, op, k), $"Edit {node.Name}");
         if (!request.Preview) FrepTrees.Commit(doc);
