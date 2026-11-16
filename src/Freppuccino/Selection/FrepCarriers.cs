@@ -34,11 +34,16 @@ public static class FrepCarriers
     static bool dirty = true, saving;
     static readonly HashSet<int> reselect = [];
     static readonly HashSet<string> reselectInstances = [];
+    /// The carrier id from the latest <see cref="RhinoDoc.ReplaceRhinoObject"/>. Move, rotate, and scale replace the
+    /// mesh: the delete that follows is the old object making way for the moved one, not the user removing the blend.
+    static Guid? replacedCarrierId;
 
     public static void Install()
     {
         RhinoApp.Idle += (_, _) =>
         {
+            // A replace with no following delete must not swallow a later real delete of that carrier.
+            replacedCarrierId = null;
             if (!dirty || saving || RhinoDoc.ActiveDoc is not { } doc || Rhino.Commands.Command.InCommand()) return;
             dirty = false;
             Sync(doc);
@@ -50,10 +55,20 @@ public static class FrepCarriers
         RhinoDoc.DeleteRhinoObject += (_, e) =>
         {
             dirty = true;
+            if (replacedCarrierId is Guid id)
+            {
+                replacedCarrierId = null;
+                if (e.TheObject?.Id == id) return;
+            }
             if (internalDeletes == 0) OnUserDelete(e.TheObject);
         };
         RhinoDoc.UndeleteRhinoObject += (_, _) => dirty = true;
-        RhinoDoc.ReplaceRhinoObject += (_, _) => dirty = true;
+        RhinoDoc.ReplaceRhinoObject += (_, e) =>
+        {
+            dirty = true;
+            if (e.OldRhinoObject is FrepCarrier && e.ObjectId != Guid.Empty)
+                replacedCarrierId = e.ObjectId;
+        };
         RhinoDoc.ModifyObjectAttributes += (_, _) => dirty = true;
         RhinoDoc.EndOpenDocument += (_, _) => dirty = true;
         RhinoDoc.BeginSaveDocument += (_, e) =>
@@ -245,7 +260,7 @@ public static class FrepCarriers
     /// The user deleted a carrier: delete what it stands for, in the same undo record (as a viewport delete of a leaf
     /// prunes the tree in UiController). Node carrier: the blend, i.e. its subtree's nodes, leaves and warp reference
     /// objects, except those another root still uses. Instance carrier: the leaf object. Undo/redo replay the recorded
-    /// edits themselves.
+    /// edits themselves. A gumball or Move/Rotate/Scale never reaches this: that delete is the carrier being replaced.
     static void OnUserDelete(RhinoObject? o)
     {
         if (o is not FrepCarrier || o.Document is not { } doc || doc.UndoActive || doc.RedoActive) return;
