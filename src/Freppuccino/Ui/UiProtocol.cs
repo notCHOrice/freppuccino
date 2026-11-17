@@ -151,7 +151,7 @@ public sealed record SetParamRequest(string Id, string Name, double Value, bool 
 /// Set a primitive's SDF.Color ("#RRGGBB"). Preview = live picker tick (no undo); the next non-preview one ends the gesture as one undo step.
 public sealed record SetColorRequest(string Id, string Color, bool Preview = false);
 
-/// New CSG node over operands (primitive or node ids, ≥ 2). For subtract, operands[0] is the target.
+/// New CSG node over top-level operands. Union and intersect take any number ≥ 2; subtract takes exactly two (operands[0] is the target).
 public sealed record ApplyOperationRequest(string[] Operands, string Op, double K);
 
 /// Insert a blend node (k = 0) directly above a Repeat. Its slider fillets the copies.

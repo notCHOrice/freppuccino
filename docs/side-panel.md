@@ -76,7 +76,7 @@ Ids are strings: a primitive's Rhino object id (GUID), or a CSG node's name (`N3
 | `setVisible {id, visible}` | ✅ primitive: Rhino show/hide; node: `FrepNode.Hidden`, dropped from the shader like a hidden primitive (undoable) |
 | `runCommand {command}` | ✅ whitelist only (`UiController.AllowedCommands`): `FBox`, `FSphere`, `FCylinder`, `FCone`, `FPyramid`, `FEllipsoid`, `FTorus`, `FFunction`, `FTwist`, `FBend`, `FRepeat`, `Freppuccino` |
 | `showFrepMode` | ✅ switch the active view to the Freppuccino display mode. Sent by the "F-rep display mode" button, shown under the header while `frepMode` is false |
-| `applyOperation {operands, op, k}` | ✅ new CSG node; selects it |
+| `applyOperation {operands, op, k}` | ✅ new CSG node over top-level operands; selects it. Union and intersect take ≥ 2; subtract takes exactly two |
 | `setOperation {id, op, k, preview?}` | ✅ edit a node live. `preview: true` = drag tick, applied without undo; the next non-preview one ends the gesture as one undo step |
 | `setNodeParam {id, name, value, preview?}` | ✅ edit a twist/bend/repeat param; same preview/commit gesture as `setOperation` |
 | `deleteNodes {ids}` | ✅ nodes still used by other nodes are kept |
@@ -122,4 +122,4 @@ Any user-text edit (panel, `SetUserText`, an AI agent) fires `ModifyObjectAttrib
 
 Inspector: read-only code view (`components/code-view.tsx`: line numbers, diagnostic lines tinted red with the message on hover, 240px cap with a resize handle + expand, copy), diagnostics list (click → scroll to line) or "Compiles OK · <hash>", then a slider per declared param, `Lipschitz L`, and the bounding box half-extents. Param slider range from default d: d > 0 → [0, 4d], d < 0 → [4d, 0], d = 0 → [−1, 1]; step ≈ span/100; typed values may go past either end. The code view has an **Edit** button that opens the function in the Script tab (`components/script-panel.tsx`, editor: `components/code-editor.tsx`; see [ai.md](ai.md#coverage-app-features-vs-ai-tools)), where the code is editable, checked as you type, and applied with Ctrl+Enter.
 
-Inspector: one primitive → its color (`SDF.Color`: current-color swatch / picker + hex field; new primitives start white `#FCFCFC`) and parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected → combine them (pick order; first = subtract target).
+Inspector: one primitive → its color (`SDF.Color`: current-color swatch / picker + hex field; new primitives start white `#FCFCFC`) and parameters; one node → edit op / k live (no Update button), delete; ≥ 2 selected top-level nodes → combine them (union and intersect take any number; subtract takes exactly two; pick order; first = subtract target).

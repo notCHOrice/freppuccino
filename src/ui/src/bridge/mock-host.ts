@@ -166,7 +166,19 @@ export function createMockHost(): Transport {
       }
       case 'applyOperation': {
         const all = flat(scene)
+        const rootIds = new Set(scene.map((x) => x.id))
         const operands = m.operands.map((x) => all.find((y) => y.id === x)).filter((x) => !!x)
+        const topLevel = operands.length >= 2 && operands.every((o) => rootIds.has(o.id))
+        if (!topLevel || (m.op === 'subtract' && operands.length !== 2)) {
+          emit({
+            type: 'notice',
+            level: 'warning',
+            text: m.op === 'subtract'
+              ? 'Subtract takes exactly two top-level nodes.'
+              : 'Select two or more top-level nodes.',
+          })
+          break
+        }
         const node = opNode(m.op, m.k, operands)
         scene = [...scene.filter((x) => !m.operands.includes(x.id)), node]
         selection = [node.id]
@@ -175,7 +187,11 @@ export function createMockHost(): Transport {
         break
       }
       case 'setOperation':
-        scene = map(scene, (x) => (x.id === m.id ? { ...x, op: m.op, k: m.k } : x))
+        scene = map(scene, (x) => {
+          if (x.id !== m.id) return x
+          if (m.op === 'subtract' && x.op !== 'subtract' && (x.children?.length ?? 0) !== 2) return x
+          return { ...x, op: m.op, k: m.k }
+        })
         emit({ type: 'scene', scene })
         break
       case 'setNodeParam':
