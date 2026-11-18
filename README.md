@@ -6,7 +6,7 @@ Freppuccino makes implicit geometry available natively in Rhino for everyone.
 
 Ben Howes
 Dan Cascaval
-Danniel Chovaladao
+Danniel Cho Valadao
 Luke G
 Mathieu Huard
 Callum Sykes
