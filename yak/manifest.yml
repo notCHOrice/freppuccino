@@ -1,0 +1,39 @@
+name: Freppuccino
+version: $version
+authors:
+- Ben Howes
+- Callum Sykes
+- Dan Cascaval
+- Danniel Cho Valadao
+- Luke Gehron
+- Mathieu Huard
+- Sam Potter
+- Sergey Pigach
+description: >
+  Freppuccino makes implicit geometry (F-reps) available natively in Rhino.
+  Create F-rep boxes, spheres, cylinders, cones, tori, ellipsoids, pyramids and custom FFunctions,
+  blend them with smooth unions, subtractions and intersections, warp them with twist, bend and repeat,
+  edit them live with the gumball and mesh them to clean meshes with FrepMesh.
+  Run the Freppuccino command to open the panel. Requires Rhino 9 (Windows or Mac) or Rhino 8.19+ (Windows). MIT licensed.
+url: "https://github.com/sampotter/freppuccino"
+icon: icon.png
+keywords:
+- freppuccino
+- frep
+- f-rep
+- implicit
+- implicit-modeling
+- sdf
+- signed-distance-field
+- csg
+- blend
+- fillet
+- boolean
+- union
+- subtract
+- intersect
+- twist
+- bend
+- repeat
+- shader
+- mesh

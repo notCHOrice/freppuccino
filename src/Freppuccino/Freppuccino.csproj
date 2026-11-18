@@ -1,28 +1,78 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
     <TargetExt>.rhp</TargetExt>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
-    <Version>0.1.0</Version>
+    <Version>0.1.3</Version>
     <Title>Freppuccino</Title>
     <Description>Freppuccino Rhino plugin</Description>
     <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
 
-  <ItemGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <DefineConstants>$(DefineConstants);RHINO9</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <DefineConstants>$(DefineConstants);RHINO8</DefineConstants>
+    <RhinoCommon8 Condition="'$(RhinoCommon8)' == ''">8.19.25132.1001</RhinoCommon8>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
     <PackageReference Include="RhinoCommon" Version="9.0.26300.9401" ExcludeAssets="runtime" PrivateAssets="all" />
-    <!-- native binaries only; P/Invokes are ours (Shaders/) -->
-    <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommon8)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <Compile Remove="Gpu/D3D11/**" />
   </ItemGroup>
 
   <ItemGroup>
+    <!-- native binaries only; P/Invokes are ours (Shaders/) -->
+    <PackageReference Include="Silk.NET.Shaderc.Native" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
+    <!-- Side panel: compile against the WebView2 Core API only; Rhino 9 ships the runtime assemblies (same version). -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.1938.49" IncludeAssets="compile" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    Side panel UI (src/ui: React + Vite + shadcn). `npm run build` writes src/ui/dist, which is copied to $(OutDir)ui
+    and served by Ui/WebViewHost.cs. Always built for Release; otherwise rebuilt incrementally, whenever any UI
+    source is newer than dist/index.html (or dist is missing), so a stale bundle never gets copied.
+    Pass -p:SkipUiBuild=true to skip (e.g. when using the dev server, see docs/side-panel.md).
+  -->
+  <PropertyGroup>
+    <UiDir>$(MSBuildProjectDirectory)/../ui/</UiDir>
+    <UiDist>$(UiDir)dist/</UiDist>
+    <!-- Release: point at a file that never exists so the target always runs. -->
+    <UiBuildOutput>$(UiDist)index.html</UiBuildOutput>
+    <UiBuildOutput Condition="'$(Configuration)' == 'Release'">$(UiDist).always-rebuild</UiBuildOutput>
+  </PropertyGroup>
+  <ItemGroup>
+    <UiSources Include="$(UiDir)src/**/*;$(UiDir)index.html;$(UiDir)package.json;$(UiDir)package-lock.json;$(UiDir)vite.config.ts;$(UiDir)tsconfig*.json;$(UiDir)components.json;$(UiDir).env*;$(MSBuildProjectDirectory)/../../.claude/skills/freppuccino-*/SKILL.md" />
+  </ItemGroup>
+  <Target Name="BuildUi" BeforeTargets="Build" Condition="'$(SkipUiBuild)' != 'true' and '$(TargetFramework)' != ''" Inputs="@(UiSources)" Outputs="$(UiBuildOutput)">
+    <Exec Command="npm ci" WorkingDirectory="$(UiDir)" Condition="!Exists('$(UiDir)node_modules')" ContinueOnError="WarnAndContinue" />
+    <Exec Command="npm run build" WorkingDirectory="$(UiDir)" ContinueOnError="WarnAndContinue" />
+  </Target>
+  <Target Name="CopyUi" AfterTargets="Build" Condition="'$(TargetFramework)' != '' and '$(OutDir)' != ''">
+    <Warning Condition="!Exists('$(UiDist)index.html')" Text="Side panel UI not built (src/ui/dist missing); the panel will show a placeholder. Run npm install + npm run build in src/ui." />
+    <ItemGroup>
+      <UiFiles Include="$(UiDist)**/*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(OutDir)ui" Condition="'@(UiFiles)' != ''" />
+    <Copy SourceFiles="@(UiFiles)" DestinationFiles="@(UiFiles->'$(OutDir)ui/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+
+  <ItemGroup>
     <EmbeddedResource Include="EmbeddedResources/**/*" />
+    <!-- FFunction guide, single source for: external Claude Code (skill), the panel agent (src/ui/src/ai/skills.ts), AiTools help. -->
+    <EmbeddedResource Include="$(MSBuildProjectDirectory)/../../.claude/skills/freppuccino-ffunction/SKILL.md" LogicalName="Freppuccino.ffunction.md" />
+    <None Include="EmbeddedResources/plugin-freppuccino.ico" Link="icon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Freppuccino.rui" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- THROWAWAY hack kept for reference, not compiled -->
@@ -33,11 +83,11 @@
   <!-- `dotnet run` launches Rhino 9 w/ RHINO_PACKAGE_DIRS pointing at the build output, so the .rhp auto-loads. -->
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
     <RunCommand>/usr/bin/env</RunCommand>
-    <RunArguments>FREPPUCCINO_AUTOSTART=1 RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
+    <RunArguments>FREPPUCCINO_AUTOSTART=1 FREPPUCCINO_AI_RUNS_DIR="$(MSBuildProjectDirectory)/../../ai-runs" RHINO_PACKAGE_DIRS="$(MSBuildProjectDirectory)/bin/$(Configuration)/$(TargetFramework)/" "/Applications/Rhino 9.app/Contents/MacOS/Rhinoceros" -nosplash</RunArguments>
   </PropertyGroup>
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <RunCommand>cmd.exe</RunCommand>
-    <RunArguments>/c "set FREPPUCCINO_AUTOSTART=1&amp;&amp; set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
+    <RunArguments>/c "set FREPPUCCINO_AUTOSTART=1&amp;&amp; set FREPPUCCINO_AI_RUNS_DIR=$(MSBuildProjectDirectory)\..\..\ai-runs&amp;&amp; set RHINO_PACKAGE_DIRS=$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\&amp;&amp; "C:\Program Files\Rhino 9\System\Rhino.exe" /nosplash"</RunArguments>
   </PropertyGroup>
 
 </Project>

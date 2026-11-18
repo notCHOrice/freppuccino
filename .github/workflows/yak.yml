@@ -1,0 +1,112 @@
+name: Yak
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: yak-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  YAK_CLI_URL: https://files.mcneel.com/yak/tools/0.19.1/win-x64/yak.exe
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Test
+        run: dotnet test tests/UserFn.Tests/UserFn.Tests.csproj -c Release
+
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      package: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: src/ui
+        run: npm ci
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            $base = ([xml](Get-Content src/Freppuccino/Freppuccino.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+            $version = "$base-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Invalid version '$version'. Tags must look like v1.2.3 or v1.2.3-beta.1" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version"
+
+      - name: Download Yak CLI
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'yak'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          Invoke-WebRequest -Uri $env:YAK_CLI_URL -OutFile (Join-Path $dir 'yak.exe')
+          "YAK_EXE=$(Join-Path $dir 'yak.exe')" >> $env:GITHUB_ENV
+
+      - name: Build Yak package
+        shell: pwsh
+        run: ./yak/build-yak.ps1 -Version '${{ steps.version.outputs.version }}' -Yak $env:YAK_EXE
+
+      - name: Package name
+        id: package
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem artifacts/yak -Filter *.yak)
+          if ($packages.Count -ne 2) { throw "Expected 2 .yak packages (Rhino 9 and Rhino 8), got $($packages.Count)." }
+          "name=freppuccino-${{ steps.version.outputs.version }}-yak" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: artifacts/yak/*.yak
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.package }}
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.yak
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}

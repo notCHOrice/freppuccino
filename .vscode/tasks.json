@@ -18,6 +18,15 @@
       "problemMatcher": "$msCompile",
       "presentation": { "reveal": "always", "clear": true },
       "group": "build"
+    },
+    {
+      "label": "build yak",
+      "command": "powershell",
+      "type": "shell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/yak/build-yak.ps1"],
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "clear": true },
+      "group": "build"
     }
   ]
 }

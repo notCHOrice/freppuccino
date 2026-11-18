@@ -23,8 +23,46 @@ Conventions every generated shader follows:
 - Fragment output: `layout(location=0) out vec4`.
 
 Programs:
-- `Shaders/FrepShaderGen.cs`: scene. N spheres (doc Breps, `Scene/SphereScene.cs`) smooth-unioned (IQ quadratic smin, k = `FrepBlend` command, default 0.5 model units), raymarched on a fullscreen triangle. N is baked into the source (one cached compile per N); camera/frustum/spheres/k are uniforms. Shade: `mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Cap 251 spheres (4 KB).
-- `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground.
+- `Shaders/FrepShaderGen.cs`: scene. SDF prims (`Scene/FrepScene.cs`) + per-doc CSG DAG (`Csg/FrepTree.cs`: FUnion/FIntersect/FDifference nodes, IQ quadratic smin/smax, per-node k) compiled to `map()`; parentless prims/nodes hard-min'd at root. FTwist/FBend/FRepeat nodes warp the point for their subtree (`opTwist`/`opBend`/`opRepeat`; each warp = new point context, subtree re-emitted per context), driven by a live Rhino line/box (`Csg/FrepRefs.cs`); deleted line/box = child drawn unwarped; twist/bend divide the child distance by a local Lipschitz bound. Raymarched on a fullscreen triangle, only inside `bound` (sphere around the warped scene's box, from in-memory prims/warps so it follows drags). Structure baked into source (cached by generated map + color code); camera/frustum/bound/prims/colors/warp frames/k's are uniforms. Color: each prim's `SDF.Color` user text (`"#RRGGBB"`, white `#FCFCFC` by default / if missing, set from the panel; packed 0xRRGGBB floats, 4 per row after the prim rows); `sceneColor()` replays the DAG (incl. warp contexts) over `vec4(rgb, d)` once at the hit point: union/intersect mix operand colors by the smin/smax weight (pure away from the blend, fading across a smooth fillet; k = 0 picks the nearer operand), difference keeps the base's color, warps keep the child's. Shade: `color * mix(0.78, 1, n.z*0.5+0.5)`. Misses `discard`; depth off. Silhouette inset by `FrepShaderGen.SilhouetteInsetPx` (1 px, `params.x`: SDF + inset × pixel footprint at t) so Rhino's wires drawn underneath stay visible around the shading. 4 KB uniform cap (prims past it dropped).
+- `Shaders/PillShader.cs`: "FREP MODE" badge background (old debug triangle's RGB as a gradient in an SDF rounded rect, 6 verts); text by Rhino `Draw2dText` in DrawForeground. Placed top-left just below Rhino's viewport title (`TitleClearance`) so view names don't overlap it.
+
+### Scene uniform layout
+
+FZebra (`Commands/FZebraCommand.cs`, window `Ui/ZebraOptionsForm.cs`, session-only `FrepSettings.Zebra*`): like Rhino's Zebra, the command opens a modeless "Zebra Options" window (stripe direction vertical/horizontal, stripe size thin↔thick, two stripe colors, all live); zebra is on while it is open, closing it (or `FZebraOff`) turns it off. Header row `zebraCfg` = (stripe count, 0 = off; 1 vertical / 0 horizontal; color 1; color 2 as packed 0xRRGGBB). `sceneColor()` also flags hits within the pixel tolerance of any FUnion node's surface (fillets included); those pixels are drawn unlit in bands of the reflected view direction's angle from the camera's right (vertical) or up (horizontal) axis. Uniforms only, so changing options never recompiles.
+
+Header (8 vec4 rows, `HeaderRows`): camPos, camX, camY, camZ, frustum, params, bound, zebraCfg. Then data rows in `Compile()` order: prims (`FrepShaderGen.Rows(prim)`), prim colors (4 per row), warp rows (one block per live warp, tree order), node k's (4 per row). `PrimRowBudget(tree)` = data rows − k rows − warp rows (prims + their color rows must fit); prims past it are dropped.
+
+Prim rows:
+- sphere: 1 row (center, s).
+- ellipsoid: 3 rows (origin, r.x), (unit X, r.y), (unit Y, r.z); Z = X × Y.
+- box / torus / cylinder / cone / pyramid: 4 rows (origin, P.x), (A⁻¹ row 0, P.y), (A⁻¹ row 1, P.z), (A⁻¹ row 2, σ_min(A)). A = canonical-to-world map (`SDF.Linear.*`, else the frame axes, σ_min = 1); distance × σ_min stays 1-Lipschitz.
+- function (FFunction, `SDF.Type = sdUser`): the 4 box rows (P = clip box half-extents b) + ⌈(1 + n)/4⌉ rows for n params: `.x` of the first = L, then the n param values in declaration order, packed xyzw.
+
+### FFunctions (user code)
+
+Per-object DSL source (`SDF.Code`, compiled by `UserFn/UserFnCompiler`, cached by source) → GLSL `float ufn_<hash>(vec3 p, float u0, …)`, emitted once per distinct program before `map()`; term = `max(ufn_<hash>(q, params…) / L, sdBox(q, b)) * σ_min` with q from `toLocalAffine` (world units, box frame). Params/L are uniforms (sliders never recompile); the code is structure (editing it recompiles; the shader cache key includes the program hashes). The fragment shader's shared helpers (smin, smax, dot2, sdBox, sdTorus, sdCappedCylinder, sdCappedCone, sdEllipsoid, sdPyramid, sdPyramidScaled) come from `UserFnLibrary.Glsl`, the same library user code calls. A function whose code doesn't compile is dropped like an over-budget prim (missing leaf; `FrepSceneData.FailedFunctions`). Transforms: rigid → frame; any scale / shear → `SDF.Linear.*` (the function stretches with the box; b is never rescaled). Mesher: `FieldKind.User` evaluates the program's C# delegate (`UserFnProgram.Cpu`) the same way. Guide for users / agents: `.claude/skills/freppuccino-ffunction/SKILL.md`.
+
+### Shader compile failures
+
+Backends cache failures per `ShaderSource.Hash` (never retried) and report them via `IGpuBackend.CompileError`. `ShaderConduit` then draws the doc's last successfully drawn scene program instead, but only if its `ShaderSource.Layout` (per-prim row shapes + warp ops + k count) equals the failed one's, so it reads the current uniforms correctly (e.g. function code edited, param count unchanged); otherwise it draws nothing. `ShaderConduit.ShaderError(doc)` reports the build error of the doc's current scene program (via `IGpuBackend.Compile`, which builds it on the last-seen device if no draw has yet, so AI tools see it before the redraw), shown by `get_function` / `get_scene`. Metal keeps shader-compile errors per hash and PSO errors per (hash, format); `CompileError` reports the former, else the PSO error for the format it draws with.
+
+### Warps (FTwist / FBend / FRepeat)
+
+One operand each. Node stores `Ref` (Guid of a Rhino line or box, read live via `Csg/FrepRefs.cs`; hidden ok) + `Params`. Moving the ref (incl. gumball drag) updates the warp without recompiling.
+
+| Op | Ref | Params | Rows | Behaviour |
+|---|---|---|---|---|
+| Twist | line | angle (°, total start→end) | 2: (start, rad/unit), (dir, extent) | rotate about the infinite axis; linear past the ends |
+| Bend | line | angle (°, over line length), direction (° about axis; 0 = world +Z ⟂ axis, +X if axis vertical) | 3: (start, L), (dir, β), (n, minR) | arc of radius L/β; before start unchanged, past end rigid tangent continuation |
+| Repeat | box | x, y, z spacing (model units) | 6: (anchor, sx), (X, sy), (Y, sz), lo, hi, reach | lattice anchored at child bbox centre, axes = box frame; lo/hi so copies stay in the box; min over cells that can hold the nearest copy ([IQ](https://iquilezles.org/articles/sdfrepetition/)): clamped nearest cell + neighbor on p's side (2×2×2), widened by reach = child half-extent / s (≤ 2) when copies overlap |
+
+- Codegen: each warp opens a point context `q{c}`; its subtree is re-emitted in that context (memoized by operand × context). Repeat emits the subtree once inside a cell loop (`repeatCells` / `repeatAt`), min'd into the node value.
+- Distance: twist/bend divide the child value by a per-point Lipschitz bound (`l{c}`, clamped by child extent); repeat doesn't (rigid); exact for any child shape up to reach 2 (child ≤ ~4 spacings wide), may overshoot past that.
+- Missing cases: ref deleted / wrong type → passthrough (child unwarped; panel says so); child missing → empty; node hidden → absent.
+- `bound` (raymarch sphere): computed per frame from in-memory prims/warps (`FrepShaderGen.Bound`), so it follows drags. Prims = sphere around frame origin (functions: their clip box); union/intersect = union of operand boxes; difference = base; hidden node = absent; warps via `FrepField.WarpBox` (shared with the mesher): twist = cylinder about axis over child's axial span, bend = child box ∪ annular arc sector ∪ rigidly moved tail corners, repeat = child box ⊕ farthest cell offsets. Padded by Σk × max ellipsoid stretch. `FrepScene.Bounds` (warp extent/anchor, nested warps) uses the same `Warped`.
+- Shared math: `Csg/FrepWarpMath.cs` (ref resolution, `SdWarp` extent/anchor, packed rows, bend frame) feeds both the shader uniforms and the mesher.
+- Mesher (`Meshing/FrepField.cs`): line-for-line port of `opTwist`/`opBend`/`opRepeat` with per-warp point contexts (one per repeat cell); keep in sync with the GLSL.
+- Known: bend `lip` jumps between arc and straight regions (field shrinks, surface unaffected); twist/bend Lipschitz clamp only holds within child extent; repeat assumes the child fits one cell.
 
 Original slice program (removed):
 
@@ -50,10 +88,10 @@ Native deps: `Silk.NET.Shaderc.Native` + `Silk.NET.SPIRV.Cross.Native` (2.23.0) 
 ```
 FreppuccinoPlugin (AtStartup)
   OnLoad: NativeLibs.Install(); FreppuccinoDisplayMode.Ensure(); Conduit = new ShaderConduit { Enabled = true }
-FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(ShadedId), HighlightSurfaces=false + UpdateDisplayMode (recreated if an old wireframe copy exists)
-ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if N>0; Draw(pill) → RhinoStateReset.Apply(dp) once
+FreppuccinoDisplayMode.Ensure()   FindByName ?? CopyDisplayMode(GhostedId) + 80% transparency + UpdateDisplayMode   (Ghosted underlay; recreated if missing or not ghosted at 80%, e.g. an older Wireframe copy)
+ShaderConduit.PostDrawObjects(e) if mode active: Draw(scene) if root non-empty; Draw(pill) → RhinoStateReset.Apply(dp) once
 ShaderConduit.DrawForeground(e)  badge text
-Command "FrepBlend"               set smooth-union k (session only)
+Commands FUnion/FIntersect/FDifference  add CSG node (Blend option); FTwist/FBend/FRepeat wrap one operand, pick axis line / box; FrepPanel lists the tree (edit op/k, delete, click node = pick it)
 GpuBackends.For(p)               switch p.Technology: Metal → MetalBackend, Direct3d11 → D3D11Backend, else null
 Command "Freppuccino"             set active viewport to the mode
 ```

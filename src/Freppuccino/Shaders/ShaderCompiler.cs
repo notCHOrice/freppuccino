@@ -38,10 +38,11 @@ public static class ShaderCompiler
     }
 
     /// Uniform block (set 0, binding 0) -> [[buffer(Uniforms.MetalIndex)]].
-    public static string ToMsl(byte[] spirv, ShaderStage stage) => Xc.Cross(spirv, Xc.BackendMsl, (Xc.OptMslVersion, 20100),
+    public static string ToMsl(byte[] spirv, ShaderStage stage) => Xc.Cross(spirv, Xc.BackendMsl, [(Xc.OptMslVersion, 20100)],
         comp => Xc.MslBind(comp, stage, 0, 0, Uniforms.MetalIndex));
     /// Uniform block -> cbuffer register(b0) (from the binding decoration).
-    public static string ToHlsl(byte[] spirv) => Xc.Cross(spirv, Xc.BackendHlsl, (Xc.OptHlslShaderModel, 50));
+    public static string ToHlsl(byte[] spirv) => Xc.Cross(spirv, Xc.BackendHlsl, [(Xc.OptHlslShaderModel, 50)]);
+    public static string ToGlsl(byte[] spirv) => Xc.Cross(spirv, Xc.BackendGlsl, [(Xc.OptGlslVersion, 410), (Xc.OptGlsl420Pack, 0)]);
 
     static class Sc
     {
@@ -65,7 +66,9 @@ public static class ShaderCompiler
     static class Xc
     {
         const string L = NativeLibs.SpirvCross;
-        public const int BackendHlsl = 2, BackendMsl = 3;           // spvc_backend
+        public const int BackendGlsl = 1, BackendHlsl = 2, BackendMsl = 3; // spvc_backend
+        public const int OptGlsl420Pack = 0x2000000 | 7;
+        public const int OptGlslVersion = 0x2000000 | 8;
         const int CaptureTakeOwnership = 1;                          // spvc_capture_mode
         public const int OptMslVersion = 0x8000000 | 17;             // SPVC_COMPILER_OPTION_MSL_VERSION
         public const int OptHlslShaderModel = 0x4000000 | 13;        // SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL
@@ -91,7 +94,7 @@ public static class ShaderCompiler
         }
 
         /// All spvc allocations belong to the context; destroying it frees everything (incl. the returned string, copied first).
-        public static string Cross(byte[] spirv, int backend, (int opt, uint value) option, Action<IntPtr>? configure = null)
+        public static string Cross(byte[] spirv, int backend, (int opt, uint value)[] options, Action<IntPtr>? configure = null)
         {
             if (spirv.Length == 0 || spirv.Length % 4 != 0) throw new ShaderCompileException($"spirv-cross: bad SPIR-V length {spirv.Length}");
             var words = new uint[spirv.Length / 4];
@@ -102,7 +105,7 @@ public static class ShaderCompiler
                 Check(spvc_context_parse_spirv(ctx, words, (nuint)words.Length, out var ir), ctx);
                 Check(spvc_context_create_compiler(ctx, backend, ir, CaptureTakeOwnership, out var comp), ctx);
                 Check(spvc_compiler_create_compiler_options(comp, out var opts), ctx);
-                Check(spvc_compiler_options_set_uint(opts, option.opt, option.value), ctx);
+                foreach (var (opt, value) in options) Check(spvc_compiler_options_set_uint(opts, opt, value), ctx);
                 Check(spvc_compiler_install_compiler_options(comp, opts), ctx);
                 configure?.Invoke(comp);
                 Check(spvc_compiler_compile(comp, out var src), ctx);

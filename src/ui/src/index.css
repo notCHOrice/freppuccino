@@ -1,0 +1,202 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/*
+  FRepuccino brand kit (brand-kit/tokens.json) mapped onto shadcn's variables.
+  Themes: Latte (light) and Espresso (dark); the host picks one to match Rhino.
+  Fonts are bundled from brand-kit/fonts (copied to src/brand/fonts).
+*/
+
+@font-face {
+  font-family: "Fredoka";
+  src: url("./brand/fonts/Fredoka-Variable.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: block;
+}
+@font-face {
+  font-family: "Nunito";
+  src: url("./brand/fonts/Nunito-Variable.woff2") format("woff2");
+  font-weight: 200 1000;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./brand/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: block;
+}
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-heading: "Fredoka", "Nunito", ui-rounded, system-ui, sans-serif;
+  --font-sans: "Nunito", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  /* shadcn semantic colours */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* brand colours, for when the semantic name doesn't fit */
+  --color-ink: var(--ink);
+  --color-espresso: #3b2620;
+  --color-mocha: var(--mocha);
+  --color-caramel: #e0954a;
+  --color-caramel-ink: var(--caramel-ink);
+  --color-latte: var(--latte);
+  --color-whip: var(--whip);
+  --color-berry: #f27a93;
+  --color-berry-ink: var(--berry-ink);
+  --color-ice: #9ed3ee;
+  --color-ice-ink: var(--ice-ink);
+  --color-matcha: #8fcb9b;
+  --color-matcha-ink: var(--matcha-ink);
+  --color-surface-raised: var(--card);
+  --color-surface-sunken: var(--muted);
+
+  /* radius-sm / md / lg / xl / pill */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  --shadow-sticker: var(--sticker);
+  --shadow-float: var(--float);
+}
+
+/* Latte */
+:root {
+  --background: #fff8ef; /* surface */
+  --foreground: #3b2620; /* ink */
+  --card: #ffffff; /* surface-raised */
+  --card-foreground: #3b2620;
+  --popover: #ffffff;
+  --popover-foreground: #3b2620;
+  --primary: #e0954a; /* caramel */
+  --primary-foreground: #3b2620; /* on-caramel — never white */
+  --secondary: #efd3ae; /* latte */
+  --secondary-foreground: #3b2620;
+  --muted: #f6eadb; /* surface-sunken */
+  --muted-foreground: #7a5e50; /* ink-muted */
+  --accent: #efd3ae; /* latte: hover + selected rows */
+  --accent-foreground: #3b2620;
+  --destructive: #b92d3a; /* cherry */
+  --border: #ead8c3; /* line: decorative dividers only */
+  --input: #9a7b62; /* control-border */
+  --ring: #2b6a8c; /* ice-ink focus ring */
+  --radius: 16px;
+
+  --ink: #3b2620;
+  --mocha: #8a5a3c;
+  --caramel-ink: #a3560f;
+  --latte: #efd3ae;
+  --whip: #fffdf9;
+  --berry-ink: #b5354f;
+  --ice-ink: #2b6a8c;
+  --matcha-ink: #2f6b3e;
+  --wordmark-accent: #e0954a;
+
+  --sticker: 0 3px 0 0 #3b2620;
+  --float: 0 10px 30px rgba(59, 38, 32, 0.16);
+}
+
+/* Espresso */
+.dark {
+  --background: #1e1512;
+  --foreground: #fbefe2;
+  --card: #2a1e19;
+  --card-foreground: #fbefe2;
+  --popover: #2a1e19;
+  --popover-foreground: #fbefe2;
+  --primary: #e0954a;
+  --primary-foreground: #3b2620;
+  --secondary: #5a4234;
+  --secondary-foreground: #fbefe2;
+  --muted: #160f0d;
+  --muted-foreground: #c4ac9c;
+  --accent: #5a4234;
+  --accent-foreground: #fbefe2;
+  --destructive: #ff8a8f;
+  --border: #3e2e27;
+  --input: #8a6e5e;
+  --ring: #9ed3ee;
+
+  --ink: #fbefe2;
+  --mocha: #c99470;
+  --caramel-ink: #f0b070;
+  --latte: #5a4234;
+  --whip: #fff4e6;
+  --berry-ink: #f7a1b0;
+  --ice-ink: #9ed3ee;
+  --matcha-ink: #9fd6ab;
+  --wordmark-accent: #f0b070;
+
+  --sticker: 0 3px 0 0 #0d0807;
+  --float: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    font-size: 14px; /* body */
+    font-weight: 500;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+@layer components {
+  /* Type styles from the brand kit */
+  .type-heading {
+    font-family: var(--font-heading);
+    font-size: 16px;
+    line-height: 22px;
+    font-weight: 600;
+  }
+  .type-label {
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .type-small {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+  }
+  .type-numeric {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .type-command {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 600;
+  }
+}
